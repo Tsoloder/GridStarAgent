@@ -1,0 +1,50 @@
+{
+  "name": "structured_continuation",
+  "description": "tool_params 确认后 LLM 重出 tool_params→拦截重试→工具执行",
+  "input": {
+    "session_id": "test-struct-001",
+    "message": "<structured_interaction><tool_params_confirmed tool=\"ImportCAD\"><params>{\"file\":\"wing.txt\"}</params></tool_params_confirmed></structured_interaction>",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "```json\n{\"tool_params\": {\"tool\": \"ImportCAD\", \"params\": {\"file\": \"wing.txt\"}}}\n```"},
+        {"type": "usage", "input": 70, "output": 20, "total": 90}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "正在导入。"},
+        {"type": "tool_call", "id": "tc-struct-001", "name": "ImportCAD", "args": {"file": "wing.txt"}},
+        {"type": "usage", "input": 90, "output": 15, "total": 105}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "导入完成。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"continue\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 110, "output": 25, "total": 135}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "ImportCAD": "成功导入文件 wing.txt"
+  },
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "heartbeat",
+    "text_chunk",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "text_chunk",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "导入完成"
+}

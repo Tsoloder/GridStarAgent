@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+openai>=1.30
+httpx>=0.27
+fastmcp>=3.4,<4
+pypdf>=4,<7
+requests>=2.31
+pywin32>=306; platform_system == "Windows"

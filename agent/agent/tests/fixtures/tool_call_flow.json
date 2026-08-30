@@ -1,0 +1,42 @@
+{
+  "name": "tool_call_flow",
+  "description": "工具调用流程：用户问→tool_call→tool_result→LLM答→done",
+  "input": {
+    "session_id": "test-tool-001",
+    "message": "导入翼型 NACA0012",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "好的，正在导入翼型。"},
+        {"type": "tool_call", "id": "tc-001", "name": "ImportCAD", "args": {"file": "NACA0012.txt"}},
+        {"type": "usage", "input": 80, "output": 15, "total": 95}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "导入完成。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"continue\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 120, "output": 30, "total": 150}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "ImportCAD": "成功导入翼型 NACA0012，顶点数: 120"
+  },
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "text_chunk",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "导入完成"
+}

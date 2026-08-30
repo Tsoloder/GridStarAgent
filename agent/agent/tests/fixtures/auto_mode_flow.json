@@ -1,0 +1,45 @@
+{
+  "name": "auto_mode_flow",
+  "description": "auto 模式：phase_plan + 工具执行",
+  "input": {
+    "session_id": "test-auto-001",
+    "message": "开始网格划分流程",
+    "interaction_mode": "auto",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "好的，开始网格划分。"},
+        {"type": "text_chunk", "delta": "```json\n{\"phase_plan\": {\"id\": \"mesh-main\", \"title\": \"网格划分\", \"phases\": [{\"id\": \"import\", \"title\": \"CAD导入\", \"status\": \"active\"}]}}\n```"},
+        {"type": "tool_call", "id": "tc-auto-001", "name": "GetModelTree", "args": {}},
+        {"type": "usage", "input": 100, "output": 40, "total": 140}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "模型树获取完成。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"continue\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 150, "output": 25, "total": 175}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "GetModelTree": "模型树: root -> body1, body2"
+  },
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "text_chunk",
+    "phase_plan",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "text_chunk",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "模型树获取完成"
+}

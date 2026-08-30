@@ -1,0 +1,31 @@
+{
+  "name": "simple_chat",
+  "description": "纯文本问答：用户问→LLM答→done",
+  "input": {
+    "session_id": "test-simple-001",
+    "message": "你好，介绍一下你自己",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "你好"},
+        {"type": "text_chunk", "delta": "！我是"},
+        {"type": "text_chunk", "delta": "GridStar助手。"},
+        {"type": "usage", "input": 50, "output": 20, "total": 70}
+      ]
+    }
+  ],
+  "mock_mcp_results": {},
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "text_chunk",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "你好！我是GridStar助手。"
+}

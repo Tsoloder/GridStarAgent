@@ -1,0 +1,35 @@
+{
+  "name": "format_retry_flow",
+  "description": "格式重试：LLM 首次无 JSON→reminder→补 JSON→done",
+  "input": {
+    "session_id": "test-format-001",
+    "message": "帮我查看当前模型",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "当前模型已加载，包含两个体。"},
+        {"type": "usage", "input": 60, "output": 15, "total": 75}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"继续网格划分\", \"value\": \"continue\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 80, "output": 20, "total": 100}
+      ]
+    }
+  ],
+  "mock_mcp_results": {},
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "heartbeat",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "options"
+}
