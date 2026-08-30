@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridStar AI</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">GS</span><span>GRIDSTAR AI</span></div>
+      <button id="connection" class="connection checking" type="button" title="重新检查连接"><span></span><b>连接中</b></button>
+    </header>
+
+    <section class="sessionbar">
+      <button id="new-session" class="primary compact" type="button">＋ <span>新对话</span></button>
+      <button id="session-trigger" class="session-trigger" type="button" aria-haspopup="dialog" aria-expanded="false">
+        <span id="current-title">选择会话</span><span>⌄</span>
+      </button>
+    </section>
+
+    <div id="session-panel" class="session-panel hidden" role="dialog" aria-label="会话历史">
+      <div class="panel-head">
+        <input id="session-search" type="search" placeholder="搜索会话" aria-label="搜索会话">
+        <button id="close-sessions" class="icon-button" type="button" aria-label="关闭">×</button>
+      </div>
+      <div id="session-list" class="session-list"></div>
+    </div>
+
+    <section id="messages" class="messages" aria-live="polite">
+      <div id="welcome" class="empty-state">
+        <div class="empty-symbol">⌁</div>
+        <strong>开始一项工程任务</strong>
+        <p>创建对话后，可进行网格生成、质量检查和工具编排。</p>
+      </div>
+    </section>
+
+    <section id="phase-panel" class="phase-panel hidden" aria-live="polite"></section>
+
+    <footer class="composer">
+      <div id="config-warning" class="config-warning hidden">后端尚未配置模型，聊天暂不可用。</div>
+      <div class="controls">
+        <div class="mode-switch" role="group" aria-label="交互模式">
+          <button type="button" data-mode="manual" class="active">MANUAL</button>
+          <button type="button" data-mode="auto">AUTO</button>
+        </div>
+        <label class="select-wrap" title="模型">
+          <span>模型</span><select id="model-select" aria-label="模型"></select>
+        </label>
+        <label class="select-wrap" title="Skill">
+          <span>Skill</span><select id="skill-select" aria-label="Skill"></select>
+        </label>
+      </div>
+      <div class="input-wrap">
+        <textarea id="message-input" rows="2" placeholder="输入网格生成或质量检查任务…" aria-label="消息"></textarea>
+        <button id="send" class="send" type="button" aria-label="发送" title="发送">↑</button>
+      </div>
+      <div class="composer-foot"><span id="busy-label">Enter 发送 · Shift+Enter 换行</span></div>
+    </footer>
+    <div id="toast" class="toast hidden" role="status"></div>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

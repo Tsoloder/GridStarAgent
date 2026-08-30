@@ -10,7 +10,8 @@ from typing import Optional
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from agent_loop import run_agent_loop
 from config import ApiConfig, load_config, save_config, api_config_to_dict
@@ -89,6 +90,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+WEBUI_DIR = Path(__file__).resolve().parents[2] / "webui"
+
+
+@app.get("/ui", include_in_schema=False)
+async def webui_redirect():
+    return RedirectResponse(url="/ui/")
+
+
+app.mount("/ui", StaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
 
 
 @app.get("/health")
