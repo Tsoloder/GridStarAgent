@@ -1,4 +1,5 @@
 import asyncio
+import difflib
 import html
 import json
 import logging
@@ -49,6 +50,10 @@ def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegi
 def _is_query_tool(name: str) -> bool:
     """Query/read-only tools that don't modify data and don't need user confirmation."""
     return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has)", name, re.I))
+
+
+def _tool_name_suggestions(name: str, valid_names: set[str]) -> list[str]:
+    return difflib.get_close_matches(name, sorted(valid_names), n=3, cutoff=0.35)
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
@@ -189,6 +194,7 @@ async def run_agent_loop(
     _phase_plan_reminded = False
     _phase_plan_retry_count = 0
     _pending_reminders = []
+    _invalid_tool_reselection_used = False
 
     while True:
         turn += 1
@@ -303,6 +309,38 @@ async def run_agent_loop(
                 _calibration_text(model_messages, ctx_mgr),
                 usage.get("input", 0),
             )
+
+        valid_tool_names = {tool.name for tool in external_tools + runtime_tools}
+        invalid_tool_names = [
+            str(tc.get("name", "")) for tc in tool_calls
+            if tc.get("name") not in valid_tool_names
+        ]
+        if invalid_tool_names:
+            invalid_name = invalid_tool_names[0]
+            suggestions = _tool_name_suggestions(invalid_name, valid_tool_names)
+            suggestion_text = "、".join(suggestions) if suggestions else "无"
+            if _invalid_tool_reselection_used:
+                logger.warning("[invalid tool] persistent invalid name=%s", invalid_name)
+                yield {
+                    "type": "error",
+                    "message": "工具名连续无效，已停止：%s；相似候选：%s" % (
+                        invalid_name, suggestion_text
+                    ),
+                    "retryable": False,
+                }
+                return
+            _invalid_tool_reselection_used = True
+            session.append_assistant_with_tool_calls(text_acc, tool_calls)
+            _pending_reminders.append(
+                "<invalid_tool_name_reminder>\n"
+                "工具名必须与本轮提供的工具名完全一致。无效工具名：%s。\n"
+                "相似候选（最多 3 个）：%s。\n"
+                "请仅重选一次并重新返回工具调用；不要再次使用无效名称。\n"
+                "</invalid_tool_name_reminder>" % (invalid_name, suggestion_text)
+            )
+            logger.warning("[invalid tool] name=%s suggestions=%s; reselecting once",
+                           invalid_name, suggestions)
+            continue
 
         # v4: 输出截断保护 — LLM 因 token 限制被截断时，tool call 参数可能不完整
         if _stop_reason == "length" and tool_calls:

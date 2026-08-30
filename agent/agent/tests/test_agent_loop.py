@@ -307,3 +307,97 @@ def test_unselected_skill_only_injects_catalog_then_read_skill_activates_policy(
     assert "QueryState" in tool_names_by_round[1]
     assert any(event["type"] == "skill_loaded" for event in events)
     assert session.messages[-1]["active_skills"] == ["demo-skill"]
+
+
+def test_invalid_tool_name_reselects_once_then_executes_exact_match(monkeypatch, tmp_path):
+    import agent_loop
+    import session as session_module
+
+    monkeypatch.setattr(session_module, "SESSIONS_DIR", tmp_path / "sessions")
+
+    responses = iter([
+        [{"type": "tool_call", "id": "bad-1", "name": "ImportCad", "args": {}}],
+        [{"type": "tool_call", "id": "good-1", "name": "ImportCAD", "args": {}}],
+        [{"type": "text_chunk", "delta": '完成 ```json\n{"options": []}\n```'}],
+    ])
+    prompts = []
+
+    async def stream_chat(**kwargs):
+        prompts.append(kwargs["messages"])
+        for event in next(responses):
+            yield event
+
+    class TrackingMcp(MockMcpBridge):
+        def __init__(self):
+            super().__init__({"ImportCAD": "ok", "ImportCAE": "other"})
+            self.calls = []
+
+        async def call_tool(self, name, args):
+            self.calls.append(name)
+            return await super().call_tool(name, args)
+
+    monkeypatch.setattr(agent_loop.llm_client, "stream_chat", stream_chat)
+    mcp = TrackingMcp()
+
+    async def collect_events():
+        return [event async for event in agent_loop.run_agent_loop(
+            _make_session(None), "import", "base", _make_config(), mcp,
+            MockContextManager(), MockSkillRegistry(), interaction_mode="auto",
+        )]
+
+    events = asyncio.run(collect_events())
+
+    assert mcp.calls == ["ImportCAD"]
+    assert [event["name"] for event in events if event["type"] == "tool_call"] == ["ImportCAD"]
+    reminder = prompts[1][0]["content"]
+    assert "ImportCad" in reminder
+    assert "ImportCAD" in reminder
+    assert "仅重选一次" in reminder
+    assert events[-1]["type"] == "done"
+
+
+def test_persistent_invalid_tool_name_stops_after_single_reselection(monkeypatch, tmp_path):
+    import agent_loop
+    import session as session_module
+
+    monkeypatch.setattr(session_module, "SESSIONS_DIR", tmp_path / "sessions")
+
+    call_count = 0
+
+    async def stream_chat(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        yield {"type": "tool_call", "id": "bad-%d" % call_count,
+               "name": "ImportCad", "args": {}}
+
+    class TrackingMcp(MockMcpBridge):
+        def __init__(self):
+            super().__init__({
+                "ImportCAD": "ok", "ImportCAE": "ok", "ImportCAM": "ok",
+                "ImportCat": "ok", "ImportCar": "ok",
+            })
+            self.calls = []
+
+        async def call_tool(self, name, args):
+            self.calls.append(name)
+            return "unexpected"
+
+    monkeypatch.setattr(agent_loop.llm_client, "stream_chat", stream_chat)
+    mcp = TrackingMcp()
+
+    async def collect_events():
+        return [event async for event in agent_loop.run_agent_loop(
+            _make_session(None), "import", "base", _make_config(), mcp,
+            MockContextManager(), MockSkillRegistry(), interaction_mode="auto",
+        )]
+
+    events = asyncio.run(collect_events())
+
+    assert call_count == 2
+    assert mcp.calls == []
+    assert not any(event["type"] == "tool_call" for event in events)
+    assert events[-1]["type"] == "error"
+    assert events[-1]["retryable"] is False
+    assert "连续无效" in events[-1]["message"]
+    candidates = events[-1]["message"].split("相似候选：", 1)[1].split("、")
+    assert len(candidates) <= 3
