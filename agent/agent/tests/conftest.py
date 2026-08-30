@@ -9,6 +9,7 @@
 import json
 import os
 import sys
+from types import SimpleNamespace
 from typing import AsyncIterator
 from unittest.mock import MagicMock, AsyncMock, patch
 
@@ -41,21 +42,41 @@ class MockLLMResponse:
 
 
 class MockLLMClient:
-    """模拟 llm_client.stream_chat，按 fixture 顺序返回预设响应。"""
+    """模拟 ModelRuntime，按 fixture 顺序返回统一流事件。"""
 
     def __init__(self, responses: list):
         self._responses = list(responses)
         self._call_index = 0
 
-    async def stream_chat(self, **kwargs) -> AsyncIterator[dict]:
+    def context_window(self, model_key):
+        return 32000
+
+    async def stream(self, model_key, messages, tools=(), system_prompt=""):
         if self._call_index >= len(self._responses):
-            # 如果 LLM 被调用的次数超过预设，返回空回复
-            yield {"type": "usage", "input": 0, "output": 0, "total": 0}
+            yield SimpleNamespace(type="usage", input_tokens=0, output_tokens=0,
+                                  total_tokens=0)
             return
         response = self._responses[self._call_index]
         self._call_index += 1
         for event in response.get("events", []):
-            yield event
+            event_type = event["type"]
+            if event_type == "text_chunk":
+                yield SimpleNamespace(type="text_delta", delta=event["delta"])
+            elif event_type == "reasoning_chunk":
+                yield SimpleNamespace(type="thinking_delta", delta=event["delta"])
+            elif event_type == "tool_call":
+                yield SimpleNamespace(type="tool_call_end", call_id=event["id"],
+                                      name=event["name"], arguments=event.get("args"),
+                                      parse_error=event.get("parse_error"))
+            elif event_type == "usage":
+                yield SimpleNamespace(type="usage", input_tokens=event.get("input"),
+                                      output_tokens=event.get("output"),
+                                      total_tokens=event.get("total"))
+            elif event_type == "done":
+                yield SimpleNamespace(type="done", stop_reason=event.get("stop_reason", "stop"))
+            elif event_type == "error":
+                yield SimpleNamespace(type="error", message=event["message"],
+                                      retryable=event.get("retryable", False))
 
 
 class MockMcpBridge:
@@ -133,7 +154,7 @@ class MockContextManager:
         from context import TokenCounter
         self.counter = TokenCounter()
 
-    async def compress(self, messages, session_id, config):
+    async def compress(self, messages, session_id, config, model_key="", runtime=None):
         return messages
 
     def persist_large_result(self, result, session_id):

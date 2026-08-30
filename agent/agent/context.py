@@ -31,14 +31,19 @@ def max_tokens_for(model_id: str) -> int:
     return 32000
 
 
-def max_tokens_for_config(config: ApiConfig) -> int:
-    """v4: 从 provider 获取 context_window，失败时 fallback 到硬编码字典。"""
+def max_tokens_for_config(
+    config: ApiConfig,
+    model_key: str = "",
+    runtime=None,
+) -> int:
+    """返回当前完整 provider/model 标识对应的上下文窗口。"""
+    resolved_key = model_key or config.default_model
     try:
-        from llm_client.registry import create_provider
-        provider = create_provider(config)
-        return provider.context_window
-    except Exception:
-        return max_tokens_for(config.ResolveModelId())
+        if runtime is not None:
+            return runtime.context_window(resolved_key)
+        return config.model(resolved_key).context_window
+    except (KeyError, ValueError, AttributeError):
+        return max_tokens_for(resolved_key)
 
 
 class TokenCounter:
@@ -74,9 +79,16 @@ class ContextManager:
         self.counter = TokenCounter()
         self._sessions_dir = SESSIONS_DIR
 
-    async def compress(self, messages: list, session_id: str, config: ApiConfig) -> list:
+    async def compress(
+        self,
+        messages: list,
+        session_id: str,
+        config: ApiConfig,
+        model_key: str = "",
+        runtime=None,
+    ) -> list:
         messages = copy.deepcopy(messages)
-        max_tokens = max_tokens_for_config(config)  # v4: 从 provider 获取
+        max_tokens = max_tokens_for_config(config, model_key, runtime)
         threshold_warn = int(max_tokens * 0.8)
         threshold_micro = int(max_tokens * 0.6)
         current = sum(self.counter.estimate(self._msg_text(m)) for m in messages)
@@ -86,7 +98,9 @@ class ContextManager:
         if current > threshold_micro:
             messages = self._layer3_microcompact(messages)
         if current > threshold_warn:
-            messages = await self._layer4_auto_compact(messages, config)
+            messages = await self._layer4_auto_compact(
+                messages, config, model_key, runtime
+            )
         return messages
 
     def _layer1_budget_truncate(self, messages, max_tokens):
@@ -187,9 +201,17 @@ class ContextManager:
             i += 1
         return result
 
-    async def _layer4_auto_compact(self, messages, config):
+    async def _layer4_auto_compact(
+        self,
+        messages,
+        config,
+        model_key="",
+        runtime=None,
+    ):
         try:
-            summary = await self._summarize_via_llm(messages, config)
+            summary = await self._summarize_via_llm(
+                messages, config, model_key, runtime
+            )
             # 保留最近 KEEP_RECENT_TOKENS token 的消息（参考 pi-main keepRecentTokens）
             # 而非固定 8 条,确保多步骤业务流程的上下文不会被过度截断
             recent = self._keep_recent_by_token_budget(messages, self.KEEP_RECENT_TOKENS)
@@ -199,7 +221,7 @@ class ContextManager:
         except Exception as e:
             logger.warning(f"auto-compact LLM call failed: {e}, fallback to truncation")
             return self._layer1_budget_truncate(
-                messages, int(max_tokens_for(config.ResolveModelId()) * 0.5)
+                messages, int(max_tokens_for_config(config, model_key, runtime) * 0.5)
             )
 
     def _keep_recent_by_token_budget(self, messages, budget_tokens):
@@ -225,10 +247,16 @@ class ContextManager:
 
     _SUMMARY_UPDATE_PROMPT = """以上是新的对话消息,请将其纳入已有的摘要中。规则:\n- 保留已有摘要中的所有信息\n- 从新消息中补充新的进度、决策和上下文\n- 更新进度部分:完成的任务从"进行中"移到"已完成"\n- 根据已完成的工作更新"下一步"\n- 保留精确的文件路径、函数名、工具名称和错误信息\n- 必须保留已调用工具的名称及其返回值中的关键数据(如 ID、点数、坐标等),后续步骤依赖这些数据\n- 如果某些信息不再相关,可以移除\n\n使用与之前相同的格式输出更新后的摘要。"""
 
-    async def _summarize_via_llm(self, messages, config) -> str:
-        # v3: 不再 import llm_client，直接从 registry 创建 provider
-        from llm_client.registry import create_provider
-        from retry import stream_with_retry
+    async def _summarize_via_llm(
+        self,
+        messages,
+        config,
+        model_key="",
+        runtime=None,
+    ) -> str:
+        if runtime is None:
+            raise RuntimeError("ModelRuntime is required for context summarization")
+        resolved_key = model_key or config.default_model
 
         # 增量摘要:检查是否已有上次摘要（system 消息中带 Previous conversation summary）
         previous_summary = None
@@ -262,14 +290,13 @@ class ContextManager:
             }
         ]
         result_text = ""
-        provider = create_provider(config)
-        async for event in stream_with_retry(
-            lambda: provider.stream_chat(
-                summary_messages, self._SUMMARY_SYSTEM_PROMPT, [], config.ResolveModelId()
-            )
+        async for event in runtime.stream(
+            resolved_key, summary_messages, system_prompt=self._SUMMARY_SYSTEM_PROMPT
         ):
-            if event["type"] == "text_chunk":
-                result_text += event["delta"]
+            if event.type == "text_delta":
+                result_text += event.delta
+            elif event.type == "error":
+                raise RuntimeError(event.message)
         return result_text.strip()
 
     def _msg_text(self, msg) -> str:

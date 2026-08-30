@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -14,8 +15,25 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent_loop import run_agent_loop
-from config import ApiConfig, load_config, save_config, api_config_to_dict
+from config import (
+    API_KEY_MASK,
+    ApiConfig,
+    ConfigError,
+    _parse_provider,
+    config_from_dict,
+    config_revision,
+    load_config,
+    preserve_masked_api_keys,
+    redacted_config,
+    save_config,
+)
 from context import ContextManager
+from llm_client.catalog import ModelCatalog as DiscoveryCatalog
+from llm_client.providers import AnthropicProvider, OpenAICompatibleProvider, OpenAIProvider
+from llm_client.registry import ProviderRegistry, default_adapter_registry
+from llm_client.runtime import ModelCatalog as RuntimeCatalog, ModelRuntime
+from llm_client.types import ModelConfig as RuntimeModelConfig
+from llm_client.types import ProviderConfig as RuntimeProviderConfig
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
 from session import (
@@ -42,8 +60,84 @@ ctx_mgr = ContextManager()
 skill_registry = SkillRegistry(SkillRegistry.default_roots())
 
 _mcp: Optional[McpBridge] = None
+_model_catalog: Optional[DiscoveryCatalog] = None
+_model_runtime: Optional[ModelRuntime] = None
+_config_lock: Optional[asyncio.Lock] = None
 _session_async_locks = {}
 _pending_approvals = {}
+
+
+def _runtime_provider_config(provider) -> RuntimeProviderConfig:
+    return RuntimeProviderConfig(
+        id=provider.id,
+        name=provider.name,
+        base_url=provider.base_url,
+        api_key=provider.api_key,
+        api_key_env=provider.api_key_env,
+        headers=dict(provider.headers),
+        enabled=provider.enabled,
+    )
+
+
+def _provider_client(provider):
+    config = _runtime_provider_config(provider)
+    if provider.discovery_api == "anthropic":
+        return AnthropicProvider(config)
+    if provider.discovery_api == "openai":
+        return OpenAIProvider(config)
+    return OpenAICompatibleProvider(config)
+
+
+def _discoverers(config: ApiConfig):
+    clients = {}
+
+    async def discover(provider):
+        client = _provider_client(provider)
+        clients[provider.id] = client
+        try:
+            return await client.discover_models()
+        finally:
+            await client.aclose()
+            clients.pop(provider.id, None)
+
+    return {"openai": discover, "anthropic": discover}
+
+
+def _runtime_model(model, config: ApiConfig) -> RuntimeModelConfig:
+    provider = config.provider(model.provider)
+    return RuntimeModelConfig(
+        id=model.id,
+        provider=model.provider,
+        api=model.api or provider.default_api,
+        name=model.name,
+        enabled=model.enabled,
+        context_window=model.context_window,
+        max_output_tokens=model.max_output_tokens,
+        capabilities=model.capabilities,
+        compat=dict(model.compat),
+    )
+
+
+def _build_runtime(config: ApiConfig):
+    providers = ProviderRegistry()
+    for provider in config.providers:
+        if provider.enabled:
+            providers.register(provider.id, _provider_client(provider))
+    runtime = ModelRuntime(
+        RuntimeCatalog([
+            _runtime_model(model, config) for model in config.models
+            if model.enabled and config.provider(model.provider).enabled
+        ]),
+        providers,
+        default_adapter_registry(),
+    )
+    catalog = DiscoveryCatalog(config, _discoverers(config))
+    return catalog, runtime
+
+
+async def _close_runtime(runtime):
+    if runtime is not None:
+        await runtime.aclose()
 
 
 def _session_async_lock(session_id: str):
@@ -69,7 +163,12 @@ async def _request_tool_approval(session_id, call_id, name, args):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _mcp
+    global _mcp, _model_catalog, _model_runtime, _config_lock
+    _config_lock = asyncio.Lock()
+    if current_config is not None:
+        _model_catalog, _model_runtime = _build_runtime(current_config)
+        await _model_catalog.refresh()
+
     # SSE 方式：server.py 独立运行（SSE 模式监听 5656），app.py 通过 SSE 连接
     import os
     _mcp_url = os.environ.get("MCP_SERVER_URL", "http://127.0.0.1:5656/sse")
@@ -78,9 +177,15 @@ async def lifespan(app: FastAPI):
         await _mcp.connect()
     except Exception as e:
         logger.error(f"mcp connect failed: {e}")
-    yield
-    if _mcp:
-        await _mcp.disconnect()
+    try:
+        yield
+    finally:
+        if _mcp:
+            await _mcp.disconnect()
+        await _close_runtime(_model_runtime)
+        _model_runtime = None
+        _model_catalog = None
+        _config_lock = None
 
 
 app = FastAPI(lifespan=lifespan)
@@ -103,7 +208,15 @@ app.mount("/ui", StaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "config_loaded": current_config is not None}
+    snapshot = _model_catalog.snapshot if _model_catalog is not None else None
+    return {
+        "status": "ok",
+        "config_loaded": current_config is not None,
+        "runtime_ready": _model_runtime is not None,
+        "catalog_generation": snapshot.generation if snapshot is not None else 0,
+        "catalog_models": len(snapshot.models) if snapshot is not None else 0,
+        "catalog_errors": dict(snapshot.errors) if snapshot is not None else {},
+    }
 
 
 @app.get("/skills")
@@ -123,44 +236,170 @@ async def get_skills():
     ]}
 
 
+@app.get("/config")
+async def get_config():
+    if current_config is None:
+        return {"revision": None, "config": None}
+    return {
+        "revision": config_revision(current_config),
+        "config": redacted_config(current_config),
+    }
+
+
 @app.post("/config")
-async def update_config(cfg: dict):
-    global current_config
+async def update_config(body: dict):
+    global current_config, _model_catalog, _model_runtime, _config_lock
+    body = body or {}
+    expected_revision = body.get("revision")
+    raw_config = body.get("config")
+    if raw_config is None:
+        raw_config = {key: value for key, value in body.items() if key != "revision"}
+    if _config_lock is None:
+        _config_lock = asyncio.Lock()
+    async with _config_lock:
+        actual_revision = config_revision(current_config) if current_config is not None else None
+        if expected_revision != actual_revision:
+            return JSONResponse(
+                {"error": "config revision conflict", "revision": actual_revision},
+                status_code=409,
+            )
+        try:
+            candidate = config_from_dict(raw_config)
+            if current_config is not None:
+                candidate = preserve_masked_api_keys(candidate, current_config)
+            candidate_catalog, candidate_runtime = _build_runtime(candidate)
+            save_config(candidate)
+        except (ConfigError, OSError, TypeError, ValueError) as exc:
+            if "candidate_runtime" in locals():
+                await _close_runtime(candidate_runtime)
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        previous_runtime = _model_runtime
+        current_config = candidate
+        _model_catalog = candidate_catalog
+        _model_runtime = candidate_runtime
+        await _close_runtime(previous_runtime)
+        return {
+            "ok": True,
+            "revision": config_revision(candidate),
+            "config": redacted_config(candidate),
+        }
+
+
+def _provider_from_body(body: dict):
+    raw = (body or {}).get("provider", body or {})
+    if not isinstance(raw, dict):
+        raise ConfigError("provider must be an object")
+    provider = _parse_provider(raw, 0)
+    if provider.api_key == API_KEY_MASK:
+        if current_config is None:
+            raise ConfigError("masked API key has no saved credential")
+        try:
+            saved_key = current_config.provider(provider.id).api_key
+        except KeyError:
+            raise ConfigError("masked API key has no saved credential") from None
+        provider = replace(provider, api_key=saved_key)
+    return provider
+
+
+def _safe_provider_error(exc: Exception, provider) -> str:
+    message = str(exc)
+    for secret in (provider.api_key, provider.resolved_api_key()):
+        if secret and secret != API_KEY_MASK:
+            message = message.replace(secret, API_KEY_MASK)
+    return message
+
+
+@app.post("/config/providers/test")
+async def test_provider(body: dict):
+    client = None
     try:
-        # 使用 api_config_to_dict 的逆操作构造
-        models_raw = cfg.get("models", [])
-        from config import ModelEntry
-        models = []
-        for m in models_raw:
-            if isinstance(m, dict):
-                models.append(ModelEntry(
-                    provider=str(m.get("provider", "")),
-                    model_id=str(m.get("model_id", "")),
-                ))
-        current_config = ApiConfig(
-            api_type=str(cfg.get("api_type", "openai")),
-            api_url=str(cfg.get("api_url", "")),
-            api_key=str(cfg.get("api_key", "")),
-            models=models,
-            default_model_index=int(cfg.get("default_model_index", 0)),
+        provider = _provider_from_body(body)
+        client = _provider_client(provider)
+        response = await client.client().get("")
+        response.raise_for_status()
+        return {"ok": True, "status_code": response.status_code}
+    except (ConfigError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": _safe_provider_error(exc, provider)}, status_code=502)
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
+@app.post("/config/providers/models")
+async def provider_models(body: dict):
+    client = None
+    try:
+        provider = _provider_from_body(body)
+        if provider.discovery_api == "none":
+            return {"models": []}
+        client = _provider_client(provider)
+        discovered = await client.discover_models()
+        by_id = {}
+        for item in discovered:
+            model_id = str(item.get("id", "")).strip()
+            if model_id and model_id not in by_id:
+                by_id[model_id] = {
+                    "id": model_id,
+                    "name": str(item.get("name") or model_id),
+                    "created": item.get("created"),
+                    "owned_by": item.get("owned_by"),
+                }
+        return {"models": [by_id[key] for key in sorted(by_id, key=str.casefold)]}
+    except (ConfigError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except Exception as exc:
+        return JSONResponse({"error": _safe_provider_error(exc, provider)}, status_code=502)
+    finally:
+        if client is not None:
+            await client.aclose()
+
+
+def _catalog_models():
+    if _model_catalog is None:
+        return []
+    return [
+        {
+            "key": item.key,
+            "id": item.config.id,
+            "name": item.config.name or item.config.id,
+            "provider": item.config.provider,
+            "api": item.config.api or current_config.provider(item.config.provider).default_api,
+            "enabled": item.config.enabled,
+            "context_window": item.config.context_window,
+            "max_output_tokens": item.config.max_output_tokens,
+            "capabilities": vars(item.config.capabilities),
+            "status": item.status,
+            "created": item.created,
+            "owned_by": item.owned_by,
+        }
+        for item in _model_catalog.snapshot.models.values()
+        if (
+            item.key in {model.key for model in current_config.models}
+            and item.config.enabled
+            and current_config.provider(item.config.provider).enabled
         )
-        save_config(current_config)
-        return {"ok": True}
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    ]
 
 
 @app.get("/config/models")
 async def get_models():
-    if current_config is None:
-        return {"models": [], "default_index": 0}
     return {
-        "models": [
-            {"provider": m.provider, "model_id": m.model_id}
-            for m in current_config.models
-        ],
-        "default_index": current_config.default_model_index,
+        "models": _catalog_models(),
+        "default_model": current_config.default_model if current_config is not None else "",
+        "generation": _model_catalog.snapshot.generation if _model_catalog is not None else 0,
+        "errors": dict(_model_catalog.snapshot.errors) if _model_catalog is not None else {},
     }
+
+
+@app.post("/config/models/refresh")
+async def refresh_models():
+    if _model_catalog is None:
+        return JSONResponse({"error": "no config"}, status_code=400)
+    await _model_catalog.refresh()
+    return await get_models()
 
 
 @app.post("/chat/stream")
@@ -564,6 +803,7 @@ async def _run_background_loop(
             attachments=attachments, display_content=display_content,
             interaction_mode=interaction_mode,
             model_override=model_id if model_id else None,
+            model_runtime=_model_runtime,
         ):
             # 工具调用与返回值日志
             if event["type"] == "tool_call":

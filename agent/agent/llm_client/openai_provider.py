@@ -14,7 +14,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from .base import BaseProvider, ProviderConfig, RetryConfig
-from .types import StreamDelta, ToolCallDelta
+from .types import StreamDelta, LegacyToolCallDelta as ToolCallDelta
 
 logger = logging.getLogger(__name__)
 

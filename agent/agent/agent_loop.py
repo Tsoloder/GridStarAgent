@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 from typing import AsyncIterator
 
-import llm_client
 from config import ApiConfig
 from context import ContextManager, MAX_TURNS
 from mcp_bridge import McpBridge
@@ -27,6 +26,37 @@ from skill_runtime import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def _stream_runtime(runtime, model_key, messages, system_prompt, tools):
+    async for event in runtime.stream(
+        model_key, messages, tools=tools, system_prompt=system_prompt
+    ):
+        if event.type == "text_delta":
+            yield {"type": "text_chunk", "delta": event.delta}
+        elif event.type == "thinking_delta":
+            yield {"type": "reasoning_chunk", "delta": event.delta}
+        elif event.type == "tool_call_end":
+            if event.parse_error or not isinstance(event.arguments, dict):
+                yield {
+                    "type": "error",
+                    "message": "Invalid tool arguments for %s: %s" % (
+                        event.name, event.parse_error or "arguments must be an object"
+                    ),
+                    "retryable": False,
+                }
+            else:
+                yield {"type": "tool_call", "id": event.call_id,
+                       "name": event.name, "args": event.arguments}
+        elif event.type == "usage":
+            yield {"type": "usage", "input": event.input_tokens or 0,
+                   "output": event.output_tokens or 0,
+                   "total": event.total_tokens or 0}
+        elif event.type == "done":
+            yield {"type": "done", "stop_reason": event.stop_reason}
+        elif event.type == "error":
+            yield {"type": "error", "message": event.message,
+                   "retryable": event.retryable}
 
 
 def _calibration_text(messages: list, ctx_mgr) -> str:
@@ -81,6 +111,7 @@ async def run_agent_loop(
     display_content: str = "",
     interaction_mode: str = "manual",
     model_override: str = None,
+    model_runtime=None,
 ) -> AsyncIterator[dict]:
     selected_skills = selected_skills or []
     interaction_mode = "auto" if interaction_mode == "auto" else "manual"
@@ -202,7 +233,10 @@ async def run_agent_loop(
             yield {"type": "error", "message": "Max turns reached", "retryable": False}
             return
 
-        compressed_messages = await ctx_mgr.compress(session.messages, session.id, config)
+        call_model_id = model_override or session.ResolvedModelId(config.default_model)
+        compressed_messages = await ctx_mgr.compress(
+            session.messages, session.id, config, call_model_id, model_runtime
+        )
         model_messages = []
         for reminder in _pending_reminders:
             model_messages.append({"role": "user", "content": reminder})
@@ -248,20 +282,11 @@ async def run_agent_loop(
                 if _tool_allowed_by_loaded_skills(tool.name, loaded_skills, skill_registry)
             ]
             runtime_tools = skill_registry.internal_tools()
-            # 确定本次请求使用的模型 ID：session 级别 > 前端传入 > 全局默认
-            call_model_id = (
-                session.ResolvedModelId()
-                if not model_override and session.model_id
-                else model_override
-                if model_override
-                else config.ResolveModelId()
-            )
-            async for event in llm_client.stream_chat(
-                messages=model_messages,
-                system_prompt=system_prompt,
-                config=config,
-                tools=external_tools + runtime_tools,
-                model_override=call_model_id,
+            if model_runtime is None:
+                raise RuntimeError("ModelRuntime is not available")
+            async for event in _stream_runtime(
+                model_runtime, call_model_id, model_messages, system_prompt,
+                external_tools + runtime_tools,
             ):
                 if event["type"] == "text_chunk":
                     text_acc += event["delta"]

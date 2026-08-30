@@ -131,8 +131,12 @@ class Session:
     _dirty_full_write: bool = False  # 标记是否需要全量重写（原地修改触发）
 
     def ResolvedModelId(self, default_model_id: str = "") -> str:
-        """返回该 session 实际使用的 model_id，空时取 fallback。"""
+        """返回该 session 使用的完整 provider/model 标识，空时取 fallback。"""
         return self.model_id if self.model_id else default_model_id
+
+    @property
+    def provider_id(self) -> str:
+        return self.model_id.split("/", 1)[0] if "/" in self.model_id else ""
 
     def append_user(self, content: str, active_skills=None, attachments=None, display_content: str = ""):
         message = {"role": "user", "content": content}
@@ -249,6 +253,7 @@ def save_session(s: Session):
         "updated_at": s.updated_at,
         "archived": bool(s.archived),
         "model_id": s.model_id,
+        "provider_id": s.provider_id,
     }
     atomic_write(str(target / "meta.json"), json.dumps(meta, ensure_ascii=False, indent=2))
     # 混合策略：如果有原地修改（_dirty_full_write），全量重写 JSONL；

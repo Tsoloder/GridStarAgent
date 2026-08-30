@@ -9,7 +9,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from .base import BaseProvider, ProviderConfig, RetryConfig
-from .types import StreamDelta, ToolCallDelta
+from .types import StreamDelta, LegacyToolCallDelta as ToolCallDelta
 
 logger = logging.getLogger(__name__)
 
