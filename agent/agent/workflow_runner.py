@@ -1,5 +1,6 @@
 """Deterministic sequential workflow execution through explicit policy and approval gates."""
 import asyncio
+import json
 import uuid
 from typing import AsyncIterator, Callable, Optional
 
@@ -12,6 +13,23 @@ def _available_tool_names(mcp) -> set:
 
 def _snapshot(steps: list) -> list:
     return [dict(step) for step in steps]
+
+
+def _tool_result_failed(result: str) -> bool:
+    try:
+        payload = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if payload is False:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    result = payload.get("result")
+    return (
+        str(payload.get("status", "")).lower() == "error"
+        or result is False
+        or isinstance(result, str) and result.strip().lower() == "false"
+    )
 
 
 async def run_workflow(
@@ -113,12 +131,16 @@ async def run_workflow(
                 session.update_workflow_run(run_id, _snapshot(run_steps), "running", "running %s" % tool)
                 yield {"type": "workflow_step", "run_id": run_id, "index": index, **step}
                 result = str(await asyncio.wait_for(mcp.call_tool(tool, args), timeout=60.0))
+                failed_result = _tool_result_failed(result)
                 if persist_result is not None:
                     result = persist_result(result, session.id)
-                step["status"] = "succeeded"
+                step["status"] = "failed" if failed_result else "succeeded"
                 step["result"] = result
                 session.update_workflow_run(run_id, _snapshot(run_steps), "running", "completed %s" % tool)
                 yield {"type": "workflow_step", "run_id": run_id, "index": index, **step}
+                if failed_result:
+                    final_status, final_message = "failed", result
+                    break
             except asyncio.TimeoutError:
                 step["status"] = "failed"
                 step["result"] = "Tool error: timeout after 60 seconds"

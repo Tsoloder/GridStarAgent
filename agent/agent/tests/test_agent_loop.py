@@ -221,3 +221,89 @@ async def test_structured_continuation():
     # 最终文本包含"导入完成"
     full = _full_text(events)
     assert "导入完成" in full, f"final text should contain 导入完成: {full}"
+
+
+def test_unselected_skill_only_injects_catalog_then_read_skill_activates_policy(monkeypatch):
+    import agent_loop
+    from skill_runtime import RuntimeTool
+
+    class Descriptor:
+        id = "demo-skill"
+        description = "demo catalog description"
+        allowed_tools = ["Query*"]
+        content_hash = "hash"
+        source = "test"
+
+    class Registry:
+        descriptor = Descriptor()
+
+        def all(self):
+            return [self.descriptor]
+
+        def get(self, skill_id):
+            if skill_id != self.descriptor.id:
+                raise ValueError(skill_id)
+            return self.descriptor
+
+        def catalog_prompt(self, selected_ids=None):
+            return "CATALOG demo catalog description selected=%s" % list(selected_ids or [])
+
+        def read_skill(self, skill_id):
+            self.get(skill_id)
+            return "SECRET SKILL BODY"
+
+        def internal_tools(self):
+            return [RuntimeTool("read_skill", "read", {"type": "object"})]
+
+    class SessionStub:
+        id = "session"
+        model_id = ""
+        messages = []
+
+        def append_user(self, content, active_skills=None, attachments=None, display_content=""):
+            self.messages.append({"role": "user", "content": content,
+                                  "active_skills": list(active_skills or [])})
+
+        def append_assistant_with_tool_calls(self, text, calls):
+            self.messages.append({"role": "assistant", "content": text, "tool_calls": calls})
+
+        def append_tool_result(self, call_id, result, name):
+            self.messages.append({"role": "tool", "content": result, "tool_name": name})
+
+        def append_assistant(self, content, active_skills=None):
+            self.messages.append({"role": "assistant", "content": content,
+                                  "active_skills": sorted(active_skills or [])})
+
+        def ResolvedModelId(self):
+            return ""
+
+    tool_names_by_round = []
+    prompts = []
+
+    async def stream_chat(**kwargs):
+        prompts.append(kwargs["system_prompt"])
+        tool_names_by_round.append([tool.name for tool in kwargs["tools"]])
+        if len(prompts) == 1:
+            yield {"type": "tool_call", "id": "read-1", "name": "read_skill",
+                   "args": {"skill_id": "demo-skill"}}
+        else:
+            yield {"type": "text_chunk", "delta": 'done ```json\n{"options": []}\n```'}
+            yield {"type": "usage", "input": 1, "output": 1, "total": 2}
+
+    monkeypatch.setattr(agent_loop.llm_client, "stream_chat", stream_chat)
+    mcp = MockMcpBridge({"QueryState": "ok", "MutateState": "ok"})
+    session = SessionStub()
+    async def collect_events():
+        return [event async for event in agent_loop.run_agent_loop(
+            session, "hello", "base", _make_config(), mcp, MockContextManager(), Registry()
+        )]
+
+    events = asyncio.run(collect_events())
+
+    assert "demo catalog description" in prompts[0]
+    assert "SECRET SKILL BODY" not in prompts[0]
+    assert {"QueryState", "MutateState"}.issubset(tool_names_by_round[0])
+    assert "MutateState" not in tool_names_by_round[1]
+    assert "QueryState" in tool_names_by_round[1]
+    assert any(event["type"] == "skill_loaded" for event in events)
+    assert session.messages[-1]["active_skills"] == ["demo-skill"]

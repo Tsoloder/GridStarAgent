@@ -96,10 +96,6 @@ async def run_agent_loop(
             selected_ids.append(skill_id)
         params = item.get("params", {})
         selected_params[skill_id] = params if isinstance(params, dict) else {}
-    # 用户未指定 skill 时，LLM 从所有可用 skill 中自行选择
-    if not selected_ids:
-        selected_ids = [skill.id for skill in skill_registry.all()]
-
     attachments = attachments or []
     is_structured_continuation = "<structured_interaction>" in user_message
     continued_skills = set()

@@ -1,9 +1,24 @@
 import asyncio
 import logging
+import re
 
 from fastmcp import Client
 
 logger = logging.getLogger(__name__)
+
+
+def _is_query_tool(name: str) -> bool:
+    return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has)", name, re.I))
+
+
+class McpOperationStatusUnknown(RuntimeError):
+    def __init__(self, name: str, cause: Exception):
+        super().__init__(
+            "MCP operation '%s' failed after dispatch; execution status is unknown: %s" %
+            (name, cause)
+        )
+        self.tool_name = name
+        self.__cause__ = cause
 
 
 class McpBridge:
@@ -83,7 +98,13 @@ class McpBridge:
                 result = await self._client.call_tool(name, args)
                 return result.content[0].text if result.content else ""
             except Exception as e:
-                logger.warning(f"mcp call_tool '{name}' failed: {e}, attempting reconnect")
+                if not _is_query_tool(name):
+                    logger.warning(
+                        "mcp operation '%s' failed after dispatch; not retrying because status is unknown: %s",
+                        name, e,
+                    )
+                    raise McpOperationStatusUnknown(name, e) from e
+                logger.warning(f"mcp query '{name}' failed: {e}, attempting reconnect")
                 if await self._reconnect():
                     result = await self._client.call_tool(name, args)
                     return result.content[0].text if result.content else ""
