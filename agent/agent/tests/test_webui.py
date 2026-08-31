@@ -22,7 +22,7 @@ def test_ui_serves_index_and_static_assets():
 
     assert index.status_code == 200
     assert 'href="style.css"' in index.text
-    assert 'src="app.js"' in index.text
+    assert 'src="app.js?v=5"' in index.text
     assert css.status_code == 200
     assert "text/css" in css.headers["content-type"]
     assert javascript.status_code == 200
@@ -90,6 +90,28 @@ def test_webui_uses_config_response_contract_and_preserves_saved_credentials():
     assert 'provider.api_key !== "********"' in script
     assert 'provider.api_key === "********" ? ""' in script
     assert 'provider.api_key = ""' in script
+
+
+def test_webui_uses_in_page_dialogs_instead_of_native_blocks():
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    assert "confirm(" not in script
+    assert "prompt(" not in script
+    assert "alert(" not in script
+    assert "function showDialog(" in script
+    assert 'className = "modal-backdrop dialog-backdrop"' in script
+    assert ".confirm-dialog{" in stylesheet
+    assert ".dialog-actions{" in stylesheet
+
+
+def test_webui_approval_card_renders_editable_params_from_schema():
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    assert "function coerceSchemaValue(" in script
+    assert "event.schema?.properties" in script
+    assert "approval-param-" in script
+    assert 'className = "approval-card"' in script
 
 
 def test_webui_model_listbox_has_static_provider_groups():

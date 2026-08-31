@@ -1,6 +1,6 @@
 import json
 
-from .base import Adapter
+from .base import Adapter, ensure_response_ok
 from .openai_chat import _tools
 from ..stream import StreamBuilder
 from ..types import TextBlock, ToolCallBlock, ToolResultBlock
@@ -30,7 +30,7 @@ class OpenAIResponsesAdapter(Adapter):
         text_open = False; tools = set(); status = "stop"
         try:
             async with provider.client().stream("POST", "/responses", json=request) as response:
-                response.raise_for_status()
+                await ensure_response_ok(response)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"): continue
                     raw = line[5:].strip()

@@ -159,15 +159,17 @@ class Session:
         # 追加写：只写这一条消息到 JSONL
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
-    def append_assistant(self, content: str, active_skills=None):
+    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = ""):
         message = {"role": "assistant", "content": content}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         if active_skills:
             message["active_skills"] = sorted(set(active_skills))
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
-    def append_assistant_with_tool_calls(self, text: str, tool_call_events: list):
+    def append_assistant_with_tool_calls(self, text: str, tool_call_events: list, reasoning_content: str = ""):
         tool_calls_stored = [
             {
                 "id": tc["id"],
@@ -180,6 +182,8 @@ class Session:
             for tc in tool_call_events
         ]
         message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls_stored}
+        if reasoning_content:
+            message["reasoning_content"] = reasoning_content
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)

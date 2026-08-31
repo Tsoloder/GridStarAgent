@@ -86,6 +86,27 @@ def _tool_name_suggestions(name: str, valid_names: set[str]) -> list[str]:
     return difflib.get_close_matches(name, sorted(valid_names), n=3, cutoff=0.35)
 
 
+def _auto_plan_waits_for_choice(text: str) -> bool:
+    """Return whether an unfinished auto-mode plan incorrectly asks for a choice."""
+    plan = None
+    has_options = False
+    for raw in re.findall(r"```json\s*([\s\S]*?)```", text or "", re.I):
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if isinstance(data.get("phase_plan"), dict):
+            plan = data["phase_plan"]
+        has_options = has_options or bool(data.get("options"))
+    phases = plan.get("phases", []) if isinstance(plan, dict) else []
+    return has_options and any(
+        str(phase.get("status", "pending")).lower() in {"pending", "active", "running"}
+        for phase in phases if isinstance(phase, dict)
+    )
+
+
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
 
 
@@ -264,6 +285,7 @@ async def run_agent_loop(
             model_messages.append(clean)
 
         text_acc = ""
+        reasoning_acc = ""
         tool_calls = []
         usage = {}
         _stop_reason = "stop"   # v4: 接收 provider 返回的 stop_reason
@@ -290,10 +312,11 @@ async def run_agent_loop(
             ):
                 if event["type"] == "text_chunk":
                     text_acc += event["delta"]
-                    # 结构化延续时缓冲文本流，避免 tool_params JSON 被前端实时解析渲染
-                    if not is_structured_continuation:
+                    # 自动模式先缓冲整段文本，校验阶段计划后再发送，避免无效 options 闪现。
+                    if not is_structured_continuation and interaction_mode != "auto":
                         yield event
-                elif event["type"] == "reasoning_chunk":   # v4: 透传推理过程
+                elif event["type"] == "reasoning_chunk":   # v4: 透传并保留推理过程
+                    reasoning_acc += event.get("delta", "")
                     yield event
                 elif event["type"] == "tool_call":
                     tool_calls.append(event)
@@ -355,7 +378,7 @@ async def run_agent_loop(
                 }
                 return
             _invalid_tool_reselection_used = True
-            session.append_assistant_with_tool_calls(text_acc, tool_calls)
+            session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             _pending_reminders.append(
                 "<invalid_tool_name_reminder>\n"
                 "工具名必须与本轮提供的工具名完全一致。无效工具名：%s。\n"
@@ -372,7 +395,7 @@ async def run_agent_loop(
             _truncation_retries = getattr(run_agent_loop, '_truncation_retries', 0)
             if _truncation_retries < 2:
                 setattr(run_agent_loop, '_truncation_retries', _truncation_retries + 1)
-                session.append_assistant_with_tool_calls(text_acc, tool_calls)
+                session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
                 _pending_reminders.append(
                     "<truncation_reminder>\n"
                     "上一次回复因长度限制被截断，工具调用参数可能不完整。"
@@ -416,7 +439,7 @@ async def run_agent_loop(
             _mutation_count = sum(1 for tc in tool_calls
                                   if not _is_query_tool(tc["name"]))
             if _mutation_count > 1:
-                session.append_assistant_with_tool_calls(text_acc, tool_calls)
+                session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
                 _pending_reminders.append(
                     "<mutation_serial_reminder>\n"
                     "你一次返回了 %d 个操作类工具调用。"
@@ -428,6 +451,8 @@ async def run_agent_loop(
                 continue
 
         if tool_calls:
+            if interaction_mode == "auto" and text_acc:
+                yield {"type": "text_chunk", "delta": text_acc}
             # 如果 LLM 文本中包含 phase_plan JSON，立即作为独立 SSE 事件发出
             # 让前端可以立即渲染阶段计划面板，不等 done 事件
             if '"phase_plan"' in text_acc:
@@ -445,7 +470,7 @@ async def run_agent_loop(
                                 tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
             logger.info("[tool exec] 开始执行 %d 个工具", len(tool_calls))
 
-            session.append_assistant_with_tool_calls(text_acc, tool_calls)
+            session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for tc in tool_calls:
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource"}
                 # 工具执行日志
@@ -562,7 +587,7 @@ async def run_agent_loop(
             if not has_structured and format_retry < MAX_FORMAT_RETRIES:
                 # LLM 未输出结构化 JSON，注入格式提醒让其补充 options
                 format_retry += 1
-                session.append_assistant(text_acc, loaded_skills)
+                session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 if interaction_mode == "auto":
                     _reminder_types = "options、tool_params、phase_plan、workflow"
                     _reminder_example = (
@@ -590,11 +615,22 @@ async def run_agent_loop(
                     "</format_reminder>" % (_reminder_types, _reminder_example)
                 )
                 continue
+            if interaction_mode == "auto" and _auto_plan_waits_for_choice(text_acc):
+                session.append_assistant(text_acc, loaded_skills, reasoning_acc)
+                _pending_reminders.append(
+                    "<auto_phase_plan_reminder>\n"
+                    "当前 phase_plan 仍有 pending、active 或 running 阶段，自动模式不能输出 options "
+                    "或等待用户选择。请更新 phase_plan，并直接调用下一阶段所需工具。"
+                    "仅在缺少必要用户信息、执行失败或不可逆高影响操作前才允许询问用户。\n"
+                    "</auto_phase_plan_reminder>"
+                )
+                continue
+
             # 如果刚被提醒过 phase_plan 且只输出了 phase_plan 没有工具调用，
             # 提醒 LLM 继续执行工具，不要直接结束
             # 结构化延续（tool_params_confirmed）下 LLM 仍输出 tool_params 时拦截 retry
             if is_structured_continuation and ("\"tool_params\"" in text_acc or "\"toolparams\"" in text_acc) and not tool_calls:
-                session.append_assistant(text_acc, loaded_skills)
+                session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 _pending_reminders.append(
                     "<structured_continuation_reminder>\n"
                     "当前消息是用户对 tool_params 的确认结果。\n"
@@ -607,15 +643,16 @@ async def run_agent_loop(
                 continue
 
             if _phase_plan_reminded and '"phase_plan"' in text_acc and not tool_calls:
-                session.append_assistant(text_acc, loaded_skills)
+                session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 _pending_reminders.append(
                     "phase_plan 已收到。现在请继续执行工具调用，推进任务流程。"
                     "不要只输出 phase_plan，需要在同一条回复中同时调用工具。"
                 )
                 continue
-            session.append_assistant(text_acc, loaded_skills)
-            # text_chunk events were already streamed in real time above;
-            # no need to yield the accumulated text again.
+            session.append_assistant(text_acc, loaded_skills, reasoning_acc)
+            # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
+            if interaction_mode == "auto" and text_acc:
+                yield {"type": "text_chunk", "delta": text_acc}
             logger.info("[done] session=%s tokens=%s", session.id, usage.get("total", 0))
             yield {
                 "type": "done",

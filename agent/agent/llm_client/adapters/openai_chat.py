@@ -1,6 +1,6 @@
 import json
 
-from .base import Adapter
+from .base import Adapter, ensure_response_ok
 from ..stream import StreamBuilder
 from ..types import TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
 
@@ -14,8 +14,11 @@ class OpenAIChatAdapter(Adapter):
     def build_request(self, model, messages, tools):
         output = []
         for message in messages:
-            text = "".join(b.text for b in message.content if isinstance(b, (TextBlock, ThinkingBlock)))
+            text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
+            reasoning = "".join(b.text for b in message.content if isinstance(b, ThinkingBlock))
             item = {"role": message.role, "content": text or None}
+            if message.role == "assistant" and reasoning:
+                item[model.compat.get("reasoning_field", "reasoning_content")] = reasoning
             calls = [b for b in message.content if isinstance(b, ToolCallBlock)]
             results = [b for b in message.content if isinstance(b, ToolResultBlock)]
             if calls:
@@ -43,7 +46,7 @@ class OpenAIChatAdapter(Adapter):
         finish = "stop"
         try:
             async with provider.client().stream("POST", "/chat/completions", json=request) as response:
-                response.raise_for_status()
+                await ensure_response_ok(response)
                 async for line in response.aiter_lines():
                     if not line.startswith("data:"): continue
                     payload = line[5:].strip()

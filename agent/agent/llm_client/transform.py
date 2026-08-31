@@ -1,6 +1,6 @@
 import json
 
-from .types import Message, TextBlock, ToolCallBlock, ToolResultBlock
+from .types import Message, TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
 
 
 class MessageTransformer:
@@ -13,6 +13,8 @@ class MessageTransformer:
             blocks = []
             if item.get("content"):
                 blocks.append(TextBlock(str(item["content"])))
+            if role == "assistant" and item.get("reasoning_content"):
+                blocks.append(ThinkingBlock(str(item["reasoning_content"])))
             if role == "assistant":
                 for call in item.get("tool_calls", []):
                     function = call.get("function", {})

@@ -198,6 +198,11 @@ app.add_middleware(
 WEBUI_DIR = Path(__file__).resolve().parents[2] / "webui"
 
 
+@app.get("/", include_in_schema=False)
+async def root_redirect():
+    return RedirectResponse(url="/ui/")
+
+
 @app.get("/ui", include_in_schema=False)
 async def webui_redirect():
     return RedirectResponse(url="/ui/")
@@ -377,8 +382,7 @@ def _catalog_models():
         }
         for item in _model_catalog.snapshot.models.values()
         if (
-            item.key in {model.key for model in current_config.models}
-            and item.config.enabled
+            item.config.enabled
             and current_config.provider(item.config.provider).enabled
         )
     ]

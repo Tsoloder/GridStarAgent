@@ -25,6 +25,24 @@ function showToast(message) {
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.toast.classList.add("hidden"), 5000);
 }
+function showDialog({title, message = "", input, confirmText = "确定", cancelText = "取消", danger = false}) {
+  return new Promise(resolve => {
+    const backdrop = document.createElement("div"); backdrop.className = "modal-backdrop dialog-backdrop";
+    const okClass = danger ? "action-button deny" : "action-button approve";
+    backdrop.innerHTML = `<div class="confirm-dialog" role="dialog" aria-modal="true" aria-label="${escapeHtml(title)}"><h3>${escapeHtml(title)}</h3>${message ? `<p>${escapeHtml(message)}</p>` : ""}${input !== undefined ? `<input type="text" value="${escapeHtml(input)}" aria-label="${escapeHtml(title)}">` : ""}<div class="dialog-actions"><button type="button" class="action-button" data-act="cancel">${escapeHtml(cancelText)}</button><button type="button" class="${okClass}" data-act="ok">${escapeHtml(confirmText)}</button></div></div>`;
+    let settled = false;
+    const done = value => { if (settled) return; settled = true; document.removeEventListener("keydown", onKey); backdrop.remove(); resolve(value); };
+    const ok = () => { if (input !== undefined) { const value = $("input", backdrop)?.value.trim() || ""; done(value || null); } else done(true); };
+    const cancel = () => done(input !== undefined ? null : false);
+    const onKey = event => { if (event.key === "Escape") cancel(); else if (event.key === "Enter") ok(); };
+    $("[data-act='ok']", backdrop).onclick = ok;
+    $("[data-act='cancel']", backdrop).onclick = cancel;
+    backdrop.onclick = event => { if (event.target === backdrop) cancel(); };
+    document.addEventListener("keydown", onKey);
+    document.body.append(backdrop);
+    if (input !== undefined) { const field = $("input", backdrop); field.focus(); field.select(); }
+  });
+}
 async function request(path, options = {}) {
   const response = await fetch(path, {headers: {"Content-Type": "application/json", ...(options.headers || {})}, ...options});
   if (!response.ok) {
@@ -229,7 +247,7 @@ function renderPhase(value) {
   const phase = extractPhase(value) || value;
   if (!phase || !Array.isArray(phase.phases)) return;
   el.phasePanel.classList.remove("hidden");
-  const completed = phase.phases.filter(item => ["done","succeeded","completed"].includes(item.status)).length;
+  const completed = phase.phases.filter(item => ["done","succeeded","completed","skipped"].includes(item.status)).length;
   el.phasePanel.innerHTML = `<div class="phase-head"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small></div><div class="phase-steps"></div>`;
   phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.desc || "")}">${escapeHtml(item.title || item.id || "阶段")}</div>`));
 }
@@ -266,17 +284,56 @@ function renderToolResult(event, parent) {
   const result = $(".tool-result", item); result.classList.remove("hidden"); $("pre", result).textContent = String(event.result ?? "");
   updateToolGroup(item.closest(".tool-group")); scrollMessages();
 }
+function coerceSchemaValue(raw, type) {
+  const text = String(raw ?? "").trim();
+  if (type === "number" || type === "integer") { const number = Number(text); return Number.isNaN(number) ? text : number; }
+  if (type === "boolean") return ["true","1","yes"].includes(text.toLowerCase());
+  if (type === "object" || type === "array") { try { return JSON.parse(text); } catch (_) { return text; } }
+  return raw;
+}
 function renderApproval(event, parent) {
   const card = document.createElement("section"); card.className = "approval-card";
-  card.innerHTML = `<div class="card-head"><strong>审批工具 · ${escapeHtml(event.name)}</strong><span class="status">等待操作</span></div><div class="approval-args"><textarea aria-label="工具参数">${escapeHtml(JSON.stringify(event.args || {}, null, 2))}</textarea></div><div class="approval-actions"><button class="action-button approve" type="button">批准</button><button class="action-button deny" type="button">拒绝</button></div>`;
+  card.innerHTML = `<div class="card-head"><strong>审批工具 · ${escapeHtml(event.name)}</strong><span class="status">等待操作</span></div>`;
+  const args = event.args && typeof event.args === "object" && !Array.isArray(event.args) ? event.args : {};
+  const schemaProps = event.schema?.properties && typeof event.schema.properties === "object" ? event.schema.properties : null;
+  const required = Array.isArray(event.schema?.required) ? event.schema.required : [];
+  const inferType = value => typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : (value !== null && typeof value === "object" ? "object" : "string");
+  const entries = schemaProps
+    ? Object.entries(schemaProps).map(([name, def]) => ({name, type: def?.type || inferType(args[name]), desc: def?.description || "", value: args[name]}))
+    : Object.keys(args).map(name => ({name, type: inferType(args[name]), desc: "", value: args[name]}));
+  if (schemaProps) Object.keys(args).filter(name => !(name in schemaProps)).forEach(name => entries.push({name, type: inferType(args[name]), desc: "", value: args[name]}));
+  if (entries.length) {
+    const wrap = document.createElement("div"); wrap.className = "params";
+    entries.forEach((entry, index) => {
+      const row = document.createElement("div"); row.className = "param-row";
+      const mark = required.includes(entry.name) ? " *" : "";
+      row.innerHTML = `<label for="approval-param-${index}"><b>${escapeHtml(entry.name + mark)}</b>${escapeHtml(entry.desc || "")}</label>`;
+      const structured = entry.type === "object" || entry.type === "array";
+      const input = document.createElement(structured ? "textarea" : "input");
+      input.id = `approval-param-${index}`; input.dataset.index = index; input.value = valueForInput(entry.value);
+      if (structured) { input.rows = 3; input.style.font = "11px/1.4 Consolas,monospace"; }
+      row.append(input); wrap.append(row);
+    });
+    card.append(wrap);
+  } else {
+    card.insertAdjacentHTML("beforeend", `<div class="approval-args"><textarea aria-label="工具参数">${escapeHtml(JSON.stringify(event.args || {}, null, 2))}</textarea></div>`);
+  }
+  card.insertAdjacentHTML("beforeend", `<div class="approval-actions"><button class="action-button approve" type="button">批准</button><button class="action-button deny" type="button">拒绝</button></div>`);
+  const setDisabled = disabled => card.querySelectorAll("button,input,textarea").forEach(item => item.disabled = disabled);
   const resolve = async approved => {
-    card.querySelectorAll("button,textarea").forEach(item => item.disabled = true);
+    setDisabled(true);
     let args = event.args || {};
-    if (approved) { try { args = JSON.parse($("textarea", card).value); } catch (_) { showToast("工具参数不是有效 JSON"); card.querySelectorAll("button,textarea").forEach(item => item.disabled = false); return; } }
+    if (approved) {
+      try {
+        args = entries.length
+          ? Object.fromEntries(entries.map((entry, index) => [entry.name, coerceSchemaValue(card.querySelector(`[data-index="${index}"]`).value, entry.type)]))
+          : JSON.parse($(".approval-args textarea", card).value);
+      } catch (_) { showToast("工具参数不是有效 JSON"); setDisabled(false); return; }
+    }
     try {
       await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/tool-approvals/${encodeURIComponent(event.call_id)}`, {method:"POST",body:JSON.stringify({approved,args})});
       const status = $(".status", card); status.textContent = approved ? "已批准" : "已拒绝"; status.className = `status ${approved ? "succeeded" : "cancelled"}`;
-    } catch (error) { showToast(error.message); card.querySelectorAll("button,textarea").forEach(item => item.disabled = false); }
+    } catch (error) { showToast(error.message); setDisabled(false); }
   };
   $(".approve", card).onclick = () => resolve(true); $(".deny", card).onclick = () => resolve(false); parent.append(card); scrollMessages();
 }
@@ -347,16 +404,16 @@ async function createSession() {
   try { const data = await request("/sessions", {method:"POST",body:JSON.stringify({title:"New Session",model_id:el.model.value || ""})}); await refreshSessions(data.id); } catch (error) { showToast(error.message); }
 }
 async function renameSession(session) {
-  const title = prompt("输入新的会话名称", session.title || ""); if (!title?.trim()) return;
+  const title = await showDialog({title:"重命名会话", input:session.title || "", confirmText:"重命名"}); if (!title?.trim()) return;
   try { await request(`/sessions/${encodeURIComponent(session.id)}/rename`, {method:"PUT",body:JSON.stringify({title:title.trim()})}); await refreshSessions(); if (state.session?.meta.id === session.id) { state.session.meta.title = title.trim(); el.currentTitle.textContent = title.trim(); } } catch (error) { showToast(error.message); }
 }
 async function clearSession(session) {
-  if (!confirm(`清空“${session.title}”的全部消息？`)) return;
+  if (!(await showDialog({title:"清空会话", message:`将清空“${session.title}”的全部消息，此操作不可撤销。`, confirmText:"清空", danger:true}))) return;
   try { await request(`/sessions/${encodeURIComponent(session.id)}/clear`, {method:"POST",body:"{}"}); if (state.session?.meta.id === session.id) await loadSession(session.id); await refreshSessions(); } catch (error) { showToast(error.message); }
 }
 async function deleteSession(session) {
-  if (!confirm(`永久删除“${session.title}”？`)) return;
-  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); if (state.session?.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>开始一项工程任务</strong><p>创建对话后，可进行网格生成、质量检查和工具编排。</p></div>'; } await refreshSessions(); updateSendState(); } catch (error) { showToast(error.message); }
+  if (!(await showDialog({title:"删除会话", message:`将永久删除“${session.title}”，此操作不可撤销。`, confirmText:"删除", danger:true}))) return;
+  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); if (state.session?.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>开始一项工程任务</strong><p>创建对话后，可进行网格生成、质量检查和工具编排。</p></div>'; el.welcome = $("#welcome"); el.phasePanel.classList.add("hidden"); state.workflow = null; } await refreshSessions(); closeSessions(); updateSendState(); } catch (error) { showToast(error.message); }
 }
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
@@ -444,21 +501,21 @@ function renderProviderEditor() {
 }
 function renderModelCard(model, parent) {
   const card = document.createElement("details"); card.className = "settings-model"; card.innerHTML = `<summary><span><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.id)}</small></span><code>${escapeHtml(model.api || "继承供应商")}</code><button type="button" class="model-delete" aria-label="删除模型">×</button></summary><div class="model-advanced"><div class="form-grid">${modelField("显示名称","name",model.name || "")}${modelField("Context window","context_window",model.context_window || 32768,"number",'min="1"')}${modelField("Max output tokens","max_output_tokens",model.max_output_tokens || 4096,"number",'min="1"')}<label class="settings-field"><span>API 协议覆盖</span><select data-model-field="api"><option value="">继承供应商</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label></div><div class="capability-grid">${CAPABILITIES.map(([key,label]) => `<label><input type="checkbox" data-capability="${key}" ${model.capabilities?.[key] ? "checked" : ""}> ${label}</label>`).join("")}</div></div>`;
-  card.querySelector('[data-model-field="api"]').value = model.api || ""; card.querySelectorAll("[data-model-field]").forEach(input => input.onchange = () => { model[input.dataset.modelField] = input.type === "number" ? Number(input.value) : (input.value || null); markSettingsDirty(); }); card.querySelectorAll("[data-capability]").forEach(input => input.onchange = () => { model.capabilities[input.dataset.capability] = input.checked; markSettingsDirty(); }); $(".model-delete",card).onclick = event => { event.preventDefault(); state.settings.draft.models = state.settings.draft.models.filter(item => item !== model); markSettingsDirty(); renderSettings(); }; parent.append(card);
+  card.querySelector('[data-model-field="api"]').value = model.api || ""; card.querySelectorAll("[data-model-field]").forEach(input => input.onchange = () => { model[input.dataset.modelField] = input.type === "number" ? Number(input.value) : (input.value || null); markSettingsDirty(); }); card.querySelectorAll("[data-capability]").forEach(input => input.onchange = () => { model.capabilities[input.dataset.capability] = input.checked; markSettingsDirty(); }); $(".model-delete",card).onclick = event => { event.preventDefault(); const deletedKey = `${model.provider}/${model.id}`; state.settings.draft.models = state.settings.draft.models.filter(item => item !== model); if (state.settings.draft.default_model === deletedKey) { const fallback = state.settings.draft.models.find(item => item.enabled !== false); state.settings.draft.default_model = fallback ? `${fallback.provider}/${fallback.id}` : ""; } markSettingsDirty(); renderSettings(); }; parent.append(card);
 }
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
-function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } state.settings.draft.models.push({id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,context_window:32768,max_output_tokens:4096,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}); markSettingsDirty(); renderSettings(); }
+function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,context_window:32768,max_output_tokens:4096,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
 function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); }
-async function openSettings() { try { const data = await request("/config"); const config = data.config || data; state.settings.original = clone(config); state.settings.draft = clone(config); state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; state.settings.activeProviderId = state.settings.draft.providers?.[0]?.id || null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
-function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty && !confirm("放弃未保存的模型设置？")) return; Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
+async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); state.settings.draft.providers ||= []; state.settings.draft.models ||= []; state.settings.draft.default_model ||= ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; state.settings.activeProviderId = state.settings.draft.providers[0]?.id || null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
+function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
 function providerPayload(provider) { return {provider:{...provider,headers:provider.headers || {},discover_models:provider.discover_models !== false}}; }
 async function testProvider() { const provider = draftProvider(), id = provider.id, controller = new AbortController(); state.settings.controllers.test?.abort(); state.settings.controllers.test = controller; state.settings.testingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/test",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); if (state.settings.activeProviderId === id) el.settingsStatus.textContent = data.message || `连接成功 · ${data.latency_ms || 0}ms`; } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.testingProviderId === id) { state.settings.testingProviderId = null; renderProviderEditor(); } } }
 async function readProviderModels() { const provider = draftProvider(), id = provider.id, controller = new AbortController(); state.settings.controllers.models?.abort(); state.settings.controllers.models = controller; state.settings.readingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/models",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); state.settings.discoveredModels[id] = [...new Map((data.models || []).map(item => [item.id || item.model_id,item])).values()].sort((a,b) => String(a.id || a.model_id).localeCompare(String(b.id || b.model_id))); if (state.settings.activeProviderId === id) renderProviderEditor(); } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.readingProviderId === id) { state.settings.readingProviderId = null; renderProviderEditor(); } } }
-function addProvider() { const type = prompt("供应商类型：openai / anthropic / compatible / ollama","openai"); if (!type) return; const preset = PROVIDER_PRESETS[type.trim().toLowerCase()]; if (!preset) { el.settingsStatus.textContent = "未知供应商类型"; return; } let id = type === "compatible" ? "custom" : type, suffix = 2; while (state.settings.draft.providers.some(item => item.id === id)) id = `${type}-${suffix++}`; state.settings.draft.providers.push({id,...preset,api_key:"",api_key_env:"",headers:{},discover_models:true,enabled:true}); state.settings.activeProviderId = id; markSettingsDirty(); renderSettings(); }
+function addProvider() { const providers = state.settings.draft.providers ||= []; let id = "custom", suffix = 2; while (providers.some(item => item.id === id)) id = `custom-${suffix++}`; providers.push({id,...PROVIDER_PRESETS.compatible,name:"新供应商",api_key:"",api_key_env:"",headers:{},discover_models:true,enabled:true}); state.settings.activeProviderId = id; markSettingsDirty(); renderSettings(); const nameInput = el.providerEditor.querySelector('[data-provider-field="name"]'); nameInput?.focus(); nameInput?.select(); }
 function deleteProvider() { const provider = draftProvider(), models = providerModels(); if (models.length) { el.settingsStatus.textContent = "请先删除该供应商下的模型"; return; } if (state.settings.draft.default_model?.startsWith(`${provider.id}/`)) { el.settingsStatus.textContent = "默认模型属于该供应商，无法删除"; return; } state.settings.draft.providers = state.settings.draft.providers.filter(item => item !== provider); state.settings.activeProviderId = state.settings.draft.providers[0]?.id || null; markSettingsDirty(); renderSettings(); }
-function validateSettings() { const errors = []; for (const provider of state.settings.draft.providers) { try { const url = new URL(provider.base_url); if (!["http:","https:"].includes(url.protocol)) errors.push(`${provider.name} 的 API 地址无效`); } catch (_) { errors.push(`${provider.name} 的 API 地址无效`); } } for (const model of state.settings.draft.models) { if (model.context_window < model.max_output_tokens) errors.push(`${model.id} 的 context window 不能小于最大输出`); } if (!state.settings.draft.models.some(item => `${item.provider}/${item.id}` === state.settings.draft.default_model && item.enabled !== false)) errors.push("默认模型不存在或未启用"); el.settingsStatus.textContent = errors[0] || ""; return !errors.length; }
-async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); await refreshModels(null, data.config?.default_model); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
+function validateSettings() { const errors = []; for (const provider of state.settings.draft.providers) { try { const url = new URL(provider.base_url); if (!["http:","https:"].includes(url.protocol)) errors.push(`${provider.name} 的 API 地址无效`); } catch (_) { errors.push(`${provider.name} 的 API 地址无效`); } } for (const model of state.settings.draft.models) { if (model.context_window < model.max_output_tokens) errors.push(`${model.id} 的 context window 不能小于最大输出`); } const enabledModels = state.settings.draft.models.filter(item => item.enabled !== false); if (!enabledModels.some(item => `${item.provider}/${item.id}` === state.settings.draft.default_model)) { const fallback = enabledModels[0]; if (fallback) state.settings.draft.default_model = `${fallback.provider}/${fallback.id}`; else errors.push("请至少添加一个已启用模型"); } el.settingsStatus.textContent = errors[0] || ""; return !errors.length; }
+async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); state.configLoaded = true; el.warning.classList.add("hidden"); await refreshModels(null, data.config?.default_model); updateSendState(); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
 async function refreshModels(models = null, defaultModel = null) { if (!models) { const data = await request("/config/models"); models = data.models || []; defaultModel = data.default_model || defaultModel; } const previous = el.model.value; state.models = models; const keys = visibleModels().map(modelKey); selectModel(keys.includes(previous) ? previous : (defaultModel && keys.includes(defaultModel) ? defaultModel : keys[0] || "")); }
 
 async function bootstrap() {

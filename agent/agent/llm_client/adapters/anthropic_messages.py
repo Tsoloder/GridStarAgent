@@ -1,6 +1,6 @@
 import json
 
-from .base import Adapter
+from .base import Adapter, ensure_response_ok
 from ..stream import StreamBuilder
 from ..types import TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
 
@@ -36,7 +36,7 @@ class AnthropicMessagesAdapter(Adapter):
             if event_name and data_lines: yield event_name, json.loads("\n".join(data_lines))
         try:
             async with provider.client().stream("POST", "/messages", json=request) as response:
-                response.raise_for_status()
+                await ensure_response_ok(response)
                 async for kind, data in events(response):
                     idx = data.get("index", 0); block = data.get("content_block", {}); delta = data.get("delta", {})
                     if kind == "content_block_start":
