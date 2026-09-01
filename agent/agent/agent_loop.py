@@ -19,11 +19,13 @@ from tool_memory import (
     remember as remember_tool_memory,
 )
 from skill_runtime import (
+    RuntimeTool,
     SkillError,
     SkillRegistry,
     render_selected_skill,
     tool_is_allowed,
 )
+from task_ledger import PLAN_STATUSES, result_failed as _tool_result_failed
 
 logger = logging.getLogger(__name__)
 
@@ -86,24 +88,56 @@ def _tool_name_suggestions(name: str, valid_names: set[str]) -> list[str]:
     return difflib.get_close_matches(name, sorted(valid_names), n=3, cutoff=0.35)
 
 
-def _auto_plan_waits_for_choice(text: str) -> bool:
-    """Return whether an unfinished auto-mode plan incorrectly asks for a choice."""
-    plan = None
-    has_options = False
-    for raw in re.findall(r"```json\s*([\s\S]*?)```", text or "", re.I):
-        try:
-            data = json.loads(raw)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        if isinstance(data.get("phase_plan"), dict):
-            plan = data["phase_plan"]
-        has_options = has_options or bool(data.get("options"))
-    phases = plan.get("phases", []) if isinstance(plan, dict) else []
-    return has_options and any(
-        str(phase.get("status", "pending")).lower() in {"pending", "active", "running"}
-        for phase in phases if isinstance(phase, dict)
+UPDATE_PLAN_TOOL_NAME = "update_plan"
+
+UPDATE_PLAN_TOOL = RuntimeTool(
+    name=UPDATE_PLAN_TOOL_NAME,
+    description=(
+        "创建或更新当前任务的阶段计划（全量替换语义：每次传入完整阶段列表）。"
+        "确定整体规划后必须立即调用；每个阶段开始/结束时更新状态，并用 note 记录关键事实"
+        "（对象数量、文件名等）。状态枚举：pending（待开始）/ in_progress（进行中）/ "
+        "done（完成）/ failed（失败）/ skipped（跳过）。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "计划 id，如 f6-mesh"},
+            "title": {"type": "string", "description": "计划标题，如 f6.igs 网格生成"},
+            "phases": {
+                "type": "array",
+                "description": "完整阶段列表（全量替换），每项含 id / title / status / note",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "title": {"type": "string"},
+                        "status": {"type": "string", "enum": list(PLAN_STATUSES)},
+                        "note": {"type": "string", "description": "该阶段的关键事实（可选）"},
+                    },
+                    "required": ["id", "title"],
+                },
+            },
+        },
+        "required": ["id", "title", "phases"],
+    },
+)
+
+# 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
+_NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill", UPDATE_PLAN_TOOL_NAME}
+
+
+def _auto_plan_waits_for_choice(text: str, ledger) -> bool:
+    """台账计划未完成（有 pending/in_progress 阶段）且输出 options 时返回 True。
+
+    auto 模式下计划未完成应继续执行工具，而不是停下等用户选择。
+    """
+    if ledger is None or not getattr(ledger, "plan", None):
+        return False
+    if '"options"' not in (text or ""):
+        return False
+    return any(
+        str(phase.get("status", "pending")) in {"pending", "in_progress"}
+        for phase in ledger.plan.get("phases", []) if isinstance(phase, dict)
     )
 
 
@@ -133,6 +167,7 @@ async def run_agent_loop(
     interaction_mode: str = "manual",
     model_override: str = None,
     model_runtime=None,
+    ledger=None,
 ) -> AsyncIterator[dict]:
     selected_skills = selected_skills or []
     interaction_mode = "auto" if interaction_mode == "auto" else "manual"
@@ -221,7 +256,8 @@ async def run_agent_loop(
     else:
         _fmt_parts.extend([
             "- auto 模式下严禁输出 tool_params，直接调用工具执行。\n",
-            "- 多阶段 CFD 任务开始时必须用 phase_plan JSON 块展示阶段计划。\n",
+            "- 多阶段任务确定整体规划后必须立即调用 update_plan 工具创建阶段计划，"
+            "每个阶段开始/结束时再次调用 update_plan 更新状态。\n",
         ])
     _fmt_parts.extend([
         "- 自然语言只写一句简短说明，不重复列出选项或参数内容。\n",
@@ -230,22 +266,15 @@ async def run_agent_loop(
         "{\"options\": [{\"label\": \"继续网格划分\", \"value\": \"continue_mesh\", \"style\": \"primary\"}]}\n",
         "```\n",
     ])
-    if interaction_mode == "auto":
-        _fmt_parts.extend([
-            "```json\n",
-            "{\"phase_plan\": {\"id\": \"cad-mesh-main\", \"title\": \"...\", "
-            "\"phases\": [{\"id\": \"import\", \"title\": \"CAD 导入\", \"status\": \"active\"}]}}\n",
-            "```\n",
-        ])
     _fmt_parts.append("</output_format_reminder>")
     system_parts.append("".join(_fmt_parts))
     system_prompt = "\n\n".join(system_parts)
     turn = 0
     format_retry = 0
     MAX_FORMAT_RETRIES = 1
-    _phase_plan_reminded = False
-    _phase_plan_retry_count = 0
-    _phase_plan_blocked = False
+    _update_plan_reminded = False
+    _update_plan_blocked = False
+    _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
 
@@ -287,6 +316,11 @@ async def run_agent_loop(
         for reminder in _pending_reminders:
             model_messages.append({"role": "user", "content": reminder})
         _pending_reminders.clear()
+        # 台账快照只进本轮请求，不写回 session.messages——永不累积、免疫压缩
+        if ledger is not None:
+            _progress_snapshot = ledger.render_task_progress()
+            if _progress_snapshot:
+                model_messages.append({"role": "user", "content": _progress_snapshot})
 
         text_acc = ""
         reasoning_acc = ""
@@ -307,7 +341,7 @@ async def run_agent_loop(
                 tool for tool in mcp.available_tools()
                 if _tool_allowed_by_loaded_skills(tool.name, loaded_skills, skill_registry)
             ]
-            runtime_tools = skill_registry.internal_tools()
+            runtime_tools = skill_registry.internal_tools() + [UPDATE_PLAN_TOOL]
             if model_runtime is None:
                 raise RuntimeError("ModelRuntime is not available")
             async for event in _stream_runtime(
@@ -415,61 +449,69 @@ async def run_agent_loop(
                        "retryable": False}
                 return
 
-        # 检查是否需要补充 phase_plan（不阻止工具执行）
-        _only_internal = all(tc["name"] in {"read_skill", "read_skill_resource",
-                                              "create_skill"} for tc in tool_calls)
-        _phase_plan_missing = (interaction_mode == "auto" and tool_calls
-                               and not _only_internal
-                               and '"phase_plan"' not in text_acc
-                               and not _phase_plan_reminded)
-        if _phase_plan_missing:
-            _phase_plan_reminded = True
-            if not _phase_plan_blocked:
-                # 首次硬拦截：AUTO 模式必须先输出 phase_plan 再执行外部工具，
+        # 检查是否需要先创建计划（auto 模式：台账无计划时拦截外部工具调用）
+        _only_internal = all(tc["name"] in _NON_EXEC_TOOLS for tc in tool_calls)
+        _has_plan_call = any(tc["name"] == UPDATE_PLAN_TOOL_NAME for tc in tool_calls)
+        _plan_missing = (interaction_mode == "auto" and tool_calls
+                         and not _only_internal and not _has_plan_call
+                         and ledger is not None and ledger.plan is None
+                         and not _update_plan_reminded)
+        _skip_plan_reminder = False
+        if _plan_missing:
+            _update_plan_reminded = True
+            if not _update_plan_blocked:
+                # 首次硬拦截：AUTO 模式必须先调用 update_plan 创建计划，
                 # 否则前端任务规划进度区永远没有内容可渲染。
-                _phase_plan_blocked = True
+                _update_plan_blocked = True
                 session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
                 # 被暂缓的工具调用必须补一条 tool result，否则历史里悬空的
                 # tool_calls 会让 provider 在下一轮请求时报错。
+                # 内部工具（read_skill 等）无副作用，放行执行：读取技能/参考
+                # 文档正是模型制定正确计划的前提，不应被门禁误伤。
+                _internal_calls = [tc for tc in tool_calls
+                                   if tc["name"] in _NON_EXEC_TOOLS]
                 for tc in tool_calls:
+                    if tc["name"] in _NON_EXEC_TOOLS:
+                        continue
                     session.append_tool_result(
                         tc["id"],
-                        "[deferred] 该工具调用已被暂缓：请先输出 phase_plan JSON 块，再重新发起该工具调用。",
+                        "[deferred] 该工具调用已被暂缓：请先调用 update_plan 创建阶段计划，再重新发起该工具调用。",
                         tc["name"],
                     )
                 _pending_reminders.append(
-                    "<phase_plan_required>\n"
-                    "你在 AUTO 模式下尚未输出 phase_plan JSON 块就调用了外部工具，本次工具调用已被暂缓。\n"
-                    "请在下一条回复中先用 ```json 代码块输出 phase_plan，展示本任务的整体阶段计划，"
-                    "格式如：\n"
-                    "```json\n"
-                    "{\"phase_plan\": {\"id\": \"cad-mesh-main\", \"title\": \"...\", "
-                    "\"phases\": [{\"id\": \"import\", \"title\": \"CAD 导入\", \"status\": \"active\"}, "
-                    "{\"id\": \"mesh\", \"title\": \"网格生成\", \"status\": \"pending\"}]}}\n"
-                    "```\n"
+                    "<update_plan_required>\n"
+                    "你在 AUTO 模式下尚未创建任务计划就调用了外部工具，本次工具调用已被暂缓。\n"
+                    "请在下一条回复中先调用 update_plan 工具创建本任务的整体阶段计划"
+                    "（传入 id / title / phases，当前要执行的阶段标 in_progress，其余标 pending），\n"
                     "然后在同一条回复中继续输出需要执行的工具调用。\n"
-                    "</phase_plan_required>"
+                    "</update_plan_required>"
                 )
-                logger.info("[phase_plan] 首次外部工具调用缺少计划，已硬拦截暂缓执行")
-                continue
+                logger.info("[update_plan] 首次外部工具调用缺少计划，已硬拦截暂缓执行")
+                if _internal_calls:
+                    # 本批次中的内部工具照常执行；本轮已注入硬提醒，不再叠加
+                    tool_calls = _internal_calls
+                    _skip_plan_reminder = True
+                else:
+                    continue
 
-        # 如果已提醒过 phase_plan 但模型仍无视，注入提醒但不阻止工具执行
-        if _phase_plan_reminded and not _phase_plan_missing and interaction_mode == "auto" \
-           and tool_calls and not _only_internal \
-           and '"phase_plan"' not in text_acc \
-           and _phase_plan_retry_count < 2:
-            _phase_plan_retry_count += 1
+        # 已提醒过 update_plan 但模型仍无视时，注入提醒但不阻止工具执行
+        if _update_plan_reminded and not _plan_missing and interaction_mode == "auto" \
+           and tool_calls and not _only_internal and not _has_plan_call \
+           and ledger is not None and ledger.plan is None \
+           and _update_plan_retry_count < 2:
+            _update_plan_retry_count += 1
             _pending_reminders.append(
-                "<phase_plan_reminder>\n"
-                "请在下一步回复中补充 phase_plan JSON 块，展示当前任务的整体阶段计划。\n"
-                "phase_plan 和工具调用可以在同一条回复中共存，不需要停止工具执行。\n"
-                "</phase_plan_reminder>"
+                "<update_plan_reminder>\n"
+                "请在下一步回复中调用 update_plan 工具创建当前任务的阶段计划。\n"
+                "update_plan 和其他工具调用可以在同一条回复中共存，不需要停止工具执行。\n"
+                "</update_plan_reminder>"
             )
 
         # 操作类工具串行强制：一次返回多个操作工具则阻止执行
         if tool_calls and not _only_internal:
             _mutation_count = sum(1 for tc in tool_calls
-                                  if not _is_query_tool(tc["name"]))
+                                  if tc["name"] not in _NON_EXEC_TOOLS
+                                  and not _is_query_tool(tc["name"]))
             if _mutation_count > 1:
                 session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
                 _pending_reminders.append(
@@ -485,17 +527,10 @@ async def run_agent_loop(
         if tool_calls:
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
-            # 如果 LLM 文本中包含 phase_plan JSON，立即作为独立 SSE 事件发出
-            # 让前端可以立即渲染阶段计划面板，不等 done 事件
-            if '"phase_plan"' in text_acc:
-                yield {
-                    "type": "phase_plan",
-                    "text": text_acc,
-                }
 
             # 合并记忆后的工具参数与执行日志
             for tc in tool_calls:
-                if tc["name"] not in {"read_skill", "read_skill_resource", "create_skill"}:
+                if tc["name"] not in _NON_EXEC_TOOLS:
                     tool_schema = (mcp.tool_schema(tc["name"]) if hasattr(mcp, "tool_schema") else {})
                     tc["args"] = merge_tool_memory(tc["name"], tc.get("args", {}), tool_schema)
                     logger.info("[merge memory] name=%s final_args=%s",
@@ -504,7 +539,8 @@ async def run_agent_loop(
 
             session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for tc in tool_calls:
-                internal_tool = tc["name"] in {"read_skill", "read_skill_resource"}
+                internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
+                                               UPDATE_PLAN_TOOL_NAME}
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -515,8 +551,27 @@ async def run_agent_loop(
                     "args": tc["args"],
                     "internal": internal_tool,
                 }
+                _tool_ok = True
                 try:
-                    if tc["name"] == "read_skill":
+                    if tc["name"] == UPDATE_PLAN_TOOL_NAME:
+                        # 内置计划工具：不走 MCP、不走审批。写台账 + 发结构化事件
+                        if ledger is None:
+                            result = "update_plan 不可用：任务台账未初始化"
+                        else:
+                            try:
+                                result = ledger.update_plan(
+                                    str(tc["args"].get("id", "")),
+                                    str(tc["args"].get("title", "")),
+                                    tc["args"].get("phases", []),
+                                )
+                                yield {"type": "plan_updated", "plan": ledger.plan}
+                            except ValueError as ve:
+                                result = (
+                                    "update_plan 失败：%s。请传入完整计划"
+                                    "（id / title / phases，status 枚举 pending|in_progress|"
+                                    "done|failed|skipped）。" % ve
+                                )
+                    elif tc["name"] == "read_skill":
                         skill_id = str(tc["args"].get("skill_id", "")).strip().lower()
                         result = skill_registry.read_skill(skill_id)
                         loaded_skills.add(skill_id)
@@ -584,6 +639,7 @@ async def run_agent_loop(
                     result = ctx_mgr.persist_large_result(result, session.id)
                 except Exception as e:
                     result = f"Tool error: {e}"
+                    _tool_ok = False
                     logger.warning(f"tool {tc['name']} failed: {e}")
                     logger.warning("[tool error] %s: %s", tc["name"], e)
                 # 工具返回值日志
@@ -597,42 +653,36 @@ async def run_agent_loop(
                     "internal": internal_tool,
                 }
                 session.append_tool_result(tc["id"], result, tc["name"])
-            # 工具执行完毕后，如果缺少 phase_plan，注入轻量提醒
-            if _phase_plan_missing:
+                # 自动记账：每次工具调用（含 update_plan、失败）都记一条
+                if ledger is not None:
+                    ledger.record_call(
+                        tc["name"], tc["args"], result=result,
+                        ok=_tool_ok and not _tool_result_failed(result),
+                    )
+            # 工具执行完毕后，如果缺少计划，注入轻量提醒
+            if _plan_missing and not _skip_plan_reminder:
                 _pending_reminders.append(
-                    "<phase_plan_reminder>\n"
-                    "上一步工具已执行完毕。请在下一步回复中补充 phase_plan JSON 块，"
-                    "展示当前任务的整体阶段计划，同时继续执行下一步工具调用。\n"
-                    "phase_plan 和工具调用可以在同一条回复中共存。\n"
-                    "</phase_plan_reminder>"
+                    "<update_plan_reminder>\n"
+                    "上一步工具已执行完毕。请在下一步回复中调用 update_plan 工具"
+                    "创建当前任务的阶段计划，同时继续执行下一步工具调用。\n"
+                    "update_plan 和其他工具调用可以在同一条回复中共存。\n"
+                    "</update_plan_reminder>"
                 )
         else:
             # LLM 仅返回文本（无工具调用）
 
             # 检查回复是否包含结构化 JSON 块
-            if interaction_mode == "auto":
-                _structured_keywords = ('"options"', '"tool_params"', '"toolparams"',
-                                        '"phase_plan"', '"workflow"')
-            else:
-                _structured_keywords = ('"options"', '"tool_params"', '"toolparams"', '"workflow"')
+            _structured_keywords = ('"options"', '"tool_params"', '"toolparams"', '"workflow"')
             has_structured = any(keyword in text_acc for keyword in _structured_keywords)
             if not has_structured and format_retry < MAX_FORMAT_RETRIES:
                 # LLM 未输出结构化 JSON，注入格式提醒让其补充 options
                 format_retry += 1
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 if interaction_mode == "auto":
-                    _reminder_types = "options、tool_params、phase_plan、workflow"
-                    _reminder_example = (
-                        "或\n"
-                        "```json\n"
-                        "{\"phase_plan\": {\"id\": \"cad-mesh-main\", \"title\": \"...\", "
-                        "\"phases\": [{\"id\": \"import\", \"title\": \"CAD 导入\", "
-                        "\"status\": \"active\"}]}}\n"
-                        "```\n"
-                    )
+                    _reminder_types = "options、workflow（阶段计划请改用 update_plan 工具）"
                 else:
                     _reminder_types = "options、tool_params、workflow"
-                    _reminder_example = ""
+                _reminder_example = ""
                 _pending_reminders.append(
                     "<format_reminder>\n"
                     "你的上一条回复没有包含任何结构化 JSON 块。\n"
@@ -647,19 +697,17 @@ async def run_agent_loop(
                     "</format_reminder>" % (_reminder_types, _reminder_example)
                 )
                 continue
-            if interaction_mode == "auto" and _auto_plan_waits_for_choice(text_acc):
+            if interaction_mode == "auto" and _auto_plan_waits_for_choice(text_acc, ledger):
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 _pending_reminders.append(
-                    "<auto_phase_plan_reminder>\n"
-                    "当前 phase_plan 仍有 pending、active 或 running 阶段，自动模式不能输出 options "
-                    "或等待用户选择。请更新 phase_plan，并直接调用下一阶段所需工具。"
+                    "<auto_plan_reminder>\n"
+                    "当前计划仍有 pending 或 in_progress 阶段，自动模式不能输出 options "
+                    "或等待用户选择。请调用 update_plan 更新阶段状态，并直接调用下一阶段所需工具。"
                     "仅在缺少必要用户信息、执行失败或不可逆高影响操作前才允许询问用户。\n"
-                    "</auto_phase_plan_reminder>"
+                    "</auto_plan_reminder>"
                 )
                 continue
 
-            # 如果刚被提醒过 phase_plan 且只输出了 phase_plan 没有工具调用，
-            # 提醒 LLM 继续执行工具，不要直接结束
             # 结构化延续（tool_params_confirmed）下 LLM 仍输出 tool_params 时拦截 retry
             if is_structured_continuation and ("\"tool_params\"" in text_acc or "\"toolparams\"" in text_acc) and not tool_calls:
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
@@ -674,15 +722,6 @@ async def run_agent_loop(
                 )
                 continue
 
-            if _phase_plan_reminded and '"phase_plan"' in text_acc and not tool_calls:
-                session.append_assistant(text_acc, loaded_skills, reasoning_acc)
-                # AUTO 模式中间轮文本被缓冲，若不发出去前端永远看不到该计划
-                yield {"type": "phase_plan", "text": text_acc}
-                _pending_reminders.append(
-                    "phase_plan 已收到。现在请继续执行工具调用，推进任务流程。"
-                    "不要只输出 phase_plan，需要在同一条回复中同时调用工具。"
-                )
-                continue
             session.append_assistant(text_acc, loaded_skills, reasoning_acc)
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:

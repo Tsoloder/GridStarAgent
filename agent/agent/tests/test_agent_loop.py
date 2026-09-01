@@ -51,7 +51,7 @@ def _patch_stream_runtime(monkeypatch, agent_loop, stream_chat):
     monkeypatch.setattr(agent_loop, "_stream_runtime", stream_runtime)
 
 
-async def _run_fixture(fixture_name: str) -> list:
+async def _run_fixture(fixture_name: str, ledger=None) -> list:
     fixture = load_fixture(fixture_name)
     inp = fixture["input"]
     session = _make_session(inp["session_id"])
@@ -79,6 +79,7 @@ async def _run_fixture(fixture_name: str) -> list:
         interaction_mode=inp.get("interaction_mode", "manual"),
         model_override=inp.get("model_id"),
         model_runtime=mock_llm,
+        ledger=ledger,
     )
     async for event in stream:
         events.append(event)
@@ -122,12 +123,88 @@ async def test_tool_call_flow():
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_flow():
-    events = await _run_fixture("auto_mode_flow")
+async def test_auto_mode_flow(tmp_path, monkeypatch):
+    import uuid
+    import session as session_mod
+    from task_ledger import TaskLedger
+
+    # 隔离会话数据目录，避免污染真实台账/消息文件
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    sid = str(uuid.uuid5(uuid.NAMESPACE_URL, "test-auto-001"))
+    ledger = TaskLedger(sid)
+
+    events = await _run_fixture("auto_mode_flow", ledger=ledger)
     types = _event_types(events)
-    assert types.index("phase_plan") < types.index("tool_call")
+
+    # update_plan 是首个执行的工具（内置、不走 MCP/审批）
+    first_tool = next(e for e in events if e["type"] == "tool_call")
+    assert first_tool["name"] == "update_plan"
+    assert first_tool.get("internal") is True
+    # plan_updated 在 update_plan 的 tool_result 前发出，且早于外部工具执行
+    plan_events = [e for e in events if e["type"] == "plan_updated"]
+    assert len(plan_events) == 2
+    first_update_idx = types.index("plan_updated")
+    assert types.index("tool_call") < first_update_idx
+    assert plan_events[0]["plan"]["id"] == "mesh-main"
+    assert plan_events[0]["plan"]["phases"][0]["status"] == "in_progress"
+    # 全量替换：第二次更新后所有阶段完成
+    assert all(p["status"] == "done" for p in plan_events[1]["plan"]["phases"])
+    assert plan_events[1]["plan"]["phases"][0]["note"] == "模型树获取完成"
+
     assert "tool_result" in types
     assert types[-1] == "done"
+    assert "模型树获取完成" in _full_text(events)
+
+    # 台账自动记账：update_plan 与外部工具均入账且全部成功
+    tools_called = [call["tool"] for call in ledger.calls]
+    assert "update_plan" in tools_called
+    assert "GetModelTree" in tools_called
+    assert all(call["ok"] for call in ledger.calls)
+    # 外部调用归属活动阶段
+    get_tree = next(c for c in ledger.calls if c["tool"] == "GetModelTree")
+    assert get_tree["phase"] == "CAD导入"
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_defer_internal_tools(tmp_path, monkeypatch):
+    """门禁暂缓执行类工具时，同批次的内部工具（read_skill_resource）应放行执行。"""
+    import uuid
+    import session as session_mod
+    from task_ledger import TaskLedger
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    sid = str(uuid.uuid5(uuid.NAMESPACE_URL, "test-auto-002"))
+    ledger = TaskLedger(sid)
+
+    events = await _run_fixture("auto_mode_defer_internal", ledger=ledger)
+    types = _event_types(events)
+    assert types == load_fixture("auto_mode_defer_internal")["expected_event_types"]
+
+    # 第一轮：内部工具放行并正常执行
+    first_tool = next(e for e in events if e["type"] == "tool_call")
+    assert first_tool["name"] == "read_skill_resource"
+    assert first_tool.get("internal") is True
+
+    # 执行类工具全程只出现一次（首轮被暂缓，第二轮建计划后才真正执行）
+    exec_calls = [i for i, e in enumerate(events)
+                  if e["type"] == "tool_call"
+                  and e["name"] == "GetGenerateSurMeshDefaultParam"]
+    assert len(exec_calls) == 1
+    assert types.index("plan_updated") < exec_calls[0]
+
+    # 计划事件正常发出
+    plan_events = [e for e in events if e["type"] == "plan_updated"]
+    assert len(plan_events) == 1
+    assert plan_events[0]["plan"]["id"] == "surmesh-main"
+
+    assert types[-1] == "done"
+
+    # 台账：内部工具与被暂缓后重发的执行类工具均入账，被暂缓的首次调用不入账
+    tools_called = [call["tool"] for call in ledger.calls]
+    assert "read_skill_resource" in tools_called
+    assert "GetGenerateSurMeshDefaultParam" in tools_called
+    assert tools_called.count("GetGenerateSurMeshDefaultParam") == 1
+    assert all(call["ok"] for call in ledger.calls)
 
 
 @pytest.mark.asyncio

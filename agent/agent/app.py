@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent_loop import run_agent_loop
+from task_ledger import TaskLedger
 from config import (
     API_KEY_MASK,
     ApiConfig,
@@ -649,6 +650,10 @@ async def get_session(session_id: str):
         return JSONResponse({"error": str(e)}, status_code=400)
     if s is None:
         return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        plan = TaskLedger(session_id).plan
+    except InvalidSessionId:
+        plan = None
     return {
         "meta": {
             "id": s.id,
@@ -658,6 +663,7 @@ async def get_session(session_id: str):
             "model_id": s.model_id,
         },
         "messages": s.messages,
+        "plan": plan,
     }
 
 
@@ -702,6 +708,8 @@ async def clear_session_endpoint(session_id: str):
         session_id = validate_session_id(session_id)
         async with _session_async_lock(session_id):
             cleared = clear_session(session_id)
+            if cleared:
+                TaskLedger(session_id).clear()
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": cleared}
@@ -799,6 +807,7 @@ async def _run_background_loop(
         return
 
     bg.started_at = datetime.now().isoformat()
+    ledger = TaskLedger(session_id)
 
     try:
         async for event in run_agent_loop(
@@ -808,6 +817,7 @@ async def _run_background_loop(
             interaction_mode=interaction_mode,
             model_override=model_id if model_id else None,
             model_runtime=_model_runtime,
+            ledger=ledger,
         ):
             # 工具调用与返回值日志
             if event["type"] == "tool_call":

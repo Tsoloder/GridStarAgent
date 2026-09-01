@@ -1,0 +1,57 @@
+{
+  "name": "auto_mode_defer_internal",
+  "description": "auto 模式门禁：混合批次中执行类工具被暂缓，内部工具（read_skill_resource）放行",
+  "input": {
+    "session_id": "test-auto-002",
+    "message": "生成表面网格",
+    "interaction_mode": "auto",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "先读取网格技能参考文档并查询默认参数。"},
+        {"type": "tool_call", "id": "tc-res-001", "name": "read_skill_resource", "args": {"skill_id": "cfd-meshing-workflow", "relative_path": "references/cad-to-mesh.md"}},
+        {"type": "tool_call", "id": "tc-exec-001", "name": "GetGenerateSurMeshDefaultParam", "args": {}},
+        {"type": "usage", "input": 100, "output": 40, "total": 140}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "已读取参考文档，先创建阶段计划再查询默认参数。"},
+        {"type": "tool_call", "id": "tc-plan-001", "name": "update_plan", "args": {"id": "surmesh-main", "title": "表面网格生成", "phases": [{"id": "check", "title": "前置检查", "status": "done", "note": "已确认前置条件"}, {"id": "surmesh", "title": "表面网格生成", "status": "done"}]}},
+        {"type": "tool_call", "id": "tc-exec-002", "name": "GetGenerateSurMeshDefaultParam", "args": {}},
+        {"type": "usage", "input": 150, "output": 25, "total": 175}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "流程完成。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"continue\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 160, "output": 20, "total": 180}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "GetGenerateSurMeshDefaultParam": "{\"elementSize\": 5.0, \"ok\": true}"
+  },
+  "expected_event_types": [
+    "heartbeat",
+    "text_chunk",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "text_chunk",
+    "tool_call",
+    "plan_updated",
+    "tool_result",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "text_chunk",
+    "done"
+  ],
+  "expected_text_contains": "已读取参考文档"
+}

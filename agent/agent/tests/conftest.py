@@ -141,7 +141,32 @@ class MockSkillRegistry:
         return ""
 
     def internal_tools(self):
-        return []
+        from skill_runtime import RuntimeTool
+        return [
+            RuntimeTool(
+                name="read_skill",
+                description="Mock read_skill",
+                inputSchema={"type": "object",
+                             "properties": {"skill_id": {"type": "string"}},
+                             "required": ["skill_id"]},
+            ),
+            RuntimeTool(
+                name="read_skill_resource",
+                description="Mock read_skill_resource",
+                inputSchema={"type": "object",
+                             "properties": {"skill_id": {"type": "string"},
+                                            "relative_path": {"type": "string"}},
+                             "required": ["skill_id", "relative_path"]},
+            ),
+            RuntimeTool(
+                name="create_skill",
+                description="Mock create_skill",
+                inputSchema={"type": "object",
+                             "properties": {"skill_id": {"type": "string"},
+                                            "files": {"type": "object"}},
+                             "required": ["skill_id", "files"]},
+            ),
+        ]
 
     def shadowed(self, skill_id):
         return []
