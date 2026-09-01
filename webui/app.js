@@ -24,6 +24,12 @@ const el = {
   input: $("#message-input"), send: $("#send"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
 };
+el.phasePanel.addEventListener("click", event => {
+  if (!event.target.closest(".phase-head")) return;
+  const expanded = el.phasePanel.classList.toggle("expanded");
+  const head = el.phasePanel.querySelector(".phase-head");
+  if (head) head.setAttribute("aria-expanded", String(expanded));
+});
 
 function escapeHtml(value) {
   return String(value == null ? "" : value).replace(/[&<>"']/g, char => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"})[char]);
@@ -274,8 +280,17 @@ function renderPhase(value) {
   if (!phase || !Array.isArray(phase.phases)) return;
   el.phasePanel.classList.remove("hidden");
   const completed = phase.phases.filter(item => ["done","succeeded","completed","skipped"].includes(item.status)).length;
-  el.phasePanel.innerHTML = `<div class="phase-head"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small></div><div class="phase-steps"></div>`;
-  phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.desc || "")}">${escapeHtml(item.title || item.id || "阶段")}</div>`));
+  const expanded = el.phasePanel.classList.contains("expanded");
+  const pct = phase.phases.length ? Math.round(completed / phase.phases.length * 100) : 0;
+  el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
+  const head = $(".phase-head", el.phasePanel);
+  head.addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    el.phasePanel.classList.toggle("expanded");
+    head.setAttribute("aria-expanded", String(el.phasePanel.classList.contains("expanded")));
+  });
+  phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.note || item.desc || "")}"><span class="phase-step-title">${escapeHtml(item.title || item.id || "阶段")}</span><span class="phase-step-note">${escapeHtml(item.note || item.desc || "")}</span></div>`));
 }
 
 function toolGroup(parent) {
@@ -408,6 +423,7 @@ async function loadSession(id) {
     el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null;
     if (!state.session.messages.length) showWelcome();
     else state.session.messages.forEach(renderHistoryMessage);
+    if (state.session.plan) renderPhase(state.session.plan);
     closeSessions(); updateSendState(); scrollMessages();
   } catch (error) { showToast(error.message); }
 }
@@ -481,7 +497,7 @@ async function sendMessage(rawMessage = null, displayContent = null) {
     await consumeSse(response, async (type, event) => {
       if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
       else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
-      else if (type === "phase_plan") renderPhase(event.text || event);
+      else if (type === "plan_updated") renderPhase(event.plan);
       else if (type === "tool_call") renderToolCall(event,assistant.node);
       else if (type === "tool_result") renderToolResult(event,assistant.node);
       else if (type === "tool_approval_required") renderApproval(event,assistant.node);

@@ -21,8 +21,8 @@ def test_ui_serves_index_and_static_assets():
     javascript = client.get("/ui/app.js")
 
     assert index.status_code == 200
-    assert 'href="style.css"' in index.text
-    assert 'src="app.js?v=5"' in index.text
+    assert 'style.css?v=' in index.text
+    assert 'app.js?v=' in index.text
     assert css.status_code == 200
     assert "text/css" in css.headers["content-type"]
     assert javascript.status_code == 200
@@ -38,11 +38,12 @@ def test_webui_contains_existing_api_and_sse_contracts():
     ):
         assert endpoint in script
     for event in (
-        "text_chunk", "reasoning_chunk", "phase_plan", "tool_call",
+        "text_chunk", "reasoning_chunk", "plan_updated", "tool_call",
         "tool_result", "tool_approval_required", "skill_loaded", "error", "done",
         "workflow_started", "workflow_step", "workflow_done",
     ):
         assert event in script
+    # phase_plan 保留仅用于渲染旧会话历史（向后兼容，不再是协议）
     for interaction in ("options", "tool_params", "workflow", "phase_plan"):
         assert interaction in script
 
@@ -81,7 +82,7 @@ def test_webui_uses_config_response_contract_and_preserves_saved_credentials():
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
 
     assert 'const payload = {revision:state.settings.revision,config:state.settings.draft}' in script
-    assert 'data.config?.default_model' in script
+    assert 'data.config && data.config.default_model' in script
     assert 'defaultModel = data.default_model || defaultModel' in script
     assert 'selectModel(models.value.default_model || "")' in script
     assert "default_index" not in script
@@ -109,7 +110,7 @@ def test_webui_approval_card_renders_editable_params_from_schema():
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
 
     assert "function coerceSchemaValue(" in script
-    assert "event.schema?.properties" in script
+    assert "event.schema && event.schema.properties" in script
     assert "approval-param-" in script
     assert 'className = "approval-card"' in script
 
