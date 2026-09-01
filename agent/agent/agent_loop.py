@@ -245,6 +245,7 @@ async def run_agent_loop(
     MAX_FORMAT_RETRIES = 1
     _phase_plan_reminded = False
     _phase_plan_retry_count = 0
+    _phase_plan_blocked = False
     _pending_reminders = []
     _invalid_tool_reselection_used = False
 
@@ -258,10 +259,10 @@ async def run_agent_loop(
         compressed_messages = await ctx_mgr.compress(
             session.messages, session.id, config, call_model_id, model_runtime
         )
+        # Reminders must come *after* the conversation history so the model
+        # treats them as the latest instruction; injecting them before the
+        # history gets them buried and ignored.
         model_messages = []
-        for reminder in _pending_reminders:
-            model_messages.append({"role": "user", "content": reminder})
-        _pending_reminders.clear()
         for message in compressed_messages:
             clean = {key: value for key, value in message.items()
                      if key not in {"active_skills", "attachments", "display_content"}}
@@ -283,6 +284,9 @@ async def run_agent_loop(
                     "<imported_documents>\n%s\n</imported_documents>"
                 ) % (message.get("content", ""), "\n\n".join(sections))
             model_messages.append(clean)
+        for reminder in _pending_reminders:
+            model_messages.append({"role": "user", "content": reminder})
+        _pending_reminders.clear()
 
         text_acc = ""
         reasoning_acc = ""
@@ -420,6 +424,34 @@ async def run_agent_loop(
                                and not _phase_plan_reminded)
         if _phase_plan_missing:
             _phase_plan_reminded = True
+            if not _phase_plan_blocked:
+                # 首次硬拦截：AUTO 模式必须先输出 phase_plan 再执行外部工具，
+                # 否则前端任务规划进度区永远没有内容可渲染。
+                _phase_plan_blocked = True
+                session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
+                # 被暂缓的工具调用必须补一条 tool result，否则历史里悬空的
+                # tool_calls 会让 provider 在下一轮请求时报错。
+                for tc in tool_calls:
+                    session.append_tool_result(
+                        tc["id"],
+                        "[deferred] 该工具调用已被暂缓：请先输出 phase_plan JSON 块，再重新发起该工具调用。",
+                        tc["name"],
+                    )
+                _pending_reminders.append(
+                    "<phase_plan_required>\n"
+                    "你在 AUTO 模式下尚未输出 phase_plan JSON 块就调用了外部工具，本次工具调用已被暂缓。\n"
+                    "请在下一条回复中先用 ```json 代码块输出 phase_plan，展示本任务的整体阶段计划，"
+                    "格式如：\n"
+                    "```json\n"
+                    "{\"phase_plan\": {\"id\": \"cad-mesh-main\", \"title\": \"...\", "
+                    "\"phases\": [{\"id\": \"import\", \"title\": \"CAD 导入\", \"status\": \"active\"}, "
+                    "{\"id\": \"mesh\", \"title\": \"网格生成\", \"status\": \"pending\"}]}}\n"
+                    "```\n"
+                    "然后在同一条回复中继续输出需要执行的工具调用。\n"
+                    "</phase_plan_required>"
+                )
+                logger.info("[phase_plan] 首次外部工具调用缺少计划，已硬拦截暂缓执行")
+                continue
 
         # 如果已提醒过 phase_plan 但模型仍无视，注入提醒但不阻止工具执行
         if _phase_plan_reminded and not _phase_plan_missing and interaction_mode == "auto" \
@@ -644,6 +676,8 @@ async def run_agent_loop(
 
             if _phase_plan_reminded and '"phase_plan"' in text_acc and not tool_calls:
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
+                # AUTO 模式中间轮文本被缓冲，若不发出去前端永远看不到该计划
+                yield {"type": "phase_plan", "text": text_acc}
                 _pending_reminders.append(
                     "phase_plan 已收到。现在请继续执行工具调用，推进任务流程。"
                     "不要只输出 phase_plan，需要在同一条回复中同时调用工具。"
