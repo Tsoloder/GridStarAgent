@@ -10,7 +10,7 @@
 >   `new_id` 即为该操作创建的新网格线 ID，**后续步骤直接使用 `new_id`，无需额外调用 `GetNewConnectorId`**。
 > - 所有工具返回 `success` 为 `false`，或返回 `status` 为 `"failed"` 时，均**立即停止**，报告失败的工具名称与返回内容。**禁止**在工具失败后改用其他工具或换一种方法重试。
 > - 自动模式下不允许向用户发起确认性提问。
-> - manual 模式下，后缘面处理流程的中间步骤（`SetConnectorPointCount`、`SetConnectorAverageDistribution`、`SetConnectorSmoothDistribution`、`CopyConnectorPointCount`、`AssembleConnectorsToDomain` 等）直接按步骤串行执行，**不输出 `tool_params`**。仅 `DeleteDomain` 作为破坏性操作时，通过 `options` 请求确认。流程开始时输出 `phase_plan` 展示进度。
+> - manual 模式下，后缘面处理流程的中间步骤（`SetConnectorPointCount`、`SetConnectorAverageDistribution`、`SetConnectorSmoothDistribution`、`CopyConnectorPointCount`、`AssembleConnectorsToDomain` 等）直接按步骤串行执行，**不输出 `tool_params`**。仅 `DeleteDomain` 作为破坏性操作时，通过 `options` 请求确认。流程开始时调用 `update_plan` 创建计划展示进度。
 > - 交线判定失败（类型一中后缘面与翼梢面无公共短边）时立即停止，报告失败原因。
 
 ## 前置条件

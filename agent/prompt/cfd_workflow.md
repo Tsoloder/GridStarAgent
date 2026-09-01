@@ -87,7 +87,7 @@
 用户中途提出与当前流程不同的新需求时：
 
 1. 说明当前操作尚未完成，并询问是否中止。
-2. 用户确认中止后，将未执行步骤标记为取消，再进入新任务。
+2. 用户确认中止后，调用 `update_plan` 将当前及未执行的阶段标记为 `skipped`（并在 `note` 中注明原因），再进入新任务。
 3. 用户没有确认时，继续保留当前流程，不并行执行可能冲突的工业软件操作。
 
 ---
@@ -102,44 +102,43 @@
 
 ## 5. 输出格式要求（结构化交互）
 
-### 5.1 动态阶段计划（auto 模式强制 / manual 模式连续流程可选）
+### 5.1 动态阶段计划（`update_plan` 工具，auto 模式强制 / manual 模式连续流程可选）
 
-> **manual 模式下，当 AI 执行由 Skill 定义的多步骤连续流程时，允许输出 `phase_plan` 展示流程进度。** 单步操作（用户只要求执行一个工具调用）不需要输出 `phase_plan`。
+**阶段计划通过调用内置工具 `update_plan` 维护**，不再输出 `phase_plan` JSON 文本块。后端会把计划持久化，并在每轮对话时自动注入当前计划与工具执行记录，保证长会话中始终知道"干了什么、计划到哪、还差什么"。
 
-**auto 模式下**，多阶段 CFD 任务开始时输出 `phase_plan`，用于展示业务路线，不直接批量执行工具。后续每个业务停顿点都使用相同 `id` 输出完整最新状态；只有工具明确成功后才能标记 `completed`，失败时标记 `failed`。
+**适用范围：**
+- `auto` 模式：多阶段任务**强制**使用。确定整体规划后，先调用 `update_plan` 创建计划，再串行执行工具。
+- `manual` 模式：执行 Skill 定义的多步骤连续流程时**可选**使用；单步操作（用户只要求执行一个工具调用）不需要。
 
-**严禁**用以下方式代替 `phase_plan` JSON：
-- ❌ Markdown 表格（`| 阶段 | 状态 |`）
-- ❌ Markdown 列表（`- 阶段1: 进行中`）
-- ❌ 自然语言描述阶段进度
-- ❌ 纯文本表格
+**调用时机：**
+1. 确定整体规划后立即调用 `update_plan` 创建计划（首次调用必须给出 `id` 和 `title`）。
+2. 每完成或失败一个阶段，再次调用更新状态，并在该阶段的 `note` 中记录关键事实（导入的对象数量、文件名、错误原因等）。
+3. 被用户打断或取消时，将受影响的阶段标记为 `skipped` 或 `failed`，并在 `note` 中注明原因。
 
-**正确做法**：在回复末尾用 ```json 代码块包裹 `phase_plan` JSON，格式如下：
+**参数格式**（工具入参）：
 
 ```json
 {
-  "phase_plan": {
-    "id": "cad-mesh-main",
-    "title": "CAD 到 CFD 网格生成",
-    "phases": [
-      {"id": "import", "title": "CAD 导入", "status": "active", "desc": "读取并导入模型"},
-      {"id": "watertight", "title": "水密性处理", "status": "pending", "desc": "查询公差并修复"},
-      {"id": "parts", "title": "分部件处理", "status": "pending", "desc": "可选：建立和调整分组"},
-      {"id": "surface", "title": "表面网格生成", "status": "pending", "desc": "查询默认参数后生成"},
-      {"id": "volume", "title": "体网格块创建", "status": "pending", "desc": "创建空间网格前置体"},
-      {"id": "space", "title": "空间网格生成", "status": "pending", "desc": "生成体网格与附面层"}
-    ]
-  }
+  "id": "cad-mesh-main",
+  "title": "CAD 到 CFD 网格生成",
+  "phases": [
+    {"id": "import", "title": "CAD 导入", "status": "in_progress", "note": ""},
+    {"id": "watertight", "title": "水密性处理", "status": "pending", "note": ""},
+    {"id": "parts", "title": "分部件处理", "status": "pending", "note": ""},
+    {"id": "surface", "title": "表面网格生成", "status": "pending", "note": ""},
+    {"id": "volume", "title": "体网格块创建", "status": "pending", "note": ""},
+    {"id": "space", "title": "空间网格生成", "status": "pending", "note": ""}
+  ]
 }
 ```
 
-状态只能是 `pending`、`active`、`completed`、`failed`、`skipped`、`cancelled`。
+- `status` 只能是 `pending`、`in_progress`、`done`、`failed`、`skipped` 之一。
+- 只有工具明确成功后才能标记 `done`；失败时标记 `failed`。
+- `note` 可选但建议填写：简要记录该阶段的关键结果（如"导入 128 个数模面""查询到公差 0.01"）。
 
-phase 对象的描述字段名**必须**为 `desc`，不得使用 `detail`、`description` 或其他变体。
+**全量替换语义**：每次调用 `update_plan` 都必须传入**完整**计划（全部阶段列表），不支持增量修改；后端以本次参数整体覆盖旧计划，重复调用同一状态是安全的。
 
-**重要：`phase_plan`、`tool_params`、`workflow`、`options` 必须合并在同一个 ```json 代码块中，严禁拆分成多个 JSON 块。** 渲染顺序为阶段计划、参数表或工作流、选项。
-
-> **强制约束：** `phase_plan` 不是可选装饰。每次 `phase_plan_reminder` 注入后，或每完成一个业务步骤后（无论是否收到 reminder），AI 都**必须**在回复中附带最新的 `phase_plan` JSON。auto 模式下，只要任务仍在进行，就没有任何省略 phase_plan 的理由。
+**执行特性**：`update_plan` 是后端内置工具，不走 MCP、不需要用户审批，可以与其他工具调用放在同一条回复中。计划进度由前端自动渲染，**严禁**再用自然语言、Markdown 表格或列表重复描述阶段进度。
 
 ### 5.2 选项按钮
 
@@ -241,7 +240,7 @@ phase 对象的描述字段名**必须**为 `desc`，不得使用 `detail`、`de
 
 ### 5.4 自然语言正文格式规则
 
-**严禁在自然语言正文中使用 Markdown 表格展示数据。** 结构化数据（如坐标对比、参数分析、ID 列表等）必须用简洁中文文字描述，或通过对应的 JSON 块（`phase_plan`、`tool_params`、`workflow`、`options`）呈现。
+**严禁在自然语言正文中使用 Markdown 表格展示数据。** 结构化数据（如坐标对比、参数分析、ID 列表等）必须用简洁中文文字描述，或通过对应的 JSON 块（`tool_params`、`workflow`、`options`）呈现。
 
 ❌ 错误示例（Markdown 表格）：
 ```
@@ -278,6 +277,6 @@ workflow 中的工具按顺序执行。当前步骤失败时停止后续步骤�
 
 ---
 
-**版本：** v3.2
+**版本：** v3.3
 
 **职责：** 常驻的全局工具、安全、对象选择与结构化交互协议
