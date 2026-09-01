@@ -154,7 +154,7 @@ class Session:
             title_source = content.strip()
             if not title_source and attachments:
                 title_source = attachments[0].get("name", "New Session")
-            self.title = title_source[:30] + ("..." if len(title_source) > 30 else "")
+            self.title = title_source[:10]
         self.updated_at = datetime.now().isoformat()
         # 追加写：只写这一条消息到 JSONL
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)

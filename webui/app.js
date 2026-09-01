@@ -20,7 +20,7 @@ const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
-  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"),
+  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
   input: $("#message-input"), send: $("#send"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
 };
@@ -88,6 +88,19 @@ function handleModelKeys(event) {
   if (event.key === "ArrowDown" || event.key === "ArrowUp") { event.preventDefault(); state.modelOptionIndex = (state.modelOptionIndex + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length; focusModelOption(); return; }
   state.modelSearch = (state.modelSearch + event.key).toLowerCase(); clearTimeout(handleModelKeys.timer); handleModelKeys.timer = setTimeout(() => state.modelSearch = "",700); const index = options.findIndex(item => item.textContent.toLowerCase().includes(state.modelSearch)); if (index >= 0) { state.modelOptionIndex = index; focusModelOption(); }
 }
+function selectedSkill() { return state.skills.find(item => item.id === el.skill.value) || null; }
+function renderSkillList() {
+  const selected = el.skill.value; el.skillListbox.innerHTML = "";
+  [{ id: "", name: "无 Skill", description: "" }].concat(state.skills).forEach(item => {
+    const option = document.createElement("button"); option.type = "button"; option.className = `model-option${item.id === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(item.id === selected)); option.dataset.value = item.id;
+    if (item.description) option.title = item.description;
+    option.innerHTML = `<span class="model-check">${item.id === selected ? "✓" : ""}</span><strong>${escapeHtml(item.name || item.id)}</strong><small></small>`;
+    option.onclick = () => selectSkill(item.id); el.skillListbox.append(option);
+  });
+}
+function selectSkill(id) { el.skill.value = id || ""; const item = selectedSkill(); el.skillLabel.textContent = item ? (item.name || item.id) : "无 Skill"; closeSkillList(); }
+function openSkillList() { renderSkillList(); state.skillListOpen = true; el.skillListbox.classList.remove("hidden"); el.skillTrigger.setAttribute("aria-expanded","true"); }
+function closeSkillList() { state.skillListOpen = false; el.skillListbox.classList.add("hidden"); el.skillTrigger.setAttribute("aria-expanded","false"); }
 function setConnection(status, label) {
   el.connection.className = `connection ${status}`;
   $("b", el.connection).textContent = label;
@@ -104,7 +117,7 @@ function setBusy(busy) {
 }
 
 function updateSendState() {
-  el.send.disabled = !state.busy && (!state.session || !el.input.value.trim() || !state.configLoaded);
+  el.send.disabled = !state.busy && (!el.input.value.trim() || !state.configLoaded);
 }
 
 function inlineMarkdown(text) {
@@ -155,7 +168,9 @@ function structuredBlocks(text) {
   return {visible: visible.trim(), found};
 }
 function createMessage(role, content = "", label = "") {
-  if (el.welcome) el.welcome.remove();
+  const welcome = document.getElementById("welcome");
+  if (welcome) welcome.remove();
+  if (el.welcome) el.welcome = null;
   const node = document.createElement("article");
   node.className = `message ${role}`;
   const bubble = document.createElement("div");
@@ -383,6 +398,7 @@ function renderHistoryMessage(message) {
     renderWorkflowEvent({type:"workflow_done",status:message.status,message:message.message});
   }
 }
+function showWelcome() { el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>'; el.welcome = $("#welcome"); }
 async function loadSession(id) {
   if (state.busy && state.controller) state.controller.abort();
   try {
@@ -390,7 +406,7 @@ async function loadSession(id) {
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
     el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null;
-    if (!state.session.messages.length) el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>';
+    if (!state.session.messages.length) showWelcome();
     else state.session.messages.forEach(renderHistoryMessage);
     closeSessions(); updateSendState(); scrollMessages();
   } catch (error) { showToast(error.message); }
@@ -426,7 +442,7 @@ async function clearSession(session) {
 }
 async function deleteSession(session) {
   if (!(await showDialog({title:"删除会话", message:`将永久删除“${session.title}”，此操作不可撤销。`, confirmText:"删除", danger:true}))) return;
-  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>开始一项工程任务</strong><p>创建对话后，可进行网格生成、质量检查和工具编排。</p></div>'; el.welcome = $("#welcome"); el.phasePanel.classList.add("hidden"); state.workflow = null; } await refreshSessions(); closeSessions(); updateSendState(); } catch (error) { showToast(error.message); }
+  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; } await refreshSessions(); closeSessions(); updateSendState(); } catch (error) { showToast(error.message); }
 }
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
@@ -448,11 +464,16 @@ async function consumeSse(response, onEvent, controller) {
   }
 }
 async function sendMessage(rawMessage = null, displayContent = null) {
-  if (state.busy || !state.session) return;
+  if (state.busy) return;
   const message = rawMessage != null ? rawMessage : el.input.value.trim(); if (!message) return;
+  if (!state.session) { await createSession(); if (!state.session) return; }
   const shown = displayContent != null ? displayContent : message; createMessage("user", shown); el.input.value = ""; updateSendState();
-  const skillText = el.skill.selectedOptions[0] ? el.skill.selectedOptions[0].text : "";
-  const assistant = createMessage("assistant", "", skillText !== "无 Skill" ? skillText : ""); state.assistant = assistant;
+  if ((state.session.meta.title || "").trim() === "New Session" && !state.session.messages.length) {
+    const title = message.replace(/\s+/g, " ").trim().slice(0, 10);
+    if (title) { try { await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/rename`, {method:"PUT",body:JSON.stringify({title})}); state.session.meta.title = title; el.currentTitle.textContent = title; const entry = state.sessions.find(item => item.id === state.session.meta.id); if (entry) entry.title = title; renderSessions(); } catch (_) {} }
+  }
+  const skill = selectedSkill();
+  const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : ""); state.assistant = assistant;
   const controller = createAbortController(); state.controller = controller; setBusy(true);
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
@@ -544,15 +565,16 @@ async function bootstrap() {
     selectModel(models.value.default_model || "");
   }
   if (skills.status === "fulfilled") {
-    state.skills = skills.value.skills || []; el.skill.innerHTML = '<option value="">无 Skill</option>';
-    state.skills.forEach(item => { const option = new Option(item.name || item.id,item.id); option.title = item.description || ""; el.skill.add(option); });
+    state.skills = skills.value.skills || [];
+    if (el.skill.value && !selectedSkill()) selectSkill("");
   }
-  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); if (state.sessions[0]) await loadSession(state.sessions[0].id); }
+  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
   const failures = results.filter(item => item.status === "rejected"); if (failures.length) showToast(failures[0].reason.message);
   el.warning.classList.toggle("hidden",state.configLoaded); updateSendState();
 }
 el.newSession.onclick = createSession;
 el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList(); el.modelTrigger.onkeydown = handleModelKeys;
+el.skillTrigger.onclick = () => state.skillListOpen ? closeSkillList() : openSkillList();
 el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSettings(); el.cancelSettings.onclick = () => closeSettings(); el.saveSettings.onclick = saveSettings; el.addProvider.onclick = addProvider;
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
@@ -562,6 +584,6 @@ el.send.onclick = () => { if (state.busy && state.controller) state.controller.a
 el.input.oninput = updateSendState;
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!state.busy && !el.send.disabled) sendMessage(); } };
 document.querySelectorAll("[data-mode]").forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active",item === button)); });
-document.addEventListener("click", event => { if (state.modelListOpen && !event.target.closest(".model-combobox")) closeModelList(); });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+document.addEventListener("click", event => { if (state.modelListOpen && !event.target.closest(".model-control:not(.skill-control)")) closeModelList(); if (state.skillListOpen && !event.target.closest(".skill-control")) closeSkillList(); if (!el.sessionPanel.classList.contains("hidden") && !event.target.closest("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions(); });
+document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSkillList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
 bootstrap();

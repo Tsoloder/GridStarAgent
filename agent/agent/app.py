@@ -831,12 +831,14 @@ async def _run_background_loop(
                     session.model_id = model_id
                 with locked_session(session_id):
                     save_session(session)
+                    update_index(session)
 
             await bg.queue.put(event)
     except asyncio.CancelledError:
         bg.cancelled = True
         with locked_session(session_id):
             save_session(session)
+            update_index(session)
         logger.info(f"background task cancelled: {session_id}")
     except Exception as e:
         logger.exception("background agent loop failed")

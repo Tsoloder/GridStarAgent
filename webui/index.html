@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
-  <link rel="stylesheet" href="style.css?v=6">
+  <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
   <main class="app-shell">
@@ -31,8 +31,8 @@
     <section id="messages" class="messages" aria-live="polite">
       <div id="welcome" class="empty-state">
         <div class="empty-symbol">⌁</div>
-        <strong>开始一项工程任务</strong>
-        <p>创建对话后，可进行网格生成、质量检查和工具编排。</p>
+        <strong>对话已就绪</strong>
+        <p>描述你的工程目标，Agent 将按当前模式执行。</p>
       </div>
     </section>
 
@@ -53,9 +53,14 @@
             <div id="model-listbox" class="model-listbox hidden" role="listbox" aria-label="按供应商分组的模型"></div>
           </div>
         </div>
-        <label class="select-wrap" title="Skill">
-          <span>Skill</span><select id="skill-select" aria-label="Skill"></select>
-        </label>
+        <div class="model-control skill-control" title="Skill">
+          <span>Skill</span>
+          <div class="model-combobox">
+            <input id="skill-select" type="hidden" value="">
+            <button id="skill-trigger" type="button" role="combobox" aria-label="Skill" aria-haspopup="listbox" aria-expanded="false"><span id="skill-label">无 Skill</span><span aria-hidden="true">⌄</span></button>
+            <div id="skill-listbox" class="model-listbox hidden" role="listbox" aria-label="Skill 列表"></div>
+          </div>
+        </div>
         <button id="open-settings" class="settings-button" type="button" aria-label="打开设置" title="打开设置">⚙</button>
       </div>
       <div class="input-wrap">
@@ -86,6 +91,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=6" defer></script>
+  <script src="app.js?v=13" defer></script>
 </body>
 </html>
