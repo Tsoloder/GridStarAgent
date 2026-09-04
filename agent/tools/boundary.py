@@ -63,3 +63,19 @@ def BorderConditionSaveDataToDomain(domainIDs: str, name: str, groupID: int, pro
     """
     return send_post_request("BorderConditionSaveDataToDomain", {"domainIDs":domainIDs,"name":name,"groupID":groupID,"property":property})
 
+
+def GetAllBorderConditionGroups():
+    """获取当前所有边界条件分组信息.
+
+    Returns:
+        返回 JSON 字符串,格式如下:
+        {"groups":[{"name":"fuselage","groupID":100,"property":-10,"domains":[4,31,55]}, ...]}
+        其中 name 为边界条件组名称,groupID 为组 ID,
+        property 为边界条件属性(-10 表示无边界条件, 1 表示传值, 2 表示对接, 3 表示无粘固壁,
+        4 表示粘性固壁, 7 表示远场, 8 表示对称, 10 表示流入, 11 表示流出,
+        12 表示喷流入口, 13 表示喷流出口),
+        domains 为该组下挂载的网格面 ID 列表.
+        如果没有任何边界条件组,返回 {"groups":[]}.
+    """
+    return send_post_request("GetAllBorderConditionGroups", {})
+

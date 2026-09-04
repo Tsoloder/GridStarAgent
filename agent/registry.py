@@ -94,7 +94,7 @@ TOOLS = (
     generation.GenerateSurMeshBySpitAssemblyGroupProperty,
     query.GetGenerateSurMeshDefaultParam,
     query.GetCreateBlockDefaultParam,
-    advanced.SegmentPart,
+    # advanced.SegmentPart,
     advanced.SegmentPartDirect,
     advanced.ClassifyTrailingEdgeDomains,
     advanced.DetermineDirectionForType1,
@@ -113,6 +113,7 @@ TOOLS = (
     query.GetConnectorStartAndEndUnitLenth,
     query.GetPointCount,
     query.GetNewConnectorId,
+    query.GetDomainsByType,
 )
 
 def register_tools(mcp):

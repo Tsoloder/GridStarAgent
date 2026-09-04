@@ -51,6 +51,7 @@ BorderConditionAddGroup = boundary.BorderConditionAddGroup
 BorderConditionDeleteGroup = boundary.BorderConditionDeleteGroup
 BorderConditioConfigProperty = boundary.BorderConditioConfigProperty
 BorderConditionSaveDataToDomain = boundary.BorderConditionSaveDataToDomain
+GetAllBorderConditionGroups = boundary.GetAllBorderConditionGroups
 ExamineConnector = quality.ExamineConnector
 TranslateMesh = mesh.TranslateMesh
 TranslateSurface = cad.TranslateSurface
@@ -105,7 +106,7 @@ GetAllSpitAssemblyGroupProperty = query.GetAllSpitAssemblyGroupProperty
 GenerateSurMeshBySpitAssemblyGroupProperty = generation.GenerateSurMeshBySpitAssemblyGroupProperty
 GetGenerateSurMeshDefaultParam = query.GetGenerateSurMeshDefaultParam
 GetCreateBlockDefaultParam = query.GetCreateBlockDefaultParam
-SegmentPart = advanced.SegmentPart
+ProcessWithServer = advanced.ProcessWithServer
 SegmentPartDirect = advanced.SegmentPartDirect
 ClassifyTrailingEdgeDomains = advanced.ClassifyTrailingEdgeDomains
 DetermineDirectionForType1 = advanced.DetermineDirectionForType1
@@ -124,6 +125,8 @@ GenerateANisoDomainGrid = generation.GenerateANisoDomainGrid
 GetConnectorStartAndEndUnitLenth = query.GetConnectorStartAndEndUnitLenth
 GetPointCount = query.GetPointCount
 GetNewConnectorId = query.GetNewConnectorId
+GetDomainsByType = query.GetDomainsByType
+GetRecentMessages = query.GetRecentMessages
 
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

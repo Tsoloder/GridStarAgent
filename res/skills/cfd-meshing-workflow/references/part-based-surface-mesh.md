@@ -17,7 +17,7 @@
 | 机头 | 含 `jitou`、`nose`、`机头`、`forebody`、`前机身` | 2% |
 | 机尾 | 含 `weibu`、`tail`、`jiwei`、`机尾`、`aft`、`后机身`、`fin`、`rudder`、`尾翼`、`水平尾翼` | 2% |
 | 机身 | 含 `jishen`、`fuselage`、`body`、`机身`、`中机身` | 4% |
-| 机翼 | 含 `jiyi`、`wing`、`机翼`（含各子组如 `jiyi_wing_upper_surface`、`jiyi_wing_lower_surface`、`jiyi_wing_tip`、`jiyi_trailing_edge`） | 2% |
+| 机翼 | 含 `jiyi`、`main_wing`、`机翼`（含各子组如 `jiyi_wing_upper_surface`、`jiyi_wing_lower_surface`、`jiyi_wing_tip`、`jiyi_trailing_edge`） | 2% |
 | 其他 | 以上均不匹配的组 | 4% |
 
 ## 3. 参数计算表

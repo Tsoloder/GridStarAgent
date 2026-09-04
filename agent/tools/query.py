@@ -3,13 +3,13 @@
 from client import send_post_request
 
 
-def GetStartAndEndPointByConnector(id: str):
+def GetStartAndEndPointByConnector(id: int):
     """根据 ID 获取网格线的起点和尾点坐标.
 
     此接口用于连续操作使用,获取的返回值可直接作为形参传入后续调用的功能中,如旋转功能等.
 
     Args:
-        id: 需要获取信息的网格线 ID,可以为"0"或者"0,5,6".
+        id: 需要获取信息的网格线 ID.
 
     Returns:
         网格线的起始点和尾点坐标,其形式为:
@@ -195,4 +195,33 @@ def GetNewConnectorId():
         失败时返回 "false"。
     """
     return send_post_request("GetNewConnectorId", {})
+
+
+def GetDomainsByType(domain_type: int):
+    """按类型筛选并获取所有网格面的 ID.
+
+    Args:
+        domain_type: 网格面类型:
+            1: 物面 (OBJECT)
+            3: 外场面 (OUTFILED)
+
+    Returns:
+        返回符合该类型的所有网格面 ID 集合,例如 {"info": [1, 2, 3]}.
+    """
+    return send_post_request("GetDomainsByType", {"domain_type": domain_type})
+
+
+def GetRecentMessages(count: int):
+    """获取最近的消息.
+
+    Args:
+        count: 获取的消息条数.
+
+    Returns:
+        返回 JSON 字符串,格式如下:
+        {"messages":[{"time":"[2026-09-01,15:32:00] ","message":"xxx","level":1}, ...]}
+        其中 level 含义: 0=debug, 1=info, 2=warning, 3=error, 4=fault.
+        如果没有任何消息,返回 {"messages":[]}.
+    """
+    return send_post_request("GetRecentMessages", {"count":count})
 

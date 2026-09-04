@@ -3,23 +3,25 @@
 from client import send_post_request
 
 
-def SegmentPart(outputDir: str):
-    """自动部件分割：对当前已导入的数模执行水密性处理 → 表面网格生成 → 点云导出 → 远程 AI 大部件分割 → 几何法机翼小部件分割 → 各部件自动染色 → 清除网格。
+def ProcessWithServer(serverHost: str, serverPort: int, outputDir: str):
+    """自动部件分割：对当前已导入的数模执行水密性处理 → 表面网格生成 → 点云导出 → 远程 AI 大部件分割(7类) → 几何法机翼小部件分割 → 各部件自动染色 → 清除网格。
 
     使用场景：数模文件已通过 ImportCADFile 导入到 GridStar 中。
     执行后返回 JSON 格式的部件分割结果（含机翼子部件）。
 
     Args:
+        serverHost: 远程推理服务器 IP 地址。
+        serverPort: 远程推理服务器端口号。
         outputDir: 点云文件和分割结果 JSON 的输出目录。
 
     Returns:
-        返回 JSON 格式的部件分组结果,例如：
-        [{"group_name":"wing","faces":[4,31,55]}, ...]
-        其中 wing 组会被进一步拆分为：
+        返回 JSON 格式的7类部件分组结果,例如：
+        [{"group_name":"nose","faces":[...]}, {"group_name":"fuselage","faces":[...]}, ...]
+        其中 main_wing 组会被进一步拆分为：
             jiyi_wing_upper_surface / jiyi_wing_lower_surface / jiyi_wing_tip / jiyi_trailing_edge
         失败时返回 "false"。
     """
-    return send_post_request("SegmentPart", {"outputDir":outputDir}, timeout=360)
+    return send_post_request("ProcessWithServer", {"serverHost":serverHost, "serverPort":serverPort, "outputDir":outputDir}, timeout=360)
 
 
 def SegmentPartDirect(pointCloudPath: str):
@@ -91,38 +93,46 @@ def DetermineDirectionForType1(teDomainId: int, wtDomainId: int, l1Id: int, l2Id
     })
 
 
-def IdentifyType2Roles(teDomainId: int, engineDomainIds: str, fuselageDomainIds: str):
-    """类型二角色识别：识别后缘面的 6 条网格线角色（A/B/C/D/短边/E）。
+def IdentifyType2Roles(teDomainId: int, engineDomainIds: str, fuselageDomainIds: str,
+                       upperSurfaceDomainIds: str, lowerSurfaceDomainIds: str):
+    """类型二角色识别：识别后缘面的 6 条网格线角色。
 
-    通过后缘面与 engine/fuselage 分组的网格线交集确定角色 A（engine 公共线）
-    和角色 B（fuselage 公共线）,再通过端点匹配确定 C/D/E/短边。
+    通过后缘面与 engine/fuselage/上表面/下表面分组的网格线交集确定角色：
+    - A（短边）：与 engine 公共
+    - B（短边）：与 fuselage 公共
+    - F（长边）：与上表面公共
+    - D、E（长边）：与下表面公共
+    - C（短边）：连接 E 和 F 的剩余线
     调用者不需要关心网格线间的几何关系细节。
 
     Args:
         teDomainId: 后缘网格面 ID.
         engineDomainIds: engine 分组的网格面 ID 列表,逗号分隔,如 "50,51".
         fuselageDomainIds: fuselage 分组的网格面 ID 列表,逗号分隔,如 "60,61".
+        upperSurfaceDomainIds: 机翼上表面分组的网格面 ID 列表,逗号分隔.
+        lowerSurfaceDomainIds: 机翼下表面分组的网格面 ID 列表,逗号分隔.
 
     Returns:
         JSON 字符串,格式:
         {
-          "A": N, "B": N, "C": N, "D": N,
-          "shortEdge": N, "E": N,
-          "a_start_id": N, "a_end_id": N,
-          "b_start_id": N, "b_end_id": N,
-          "c_near_a_end": "start|end",
-          "d_near_a_end": "start|end",
-          "e_near_a_end": "start|end",
-          "d_a_side": "start|end",
-          "e_a_side": "start|end"
+          "A": N, "B": N, "C": N, "D": N, "E": N, "F": N,   // 各角色线 ID
+          "A_start": N, "A_end": N,   // A 的首尾点
+          "B_start": N, "B_end": N,   // B 的首尾点
+          "C_start": N, "C_end": N,   // C 的首尾点
+          "D_start": N, "D_end": N,   // D 的首尾点
+          "E_start": N, "E_end": N,   // E 的首尾点
+          "F_start": N, "F_end": N,   // F 的首尾点
+          "assembly_order": "A,E,C,F,B,D"  // 装配顺序
         }
-        其中 c_near_a_end / d_near_a_end / e_near_a_end 分别表示角色 C/D/E 的哪一端靠近角色 A,
-        d_a_side / e_a_side 表示 D/E 连接的是 A 的 start 端还是 end 端,
-        调用方可直接使用此值来设置分布方向,无需自行比对端点。
+        通过各线的首尾点 ID 可以清晰知道共点关系：相同 ID 的端点即为相连。
+        例如 A_end == D_start 表示 A 的尾端和 D 的首端是同一个点。
+        调用方可通过对比端点 ID 自行判断连接关系。
     """
     return send_post_request("IdentifyType2Roles", {
         "teDomainId": teDomainId,
         "engineDomainIds": engineDomainIds,
-        "fuselageDomainIds": fuselageDomainIds
+        "fuselageDomainIds": fuselageDomainIds,
+        "upperSurfaceDomainIds": upperSurfaceDomainIds,
+        "lowerSurfaceDomainIds": lowerSurfaceDomainIds
     })
 

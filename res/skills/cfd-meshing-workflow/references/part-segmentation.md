@@ -11,14 +11,16 @@
 
 ## 2. 参数收集与确认
 
-1. 询问点云输出目录（`outputDir`）。若用户不提供，使用默认临时目录。
+1. 询问远程推理服务器的 IP、端口和点云输出目录。需强制用户提供 serverHost/serverPort/outputDir。
 2. 手动模式使用基础 `tool_params` 协议展示参数并等待用户确认（以下示例仅适用于 manual 模式）：
 
 ```json
 {
   "tool_params": {
-    "tool": "SegmentPart",
+    "tool": "ProcessWithServer",
     "params": [
+      {"name": "serverHost", "description": "远程推理服务器 IP 地址", "value": ""},
+      {"name": "serverPort", "description": "远程推理服务器端口号", "value": 0},
       {"name": "outputDir", "description": "点云输出目录", "value": ""}
     ]
   },
@@ -30,11 +32,11 @@
 ```
 
 3. 自动模式使用已知值或默认临时目录直接执行。
-4. 用户确认后才调用 `SegmentPart` 工具；未确认时不执行。
+4. 用户确认后才调用 `ProcessWithServer` 工具；未确认时不执行。
 
 ## 3. 执行分割
 
-1. 调用 `SegmentPart` 工具，工具名称和参数以实时 MCP Schema 为准。
+1. 调用 `ProcessWithServer` 工具，工具名称和参数以实时 MCP Schema 为准。
 2. 等待工具返回；只有明确成功后才进入结果展示阶段。
 3. 分割失败或超时时，按基础协议错误处理规则处理，不继续后续步骤。
 
@@ -43,18 +45,39 @@
 1. 工具返回分割结果 JSON，展示给用户。
 2. 结果格式：
 
-```
-[{"group_name": "wing", "faces": [4, 31, 55]}, ...]
+```json
+[
+  {"group_name": "nose", "faces": [0, 5, 12]},
+  {"group_name": "fuselage", "faces": [1, 8, 10]},
+  {"group_name": "vertical_tail", "faces": [2, 3]},
+  {"group_name": "horizontal_tail", "faces": [6, 7]},
+  {"group_name": "main_wing", "faces": [4, 31, 55]},
+  {"group_name": "engine", "faces": [9, 14]},
+  {"group_name": "tail", "faces": [11, 15]},
+  ...
+]
 ```
 
-3. 每个分组包含组名和所包含的面 ID 列表。
-4. 其中机翼组（`wing` / `机翼`）会被进一步拆分为 4 个子组：
-   - 机翼_上表面
-   - 机翼_下表面
-   - 翼稍
-   - 后缘
+3. AI 识别的 7 类部件：
+
+| 标签 ID | 组名 | 说明 |
+|---------|------|------|
+| 0 | `nose` | 机头 |
+| 1 | `fuselage` | 机身 |
+| 2 | `vertical_tail` | 垂尾 |
+| 3 | `horizontal_tail` | 平尾 |
+| 4 | `main_wing` | 机翼（主翼） |
+| 5 | `engine` | 发动机/吊舱 |
+| 6 | `tail` | 尾部/尾椎 |
+
+4. 其中机翼组（`main_wing`）会被进一步拆分为 4 个子组：
+   - `jiyi_wing_upper_surface`（机翼上表面）
+   - `jiyi_wing_lower_surface`（机翼下表面）
+   - `jiyi_wing_tip`（翼稍）
+   - `jiyi_trailing_edge`（后缘）
 
 5. 分割完成后各部件自动染色（不同颜色区分），无需额外调用染色工具。
+6. 每个分组包含组名和所包含的超面 ID 列表。
 
 ## 5. 后续操作
 

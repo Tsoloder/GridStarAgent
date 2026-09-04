@@ -369,22 +369,20 @@ def SplitBlock(ids: str, direction: int, splitValue: str):
 
 
 def SetConnectorPointCount(ids: str, number: int):
-    """设置网格线点数。
+    """设置网格线点数（ID 不变）。
 
     Args:
         ids: 网格线 ID,逗号分隔,如 "12,13".
         number: 点数.
 
     Returns:
-        JSON 字符串，格式：{"success":true,"new_id":136}。
-        success 为 true 表示成功，new_id 为该操作创建的新网格线 ID；
-        失败时返回 {"success":false,"new_id":-1}。
+        JSON 字符串，格式：{"success":true}。成功时返回 true，失败时返回 false。
     """
     return send_post_request("SetConnectorPointCount", {"ids": ids, "number": number})
 
 
 def CopyConnectorPointCount(sourceId: str, targetIds: str):
-    """拷贝网格线点数（从源网格线拷贝到目标网格线组）。
+    """拷贝网格线点数（ID 不变，从源网格线拷贝到目标网格线组）。
 
     ⚠️ sourceId 是点数来源(拷贝源),targetIds 是接收点数的目标组,切勿搞反。
 
@@ -393,29 +391,25 @@ def CopyConnectorPointCount(sourceId: str, targetIds: str):
         targetIds: 目标网格线 ID 列表,逗号分隔,如 "12,13".
 
     Returns:
-        JSON 字符串，格式：{"success":true,"new_id":136}。
-        success 为 true 表示成功，new_id 为该操作创建的新网格线 ID；
-        失败时返回 {"success":false,"new_id":-1}。
+        JSON 字符串，格式：{"success":true}。成功时返回 true，失败时返回 false。
     """
     return send_post_request("CopyConnectorPointCount", {"sourceId": sourceId, "targetIds": targetIds})
 
 
 def SetConnectorAverageDistribution(ids: str):
-    """平均分布网格线。
+    """平均分布网格线（ID 不变）。
 
     Args:
         ids: 网格线 ID,逗号分隔,如 "12,13".
 
     Returns:
-        JSON 字符串，格式：{"success":true,"new_id":136}。
-        success 为 true 表示成功，new_id 为该操作创建的新网格线 ID；
-        失败时返回 {"success":false,"new_id":-1}。
+        JSON 字符串，格式：{"success":true}。成功时返回 true，失败时返回 false。
     """
     return send_post_request("SetConnectorAverageDistribution", {"ids": ids})
 
 
 def SetConnectorSmoothDistribution(ids: str, headspace: float, tailspace: float, params: str, mindValue: float):
-    """平滑分布网格线。
+    """平滑分布网格线（ID 不变）。
 
     Args:
         ids: 网格线 ID,逗号分隔,如 "12,13".
@@ -425,9 +419,7 @@ def SetConnectorSmoothDistribution(ids: str, headspace: float, tailspace: float,
         mindValue: 中间值.
 
     Returns:
-        JSON 字符串，格式：{"success":true,"new_id":136}。
-        success 为 true 表示成功，new_id 为该操作创建的新网格线 ID；
-        失败时返回 {"success":false,"new_id":-1}。
+        JSON 字符串，格式：{"success":true}。成功时返回 true，失败时返回 false。
     """
     return send_post_request("SetConnectorSmoothDistribution", {
         "ids": ids, "headspace": headspace, "tailspace": tailspace,
