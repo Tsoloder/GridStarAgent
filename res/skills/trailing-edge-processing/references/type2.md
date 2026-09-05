@@ -12,7 +12,7 @@
 > - 工具返回 `success` 为 `false` 时**立即停止**，报告失败。
 > - `SetConnectorPointCount`、`SetConnectorAverageDistribution`、`SetConnectorSmoothDistribution`、`CopyConnectorPointCount` 返回格式为 `{"success":true}`，**操作后网格线 ID 不变**，无需追踪新 ID。
 > - manual 模式下，中间步骤直接执行，**不输出** **`tool_params`**。仅 `DeleteDomain` 通过 `options` 请求确认；auto 模式下 `DeleteDomain` 直接执行，不请求确认。
-> - 角色判定中任一查询返回 `"false"`、交集为空或命中多条线时，立即停止，报告失败原因。
+> - 角色判定返回 `success` 为 `false`、缺少角色/端点字段或环连接校验不通过时，立即停止，报告失败原因。
 
 **间距参数**：
 
@@ -39,20 +39,13 @@
 
 ## 步骤
 
-1. **识别角色**（不使用 `IdentifyType2Roles`，通过分组交集 + 端点对比判定）：
+1. **识别角色**（使用 `IdentifyType2Roles` 一次获取角色线 ID 与端点信息）：
    1. 调用 `GetSpliteAssemlyDomains`（4 次，`groupName` 分别为 `engine`、`fuselage`、`jiyi_wing_upper_surface`、`jiyi_wing_lower_surface`），得到吊舱、机身、机翼上表面、机翼下表面各分组的**网格面 ID 列表**。
-   2. 对每个分组的每个网格面调用 `GetConnectorsByDomain`（网格面 ID），汇总得到 4 个分组各自的**网格线 ID 集合**。
-   3. 调用 `GetConnectorsByDomain`（当前后缘面 ID），得到后缘面下属的 **6 条网格线** ID。
-   4. 将 6 条线逐一与各分组的网格线集合求交集，判定角色 ID：
-      - 与 `engine` 线集合有交集 → `A`
-      - 与 `fuselage` 线集合有交集 → `B`
-      - 与 `jiyi_wing_upper_surface` 线集合有交集 → `F`
-      - 与 `jiyi_wing_lower_surface` 线集合有交集 → 2 条长边（`D`、`E` 候选，暂不区分）
-      - 与所有分组均无交集的剩余 1 条线 → `C`
-   5. 对 6 条线逐一调用 `GetStartAndEndPointByConnector`（线 ID），记录每条线的首尾点 ID（取返回值中 `start_point`/`end_point` 的 `pointID`）：
-      `A_start`/`A_end`、`B_start`/`B_end`、`C_start`/`C_end`、`D_start`/`D_end`、`E_start`/`E_end`、`F_start`/`F_end`
-   6. 通过端点 ID 对比区分 `D`、`E` 并确认首尾点连接关系（相同 ID 即为共点/相连）：
-      - 与 `B` 共点的那条下表面长边 → `D`，另一条 → `E`
+   2. 调用 `IdentifyType2Roles`（`teDomainId`=当前后缘面 ID，`engineDomainIds`、`fuselageDomainIds`、`upperSurfaceDomainIds`、`lowerSurfaceDomainIds` 分别为第 1 步得到的各分组网格面 ID，逗号分隔），返回：
+      - 各角色线 ID：`A`、`B`、`C`、`D`、`E`、`F`
+      - 每条线的首尾点 ID：`A_start`/`A_end`、`B_start`/`B_end`、`C_start`/`C_end`、`D_start`/`D_end`、`E_start`/`E_end`、`F_start`/`F_end`
+      - 装配顺序 `assembly_order` = `"A,E,C,F,B,D"`
+   3. 通过端点 ID 对比确认首尾点连接关系（相同 ID 即为共点/相连）：
       - 校验环连接关系：`A—E`、`E—C`、`C—F`、`F—B`、`B—D`、`D—A`（即 A — E — C — F — B — D — 回到 A）
       - 若任一连接关系不满足 → 失败停止，报告原因。
 2. **A、B、C 设点数 + 平均分布**（逐一执行），点数固定为 5：

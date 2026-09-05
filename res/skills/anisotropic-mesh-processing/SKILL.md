@@ -33,6 +33,7 @@ allowed-tools: []
 |---|---|---|
 | 机翼弦向（前缘↔后缘） | `chordwise-direction` | 弦向、弦长方向、前缘后缘、chordwise |
 | 机翼展向（翼根↔翼梢） | `spanwise-direction` | 展向、翼根、翼梢、半展长、spanwise |
+| 前缘面（前缘线展向分布） | `spanwise-direction` | 前缘面、前缘面处理、前缘线、leading edge |
 | 支架与翼身结合处 | `wing-body-junction` | 翼身结合、支架结合、junction |
 | 吊舱流向方向（前缘↔后缘） | `nacelle-streamwise` | 吊舱、nacelle、发动机短舱、流向 |
 | 后缘（狭长面） | `trailing-edge-processing` | 后缘面、trailing edge（已有独立 Skill） |
@@ -76,7 +77,7 @@ allowed-tools: []
 ## 参考
 
 - 子 Skill `chordwise-direction`：机翼弦向网格线分布
-- 子 Skill `spanwise-direction`：机翼展向网格线分布
+- 子 Skill `spanwise-direction`：机翼展向网格线分布（含前缘面处理流程）
 - 子 Skill `wing-body-junction`：支架与翼身结合处网格线分布
 - 子 Skill `nacelle-streamwise`：吊舱流向网格线分布
 - 子 Skill `trailing-edge-processing`：后缘狭长面处理（已有）
