@@ -1,0 +1,39 @@
+语音转文字（voice_asr）模块第三方组件与许可声明
+================================================
+
+本模块自身代码版权归 GridStarAgent 项目所有。运行时通过子进程调用本机已安装的
+第三方组件，未在仓库内再分发其代码或模型权重。若日后对外再分发下列组件，
+须随附其原始版权与许可声明。
+
+------------------------------------------------
+1. whisper.cpp（含 ggml）
+------------------------------------------------
+来源：https://github.com/ggml-org/whisper.cpp
+许可：MIT License
+版权：Copyright (c) 2023-2026 The ggml authors
+
+本机调用路径（CPU 构建）：
+  D:\whiseper_cpp\build_cpu\bin\Release\whisper-cli.exe
+
+说明：本模块通过子进程调用 whisper-cli.exe 完成转写，使用固定参数列表
+（非 shell=True），不修改、不再分发其二进制。
+
+------------------------------------------------
+2. OpenAI Whisper 模型（ggml-base.bin）
+------------------------------------------------
+来源：https://github.com/openai/whisper （模型权重经 ggml 格式转换）
+许可：MIT License
+版权：Copyright (c) 2022 OpenAI
+
+本机模型路径：
+  D:\whiseper_cpp\models\ggml-base.bin
+
+说明：Whisper 代码与模型权重同为 MIT，可自由商用。本模块仅在本机读取该
+模型文件供 whisper-cli 使用，不再分发。
+
+------------------------------------------------
+许可兼容性备注
+------------------------------------------------
+- 本方案不使用 ffmpeg（音频在浏览器端编码为 WAV），规避 GPL/LGPL 分发义务。
+- 使用 whisper.cpp 的 CPU 构建，不涉及 CUDA 运行时的再分发。
+- whisper.cpp 与 Whisper 模型均为 MIT，与本项目集成无商业许可限制。

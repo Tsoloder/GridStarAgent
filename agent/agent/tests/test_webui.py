@@ -215,3 +215,62 @@ def test_webui_surfaces_upstream_error_classification():
     # 只有连不上后端才把顶栏标成离线，上游故障不该说"连接异常"
     assert "if (!error.stream) setConnection(" in script
     assert 'sendMessage(retry.message, retry.display)' in script
+
+
+def test_webui_voice_input_contract():
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 语音按钮位于发送按钮之前，处于同一输入区
+    assert 'id="voice-btn"' in index
+    assert 'class="voice"' in index
+    assert 'aria-label="语音输入"' in index
+    assert index.index('id="voice-btn"') < index.index('id="send"')
+    # 缓存版本随本次前端改动升级
+    assert "style.css?v=19" in index
+    assert "app.js?v=24" in index
+
+    # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
+    for contract in (
+        "getUserMedia", "createScriptProcessor", "function encodeWav(",
+        "function startRecording(", "function stopRecording(",
+        'fetch("/asr"', 'request("/asr/health")', "FormData",
+        "function appendTranscript(", "function toggleVoice(",
+    ):
+        assert contract in script
+
+    # 按钮四态样式（常态/录音脉冲/加载 spinner/禁用）
+    for rule in (".voice{", ".voice.recording{", ".voice.loading{", ".voice:disabled{",
+                 "@keyframes voicePulse", "@keyframes voiceSpin"):
+        assert rule in stylesheet
+
+
+def test_webui_attachment_drag_and_upload_contract():
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 输入区附件控件：选择按钮、隐藏 file input、芯片条、拖拽遮罩
+    assert 'id="attach-btn"' in index
+    assert 'id="file-input"' in index
+    assert 'id="attach-bar"' in index
+    assert 'id="drop-overlay"' in index
+    assert 'type="file" multiple' in index
+    # 附件按钮位于语音/发送按钮之前，同属输入区
+    assert index.index('id="attach-btn"') < index.index('id="voice-btn"')
+
+    # 上传 → 芯片 → 随消息发送 → 历史渲染 全链路契约
+    for contract in (
+        '"/upload?name="', "function uploadFile(", "function addFiles(",
+        "function renderAttachments(", "function renderMessageAttachments(",
+        "attachments:sentAttachments", 'type === "notice"',
+        "function dragHasFiles(", 'addEventListener("dragenter"', 'addEventListener("drop"',
+        "attachments: [], uploading: 0",
+    ):
+        assert contract in script
+
+    # 附件相关样式（芯片条、拖拽遮罩、气泡内附件）
+    for rule in (".attach-bar{", ".attach-chip{", ".drop-overlay{", ".bubble-attachments{"):
+        assert rule in stylesheet
+

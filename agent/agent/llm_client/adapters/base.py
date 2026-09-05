@@ -41,6 +41,15 @@ def format_tool_result(content: Any) -> str:
         return str(content)
 
 
+def image_data_url(block: Any) -> str:
+    """ImageBlock → data URL；source 本身已是 data:/http(s) URL 时原样透传。"""
+    source = str(getattr(block, "source", "") or "")
+    if source.startswith(("data:", "http://", "https://")):
+        return source
+    media_type = getattr(block, "media_type", "") or "image/png"
+    return "data:%s;base64,%s" % (media_type, source)
+
+
 def parse_retry_after(value: Any) -> Optional[float]:
     """解析 Retry-After 头，支持"秒数"和"HTTP-date"两种写法。"""
     text = str(value or "").strip()

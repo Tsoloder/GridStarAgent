@@ -2,6 +2,8 @@ import argparse
 import asyncio
 import json
 import logging
+import secrets
+import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime
@@ -9,7 +11,7 @@ from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,6 +31,13 @@ from config import (
     save_config,
 )
 from context import ContextManager
+from document_loader import (
+    IMAGE_MEDIA_TYPES,
+    IMAGE_SUFFIXES,
+    MAX_FILE_BYTES,
+    SUPPORTED,
+    load_attachments,
+)
 from llm_client.catalog import ModelCatalog as DiscoveryCatalog
 from llm_client.providers import AnthropicProvider, OpenAICompatibleProvider, OpenAIProvider
 from llm_client.registry import ProviderRegistry, default_adapter_registry
@@ -37,6 +46,7 @@ from llm_client.types import ModelConfig as RuntimeModelConfig
 from llm_client.types import ProviderConfig as RuntimeProviderConfig
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
+from paths import UPLOADS_DIR
 from session import (
     InvalidSessionId,
     clear_session,
@@ -210,6 +220,44 @@ async def webui_redirect():
 
 
 app.mount("/ui", StaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+
+
+@app.post("/upload")
+async def upload_file(request: Request, name: str = ""):
+    """接收前端拖拽/选择的文件：原始字节落盘到 uploads 目录，返回可引用的路径。"""
+    raw_name = (name or "").strip().replace("\\", "/")
+    display_name = Path(raw_name).name or "attachment"
+    suffix = Path(display_name).suffix.lower()
+    if suffix not in SUPPORTED:
+        return JSONResponse(
+            {"error": "不支持的文件类型 %s" % (suffix or "(无扩展名)")}, status_code=400
+        )
+
+    data = await request.body()
+    if not data:
+        return JSONResponse({"error": "文件内容为空"}, status_code=400)
+    if len(data) > MAX_FILE_BYTES:
+        return JSONResponse({"error": "单个文件不能超过 10 MB"}, status_code=400)
+
+    stored_name = "%s-%s%s" % (
+        datetime.now().strftime("%Y%m%d%H%M%S"), secrets.token_hex(4), suffix
+    )
+    target = UPLOADS_DIR / stored_name
+    try:
+        target.write_bytes(data)
+    except OSError as exc:
+        logger.error("upload write failed: %s", exc)
+        return JSONResponse({"error": "写入上传目录失败"}, status_code=500)
+
+    return {
+        "name": display_name,
+        "path": str(target),
+        "kind": "image" if suffix in IMAGE_SUFFIXES else "text",
+        "media_type": IMAGE_MEDIA_TYPES.get(suffix, ""),
+        "url": "/uploads/%s" % stored_name,
+        "size": len(data),
+    }
 
 
 @app.get("/health")
@@ -466,15 +514,23 @@ async def chat_stream(body: dict):
         return JSONResponse({"error": "selected_skills must be an array"}, status_code=400)
 
     interaction_mode = body.get("interaction_mode", "manual")
-    attachments = body.get("attachments", [])
+    attachments = body.get("attachments", []) or []
     display_content = body.get("display_content", "")
 
-    if not session_id or not message:
+    if not isinstance(attachments, list):
+        return JSONResponse({"error": "attachments must be an array"}, status_code=400)
+
+    if not session_id or (not message and not attachments):
         return JSONResponse({"error": "missing session_id or message"}, status_code=400)
     try:
         session_id = validate_session_id(session_id)
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+
+    # 纯附件消息没有文本，用附件名参与轮次标识，避免被误判为 SSE 重连
+    turn_marker = message or "|".join(
+        str(item.get("name", "")) for item in attachments if isinstance(item, dict)
+    )
 
     save_events = {"tool_call", "tool_result", "done"}
 
@@ -493,13 +549,13 @@ async def chat_stream(body: dict):
             if bg.task is None or bg.task.done():
                 if bg.task and bg.task.done() and not bg.cancelled:
                     # task 已自然结束，需要区分：SSE 重连 vs 新的用户消息
-                    if message and message != bg.last_message:
+                    if turn_marker and turn_marker != bg.last_message:
                         # 新的用户消息 — 重置 bg 状态，走下方启动新 task
                         bg.queue = asyncio.Queue()
                         bg.done_event = asyncio.Event()
                         bg.cancelled = False
                         bg.started_at = None
-                        bg.last_message = message
+                        bg.last_message = turn_marker
                     else:
                         # SSE 重连 — 回放最后一条 assistant 消息
                         session = load_session(session_id)
@@ -513,11 +569,11 @@ async def chat_stream(body: dict):
                         return
                 else:
                     # task 为 None（首次请求），记录消息
-                    bg.last_message = message
+                    bg.last_message = turn_marker
 
                 # 启动新的后台 task
                 async with _session_async_lock(session_id):
-                    bg.last_message = message
+                    bg.last_message = turn_marker
                     bg.task = asyncio.create_task(
                         _run_background_loop(
                             bg, session_id, message, system_prompt,
@@ -838,10 +894,40 @@ async def _run_background_loop(
     ledger = TaskLedger(session_id)
 
     try:
+        stored_attachments = []
+        if attachments:
+            documents, images, failures = await asyncio.to_thread(
+                load_attachments, attachments
+            )
+            for notice in failures:
+                logger.warning("[attachment] session=%s %s", session_id, notice)
+                await bg.queue.put({"type": "notice", "message": notice})
+            stored_attachments = [
+                {
+                    "kind": "text", "name": item["name"],
+                    "text": item["text"], "path": item.get("path", ""),
+                }
+                for item in documents
+            ] + [
+                {
+                    "kind": "image", "name": item["name"],
+                    "media_type": item["media_type"], "path": item["path"],
+                    "url": item.get("url", ""),
+                }
+                for item in images
+            ]
+            if not message and not stored_attachments:
+                await bg.queue.put({
+                    "type": "error",
+                    "message": "附件读取失败，请更换文件后重试",
+                    "retryable": False,
+                })
+                return
+
         async for event in run_agent_loop(
             session, message, system_prompt, current_config, _mcp, ctx_mgr,
             skill_registry, selected_skills, _request_tool_approval,
-            attachments=attachments, display_content=display_content,
+            attachments=stored_attachments, display_content=display_content,
             interaction_mode=interaction_mode,
             model_override=model_id if model_id else None,
             model_runtime=_model_runtime,
@@ -912,6 +998,21 @@ def _do_cleanup(bg: BackgroundSession):
         bg.task.cancel()
     _background_sessions.pop(bg.session_id, None)
     logger.info(f"background session cleaned up: {bg.session_id}")
+
+
+# --- 语音转文字（voice_asr）模块挂载 ---
+# voice_asr 位于项目根，需将 PROJECT_ROOT 加入 sys.path 才能导入。
+# 守卫式导入：挂载失败仅告警，不影响主应用启动（沿用 mcp_bridge/litellm 风格）。
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+try:
+    from voice_asr.router import router as voice_router
+
+    app.include_router(voice_router)
+    logger.info("voice_asr mounted: POST /asr, GET /asr/health")
+except Exception as exc:  # noqa: BLE001 - 挂载失败不应阻断主应用
+    logger.warning("voice_asr not mounted: %s", exc)
 
 
 if __name__ == "__main__":

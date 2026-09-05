@@ -1,7 +1,7 @@
 import json
 
-from .base import Adapter, ensure_response_ok, format_tool_result, stream_failure
-from ..types import TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
+from .base import Adapter, ensure_response_ok, format_tool_result, image_data_url, stream_failure
+from ..types import TextBlock, ThinkingBlock, ImageBlock, ToolCallBlock, ToolResultBlock
 
 
 def _tools(tools):
@@ -20,6 +20,7 @@ class OpenAIChatAdapter(Adapter):
                 item[model.compat.get("reasoning_field", "reasoning_content")] = reasoning
             calls = [b for b in message.content if isinstance(b, ToolCallBlock)]
             results = [b for b in message.content if isinstance(b, ToolResultBlock)]
+            images = [b for b in message.content if isinstance(b, ImageBlock) and b.source]
             if calls:
                 item["tool_calls"] = [{"id": b.id, "type": "function", "function": {
                     "name": b.name, "arguments": b.raw_arguments or json.dumps(b.arguments)}} for b in calls]
@@ -28,7 +29,12 @@ class OpenAIChatAdapter(Adapter):
                     output.append({"role": "tool", "tool_call_id": block.tool_call_id,
                                    "content": format_tool_result(block.content)})
                 continue
-            if text or calls:
+            # 图片附件走多模态 content 数组，纯文本消息保持字符串（兼容严格网关）
+            if images:
+                parts = [{"type": "text", "text": text}] if text else []
+                parts.extend({"type": "image_url", "image_url": {"url": image_data_url(b)}} for b in images)
+                item["content"] = parts
+            if text or calls or images:
                 output.append(item)
         body = {"model": model.id, "messages": output, "stream": True}
         if tools: body["tools"] = _tools(tools)

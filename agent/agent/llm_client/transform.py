@@ -1,6 +1,6 @@
 import json
 
-from .types import Message, TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
+from .types import ImageBlock, Message, TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
 
 
 class MessageTransformer:
@@ -11,8 +11,18 @@ class MessageTransformer:
         for item in messages:
             role = item["role"]
             blocks = []
-            if item.get("content"):
-                blocks.append(TextBlock(str(item["content"])))
+            content = item.get("content")
+            if isinstance(content, list):
+                # 多模态 content：[{"type":"text",...}, {"type":"image","media_type":...,"data":...}]
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if part.get("type") == "image" and part.get("data"):
+                        blocks.append(ImageBlock(source=part["data"], media_type=part.get("media_type")))
+                    elif part.get("text"):
+                        blocks.append(TextBlock(str(part["text"])))
+            elif content:
+                blocks.append(TextBlock(str(content)))
             if role == "assistant" and item.get("reasoning_content"):
                 blocks.append(ThinkingBlock(str(item["reasoning_content"])))
             if role == "assistant":

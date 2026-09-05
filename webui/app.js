@@ -14,6 +14,7 @@ const state = {
   sessions: [], session: null, models: [], skills: [], mode: "manual",
   controller: null, busy: false, assistant: null, workflow: null, configLoaded: false,
   modelListOpen: false, modelOptionIndex: -1, modelSearch: "",
+  attachments: [], uploading: 0,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
@@ -23,7 +24,8 @@ const el = {
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
-  input: $("#message-input"), send: $("#send"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
+  input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
+  attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
   skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
@@ -129,7 +131,121 @@ function setBusy(busy) {
 }
 
 function updateSendState() {
-  el.send.disabled = !state.busy && (!el.input.value.trim() || !state.configLoaded);
+  const hasPayload = Boolean(el.input.value.trim()) || state.attachments.length > 0;
+  el.send.disabled = !state.busy && (!hasPayload || !state.configLoaded || state.uploading > 0);
+}
+
+// --- 附件：拖拽/选择文件 → POST /upload → 芯片列表 → 随消息一起发给大模型 ---
+const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
+const ATTACH_MAX_COUNT = 6;
+const ATTACH_MAX_IMAGES = 4;
+const ATTACH_DOC_EXT = ["txt","md","markdown","csv","json","xml","log","html","htm","yaml","yml","py","js","ts","css","sql","sh","bat","ini","conf","pdf","doc","docx","xls","xlsx"];
+const ATTACH_IMG_EXT = ["png","jpg","jpeg","gif","webp","bmp"];
+let attachSeq = 0;
+function attachExt(name) {
+  const text = String(name || ""); const dot = text.lastIndexOf(".");
+  return dot > 0 ? text.slice(dot + 1).toLowerCase() : "";
+}
+function attachKind(name) {
+  const ext = attachExt(name);
+  if (ATTACH_IMG_EXT.includes(ext)) return "image";
+  if (ATTACH_DOC_EXT.includes(ext)) return "text";
+  return "";
+}
+function attachSizeLabel(size) {
+  const bytes = Number(size) || 0;
+  if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
+  if (bytes >= 1024) return Math.round(bytes / 1024) + " KB";
+  return bytes + " B";
+}
+// Chromium 65 下 fetch 上传大文件不便，用 XHR 包一层 Promise
+function uploadFile(file) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/upload?name=" + encodeURIComponent(file.name), true);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch (_) { reject(new Error("上传响应解析失败")); }
+        return;
+      }
+      let message = "上传失败 (" + xhr.status + ")";
+      try { const data = JSON.parse(xhr.responseText); if (data && data.error) message = data.error; } catch (_) {}
+      reject(new Error(message));
+    };
+    xhr.onerror = () => reject(new Error("上传失败：网络错误"));
+    xhr.send(file);
+  });
+}
+function findAttachment(id) { return state.attachments.filter(item => item.id === id)[0] || null; }
+function removeAttachment(id) {
+  const index = state.attachments.findIndex(item => item.id === id);
+  if (index < 0) return;
+  const item = state.attachments[index];
+  if (item.previewUrl && window.URL && URL.revokeObjectURL) { try { URL.revokeObjectURL(item.previewUrl); } catch (_) {} }
+  state.attachments.splice(index, 1);
+  renderAttachments(); updateSendState();
+}
+function clearAttachments() {
+  state.attachments.slice().forEach(item => { if (item.previewUrl && window.URL && URL.revokeObjectURL) { try { URL.revokeObjectURL(item.previewUrl); } catch (_) {} } });
+  state.attachments = []; renderAttachments(); updateSendState();
+}
+// 待发送附件芯片条（含上传进度态与移除按钮）
+function renderAttachments() {
+  const bar = el.attachBar; if (!bar) return;
+  if (!state.attachments.length) { bar.innerHTML = ""; bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = state.attachments.map(item => {
+    const thumb = item.kind === "image" && (item.previewUrl || item.url)
+      ? `<img src="${escapeHtml(item.previewUrl || item.url)}" alt="">`
+      : `<span class="attach-ext">${escapeHtml(attachExt(item.name) || "file")}</span>`;
+    const status = item.uploading ? " uploading" : "";
+    return `<span class="attach-chip${status}" data-id="${item.id}" title="${escapeHtml(item.name)}">${thumb}<span class="attach-name">${escapeHtml(item.name)}</span><span class="attach-size">${item.uploading ? "上传中…" : escapeHtml(attachSizeLabel(item.size))}</span><button type="button" class="attach-remove" data-remove="${item.id}" aria-label="移除附件">×</button></span>`;
+  }).join("");
+}
+async function addFiles(fileList) {
+  const files = Array.prototype.slice.call(fileList || []);
+  for (const file of files) {
+    if (state.attachments.length >= ATTACH_MAX_COUNT) { showToast("最多添加 " + ATTACH_MAX_COUNT + " 个附件"); break; }
+    const kind = attachKind(file.name);
+    if (!kind) { showToast("不支持的文件类型：" + file.name); continue; }
+    if (file.size > ATTACH_MAX_BYTES) { showToast("文件超过 10MB：" + file.name); continue; }
+    if (kind === "image" && state.attachments.filter(item => item.kind === "image").length >= ATTACH_MAX_IMAGES) { showToast("最多添加 " + ATTACH_MAX_IMAGES + " 张图片"); continue; }
+    const item = {
+      id: ++attachSeq, kind, name: file.name, size: file.size, path: "", url: "", media_type: "", uploading: true,
+      previewUrl: kind === "image" && window.URL && URL.createObjectURL ? URL.createObjectURL(file) : "",
+    };
+    state.attachments.push(item); renderAttachments();
+    state.uploading += 1; updateSendState();
+    try {
+      const data = await uploadFile(file);
+      item.path = data.path || ""; item.url = data.url || ""; item.media_type = data.media_type || "";
+      if (data.kind) item.kind = data.kind;
+    } catch (error) {
+      removeAttachment(item.id);
+      showToast((error && error.message) || ("上传失败：" + file.name));
+      continue;
+    } finally { state.uploading = Math.max(0, state.uploading - 1); }
+    item.uploading = false; renderAttachments(); updateSendState();
+  }
+}
+// 气泡内已发送/历史附件展示（图片给缩略图，文档给文件名芯片）
+function renderMessageAttachments(bubble, attachments) {
+  const list = (attachments || []).filter(item => item && typeof item === "object");
+  if (!bubble || !list.length) return;
+  const wrap = document.createElement("div");
+  wrap.className = "bubble-attachments";
+  wrap.innerHTML = list.map(item => {
+    const name = item.name || "附件";
+    if (item.kind === "image" && item.url) return `<a class="attach-thumb" href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(name)}"><img src="${escapeHtml(item.url)}" alt="${escapeHtml(name)}"></a>`;
+    return `<span class="attach-file" title="${escapeHtml(name)}"><span class="attach-ext">${escapeHtml(attachExt(name) || "file")}</span>${escapeHtml(name)}</span>`;
+  }).join("");
+  bubble.insertBefore(wrap, bubble.firstChild);
+}
+function dragHasFiles(event) {
+  const types = event.dataTransfer && event.dataTransfer.types;
+  if (!types) return false;
+  for (let i = 0; i < types.length; i++) { if (types[i] === "Files" || types[i] === "files") return true; }
+  return false;
 }
 
 function inlineMarkdown(text) {
@@ -179,7 +295,7 @@ function structuredBlocks(text) {
   });
   return {visible: visible.trim(), found};
 }
-function createMessage(role, content = "", label = "") {
+function createMessage(role, content = "", label = "", attachments = null) {
   const welcome = document.getElementById("welcome");
   if (welcome) welcome.remove();
   if (el.welcome) el.welcome = null;
@@ -189,7 +305,9 @@ function createMessage(role, content = "", label = "") {
   bubble.className = "bubble";
   if (label) bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
   const body = document.createElement("div"); body.className = "markdown"; body.innerHTML = basicMarkdown(content);
-  bubble.append(body); node.append(bubble); el.messages.append(node); scrollMessages();
+  bubble.append(body); node.append(bubble); el.messages.append(node);
+  renderMessageAttachments(bubble, attachments);
+  scrollMessages();
   return {node, bubble, body, text: content, reasoning: "", structured: []};
 }
 function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
@@ -418,7 +536,7 @@ function skillLabel(item, skills) {
 // turn 为本轮已合并的气泡：实时流里一轮对话只有一个 assistant 气泡（文本累加、
 // 所有工具调用进同一个折叠组），而持久化会拆成多条消息，渲染时必须合并回去。
 function renderHistoryMessage(message, turn) {
-  if (message.role === "user") return createMessage("user", message.display_content || message.content || "");
+  if (message.role === "user") return createMessage("user", message.display_content || message.content || "", "", message.attachments);
   if (message.role === "assistant") {
     const item = turn || createMessage("assistant", "", "");
     // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
@@ -473,7 +591,7 @@ async function loadSession(id) {
     if (!state.session.messages.length) showWelcome();
     else renderHistory(state.session.messages);
     if (state.session.plan) renderPhase(state.session.plan);
-    closeSessions(); updateSendState(); scrollMessages();
+    closeSessions(); clearAttachments(); updateSendState(); scrollMessages();
   } catch (error) { showToast(error.message); }
 }
 function renderSessions() {
@@ -567,11 +685,18 @@ async function consumeSse(response, onEvent, controller) {
     if (done) break;
   }
 }
-async function sendMessage(rawMessage = null, displayContent = null) {
+async function sendMessage(rawMessage = null, displayContent = null, retryAttachments = null) {
   if (state.busy) return;
-  const message = rawMessage != null ? rawMessage : el.input.value.trim(); if (!message) return;
+  const message = rawMessage != null ? rawMessage : el.input.value.trim();
+  // 附件随消息一起发给大模型：重发沿用原附件，新消息取芯片条里已上传完成的项
+  const sentAttachments = retryAttachments != null ? retryAttachments
+    : state.attachments.filter(item => !item.uploading).map(item => ({kind:item.kind,name:item.name,path:item.path,url:item.url,media_type:item.media_type}));
+  if (!message && !sentAttachments.length) return;
+  if (retryAttachments == null && state.uploading > 0) { showToast("附件还在上传中，请稍候再发送"); return; }
   if (!state.session) { await createSession(); if (!state.session) return; }
-  const shown = displayContent != null ? displayContent : message; createMessage("user", shown); el.input.value = ""; updateSendState();
+  const shown = displayContent != null ? displayContent : message;
+  if (retryAttachments == null) clearAttachments();
+  createMessage("user", shown, "", sentAttachments); el.input.value = ""; updateSendState();
   if ((state.session.meta.title || "").trim() === "New Session" && !state.session.messages.length) {
     const title = message.replace(/\s+/g, " ").trim().slice(0, 10);
     if (title) { try { await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/rename`, {method:"PUT",body:JSON.stringify({title})}); state.session.meta.title = title; el.currentTitle.textContent = title; const entry = state.sessions.find(item => item.id === state.session.meta.id); if (entry) entry.title = title; renderSessions(); } catch (_) {} }
@@ -581,7 +706,7 @@ async function sendMessage(rawMessage = null, displayContent = null) {
   const controller = createAbortController(); state.controller = controller; setBusy(true);
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
-    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills})});
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
     await consumeSse(response, async (type, event) => {
       if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
       else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
@@ -590,6 +715,7 @@ async function sendMessage(rawMessage = null, displayContent = null) {
       else if (type === "tool_result") renderToolResult(event,assistant.node);
       else if (type === "tool_approval_required") renderApproval(event,assistant.node);
       else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
+      else if (type === "notice") showToast(event.message || "附件处理提示");
       else if (type === "error") throw streamFailure(event);
       else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); }
     });
@@ -597,7 +723,7 @@ async function sendMessage(rawMessage = null, displayContent = null) {
   } catch (error) {
     finishAssistant(assistant);
     if (error.name === "AbortError") createMessage("assistant", "已停止接收当前响应。", "STOPPED");
-    else renderFailure(error, {message, display: shown});
+    else renderFailure(error, {message, display: shown, attachments: sentAttachments});
   } finally { if (state.controller === controller) state.controller = null; setBusy(false); }
 }
 async function runWorkflow(steps) {
@@ -730,6 +856,7 @@ async function bootstrap() {
   if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
   const failures = results.filter(item => item.status === "rejected"); if (failures.length) showToast(failures[0].reason.message);
   el.warning.classList.toggle("hidden",state.configLoaded); updateSendState();
+  checkVoiceHealth();
 }
 el.newSession.onclick = createSession;
 el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList(); el.modelTrigger.onkeydown = handleModelKeys;
@@ -744,7 +871,165 @@ el.connection.onclick = bootstrap;
 el.send.onclick = () => { if (state.busy && state.controller) state.controller.abort(); else sendMessage(); };
 el.input.oninput = updateSendState;
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!state.busy && !el.send.disabled) sendMessage(); } };
+// --- 附件交互：选择按钮、文件 input、芯片移除、全局拖拽 ---
+if (el.attachBtn) el.attachBtn.onclick = () => { if (el.fileInput) el.fileInput.click(); };
+if (el.fileInput) el.fileInput.onchange = () => { addFiles(el.fileInput.files); el.fileInput.value = ""; };
+if (el.attachBar) el.attachBar.addEventListener("click", event => {
+  const button = event.target.closest("[data-remove]");
+  if (button) removeAttachment(Number(button.dataset.remove));
+});
+let dragDepth = 0;
+function showDropOverlay(show) { if (el.dropOverlay) el.dropOverlay.classList.toggle("hidden", !show); }
+document.addEventListener("dragenter", event => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault(); dragDepth += 1; showDropOverlay(true);
+});
+document.addEventListener("dragover", event => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault(); if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+});
+document.addEventListener("dragleave", event => {
+  if (!dragHasFiles(event)) return;
+  dragDepth = Math.max(0, dragDepth - 1); if (dragDepth === 0) showDropOverlay(false);
+});
+document.addEventListener("drop", event => {
+  if (!dragHasFiles(event)) return;
+  event.preventDefault(); dragDepth = 0; showDropOverlay(false);
+  if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
+});
 document.querySelectorAll("[data-mode]").forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active",item === button)); });
 document.addEventListener("click", event => { if (state.modelListOpen && !event.target.closest(".model-control:not(.skill-control)")) closeModelList(); if (state.skillListOpen && !event.target.closest(".skill-control")) closeSkillList(); if (!el.sessionPanel.classList.contains("hidden") && !event.target.closest("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions(); });
 document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSkillList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+
+// --- 语音转文字（voice_asr）：点击录音 → 浏览器端编码 16kHz WAV → POST /asr → 回填输入框 ---
+const voice = {
+  ready: false, recording: false, transcribing: false,
+  stream: null, context: null, processor: null, source: null, gain: null,
+  chunks: [], sourceRate: 16000, timer: null,
+  MAX_MS: 300000, TARGET_RATE: 16000,
+};
+// 依据录音/转写/就绪状态切换按钮的 class、disabled 与提示文案（四态）
+function setVoiceState() {
+  const btn = el.voiceBtn; if (!btn) return;
+  btn.classList.toggle("recording", voice.recording);
+  btn.classList.toggle("loading", voice.transcribing);
+  btn.disabled = !voice.ready || voice.transcribing;
+  let label = "语音输入";
+  if (voice.recording) label = "停止录音";
+  else if (voice.transcribing) label = "转写中";
+  else if (!voice.ready) label = "语音服务未就绪";
+  btn.title = label; btn.setAttribute("aria-label", label);
+}
+// 启动时探测后端就绪状态；未就绪则禁用按钮
+async function checkVoiceHealth() {
+  try { const data = await request("/asr/health"); voice.ready = Boolean(data && data.ready); }
+  catch (_) { voice.ready = false; }
+  setVoiceState();
+}
+function stopVoiceStream() {
+  if (voice.stream) { voice.stream.getTracks().forEach(track => track.stop()); voice.stream = null; }
+}
+async function startRecording() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { showToast("当前浏览器不支持录音"); return; }
+  try { voice.stream = await navigator.mediaDevices.getUserMedia({audio: true}); }
+  catch (error) { showToast("无法访问麦克风：" + (error && (error.message || error.name) || "未知错误")); return; }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) { showToast("当前浏览器不支持 Web Audio"); stopVoiceStream(); return; }
+  // 优先请求 16kHz 上下文；老浏览器忽略该参数时按实际采样率录制并在编码前重采样
+  try { voice.context = new Ctx({sampleRate: voice.TARGET_RATE}); }
+  catch (_) { voice.context = new Ctx(); }
+  voice.sourceRate = voice.context.sampleRate || voice.TARGET_RATE;
+  voice.source = voice.context.createMediaStreamSource(voice.stream);
+  voice.processor = voice.context.createScriptProcessor(4096, 1, 1);
+  voice.gain = voice.context.createGain(); voice.gain.gain.value = 0; // 静音回环，避免扬声器回放麦克风
+  voice.chunks = [];
+  voice.processor.onaudioprocess = event => { voice.chunks.push(new Float32Array(event.inputBuffer.getChannelData(0))); };
+  voice.source.connect(voice.processor);
+  voice.processor.connect(voice.gain);
+  voice.gain.connect(voice.context.destination);
+  voice.recording = true; setVoiceState();
+  voice.timer = setTimeout(() => { showToast("已达最长录音时长（5 分钟），自动停止"); stopRecording(); }, voice.MAX_MS);
+}
+async function stopRecording() {
+  if (!voice.recording) return;
+  voice.recording = false;
+  if (voice.timer) { clearTimeout(voice.timer); voice.timer = null; }
+  if (voice.processor) { try { voice.processor.disconnect(); } catch (_) {} voice.processor.onaudioprocess = null; voice.processor = null; }
+  if (voice.source) { try { voice.source.disconnect(); } catch (_) {} voice.source = null; }
+  if (voice.gain) { try { voice.gain.disconnect(); } catch (_) {} voice.gain = null; }
+  const context = voice.context; voice.context = null;
+  stopVoiceStream();
+  const chunks = voice.chunks; voice.chunks = [];
+  let total = 0; chunks.forEach(chunk => total += chunk.length);
+  const captured = new Float32Array(total);
+  let offset = 0; chunks.forEach(chunk => { captured.set(chunk, offset); offset += chunk.length; });
+  if (context && context.state !== "closed") { try { await context.close(); } catch (_) {} }
+  const seconds = total / (voice.sourceRate || voice.TARGET_RATE);
+  if (total === 0 || seconds < 0.3) { showToast("未录到有效声音，请重试"); setVoiceState(); return; }
+  const resampled = voice.sourceRate === voice.TARGET_RATE ? captured : resampleTo16k(captured, voice.sourceRate);
+  await transcribe(encodeWav(resampled, voice.TARGET_RATE));
+}
+// 线性插值重采样到 16kHz（whisper.cpp 要求）
+function resampleTo16k(input, fromRate) {
+  const toRate = voice.TARGET_RATE;
+  if (fromRate === toRate) return input;
+  const ratio = fromRate / toRate;
+  const outLength = Math.max(1, Math.round(input.length / ratio));
+  const output = new Float32Array(outLength);
+  for (let i = 0; i < outLength; i++) {
+    const pos = i * ratio, idx = Math.floor(pos), frac = pos - idx;
+    const a = input[idx] || 0;
+    const b = idx + 1 < input.length ? input[idx + 1] : a;
+    output[i] = a + (b - a) * frac;
+  }
+  return output;
+}
+// 编码 44 字节 RIFF 头的 16bit 单声道 PCM WAV
+function encodeWav(samples, sampleRate) {
+  const buffer = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+  writeStr(0, "RIFF"); view.setUint32(4, 36 + samples.length * 2, true); writeStr(8, "WAVE");
+  writeStr(12, "fmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  writeStr(36, "data"); view.setUint32(40, samples.length * 2, true);
+  let off = 44;
+  for (let i = 0; i < samples.length; i++, off += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Blob([view], {type: "audio/wav"});
+}
+async function transcribe(blob) {
+  voice.transcribing = true; setVoiceState();
+  try {
+    const form = new FormData(); form.append("audio", blob, "recording.wav");
+    const response = await fetch("/asr", {method: "POST", body: form});
+    if (!response.ok) {
+      let message = `转写失败 (${response.status})`;
+      try { const data = await response.json(); message = data.error || data.detail || message; } catch (_) {}
+      throw new Error(message);
+    }
+    const data = await response.json();
+    const text = String(data.text || "").trim();
+    if (!text) { showToast("未识别到语音内容"); return; }
+    appendTranscript(text);
+  } catch (error) { showToast((error && error.message) || "转写失败"); }
+  finally { voice.transcribing = false; setVoiceState(); }
+}
+// 将识别文本追加到输入框末尾（必要时补空格），并触发 input 以刷新发送态
+function appendTranscript(text) {
+  const current = el.input.value;
+  const needsSpace = current.length > 0 && !/\s$/.test(current);
+  el.input.value = current + (needsSpace ? " " : "") + text;
+  el.input.dispatchEvent(new Event("input", {bubbles: true}));
+  el.input.focus();
+}
+function toggleVoice() {
+  if (voice.transcribing || !voice.ready) return;
+  if (voice.recording) stopRecording(); else startRecording();
+}
+if (el.voiceBtn) el.voiceBtn.onclick = toggleVoice;
+
 bootstrap();

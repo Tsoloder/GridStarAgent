@@ -133,6 +133,18 @@ def _write_jsonl(path: str, messages: list):
         raise
 
 
+def _stored_attachment(item: dict) -> dict:
+    """只保留渲染与重放需要的字段；图片仅存路径，避免 base64 撑爆 JSONL。"""
+    stored = {"name": item.get("name", ""), "kind": item.get("kind", "text")}
+    if stored["kind"] == "image":
+        stored["media_type"] = item.get("media_type", "")
+        stored["path"] = item.get("path", "")
+        stored["url"] = item.get("url", "")
+    else:
+        stored["text"] = item.get("text", "")
+    return stored
+
+
 @dataclass
 class Session:
     id: str
@@ -160,8 +172,7 @@ class Session:
             message["active_skills"] = list(active_skills)
         if attachments:
             message["attachments"] = [
-                {"name": item.get("name", ""), "text": item.get("text", "")}
-                for item in attachments
+                _stored_attachment(item) for item in attachments if isinstance(item, dict)
             ]
         self.messages.append(message)
         if len(self.messages) == 1 and (self.title == "New Session" or not self.title):

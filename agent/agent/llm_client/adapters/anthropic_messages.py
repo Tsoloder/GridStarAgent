@@ -1,7 +1,7 @@
 import json
 
 from .base import Adapter, ensure_response_ok, format_tool_result, stream_failure
-from ..types import TextBlock, ThinkingBlock, ToolCallBlock, ToolResultBlock
+from ..types import TextBlock, ThinkingBlock, ImageBlock, ToolCallBlock, ToolResultBlock
 
 
 class AnthropicMessagesAdapter(Adapter):
@@ -11,6 +11,7 @@ class AnthropicMessagesAdapter(Adapter):
             content = []
             for block in message.content:
                 if isinstance(block, TextBlock): content.append({"type": "text", "text": block.text})
+                elif isinstance(block, ImageBlock) and block.source: content.append({"type": "image", "source": {"type": "base64", "media_type": block.media_type or "image/png", "data": block.source}})
                 elif isinstance(block, ThinkingBlock) and block.text: content.append({"type": "text", "text": block.text})
                 elif isinstance(block, ToolCallBlock): content.append({"type": "tool_use", "id": block.id, "name": block.name, "input": block.arguments or {}})
                 elif isinstance(block, ToolResultBlock): content.append({"type": "tool_result", "tool_use_id": block.tool_call_id, "content": format_tool_result(block.content), "is_error": block.is_error})

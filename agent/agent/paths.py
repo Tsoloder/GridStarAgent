@@ -21,6 +21,7 @@ CONFIG_PATH = DATA_DIR / "config.json"
 SESSIONS_DIR = DATA_DIR / "sessions"
 LOG_DIR = DATA_DIR / "logs"
 SKILLS_DIR = DATA_DIR / "skills"
+UPLOADS_DIR = DATA_DIR / "uploads"
 
-for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR):
+for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR):
     directory.mkdir(parents=True, exist_ok=True)

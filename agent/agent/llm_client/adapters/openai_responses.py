@@ -1,8 +1,8 @@
 import json
 
-from .base import Adapter, ensure_response_ok, format_tool_result, stream_failure
+from .base import Adapter, ensure_response_ok, format_tool_result, image_data_url, stream_failure
 from .openai_chat import _tools
-from ..types import TextBlock, ToolCallBlock, ToolResultBlock
+from ..types import TextBlock, ImageBlock, ToolCallBlock, ToolResultBlock
 
 
 class OpenAIResponsesAdapter(Adapter):
@@ -10,7 +10,12 @@ class OpenAIResponsesAdapter(Adapter):
         items = []
         for message in messages:
             text = "".join(b.text for b in message.content if isinstance(b, TextBlock))
-            if text: items.append({"role": message.role, "content": text})
+            images = [b for b in message.content if isinstance(b, ImageBlock) and b.source]
+            if images:
+                parts = [{"type": "input_text", "text": text}] if text else []
+                parts.extend({"type": "input_image", "image_url": image_data_url(b)} for b in images)
+                items.append({"role": message.role, "content": parts})
+            elif text: items.append({"role": message.role, "content": text})
             for block in message.content:
                 if isinstance(block, ToolCallBlock):
                     items.append({"type": "function_call", "call_id": block.id, "name": block.name,
