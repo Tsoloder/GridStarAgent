@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
-  <link rel="stylesheet" href="style.css?v=15">
+  <link rel="stylesheet" href="style.css?v=17">
 </head>
 <body>
   <main class="app-shell">
@@ -85,12 +85,20 @@
           <aside class="provider-sidebar"><div class="section-label">供应商</div><nav id="provider-list" aria-label="供应商列表"></nav><button id="add-provider" class="secondary wide" type="button">＋ 添加供应商</button></aside>
           <div id="provider-editor" class="provider-editor"></div>
         </div>
-        <div id="panel-skills" class="settings-panel placeholder-panel hidden" role="tabpanel" aria-labelledby="tab-skills"><div class="empty-symbol">◇</div><strong>技能设置</strong><p>即将支持</p></div>
-        <div id="panel-mcp" class="settings-panel placeholder-panel hidden" role="tabpanel" aria-labelledby="tab-mcp"><div class="empty-symbol">⌘</div><strong>MCP 工具设置</strong><p>即将支持</p></div>
+        <div id="panel-skills" class="settings-panel skills-panel hidden" role="tabpanel" aria-labelledby="tab-skills">
+          <div class="skills-toolbar"><div><span class="eyebrow">SKILLS</span><h3>技能 <small id="skill-count">0</small></h3></div><button id="refresh-skills" class="secondary" type="button">刷新</button></div>
+          <div id="skills-status" class="skills-status" role="status" aria-live="polite"></div>
+          <div id="skills-list" class="skills-list"></div>
+        </div>
+        <div id="panel-mcp" class="settings-panel mcp-panel hidden" role="tabpanel" aria-labelledby="tab-mcp">
+          <div class="mcp-toolbar"><div><span class="eyebrow">MCP TOOLS</span><h3>MCP 工具 <small id="mcp-count">0</small></h3></div><button id="refresh-mcp" class="secondary" type="button">刷新</button></div>
+          <div id="mcp-status" class="mcp-status" role="status" aria-live="polite"></div>
+          <div id="mcp-tools" class="mcp-tools"></div>
+        </div>
       </div>
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=17" defer></script>
+  <script src="app.js?v=22" defer></script>
 </body>
 </html>

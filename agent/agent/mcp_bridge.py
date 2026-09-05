@@ -49,6 +49,7 @@ class McpBridge:
         async with self._lock:
             tools = await self._list_tools_once()
             self._cached_tools = tools
+            self._entered = True
             return tools
 
     async def call_tool(self, name: str, args: dict) -> str:

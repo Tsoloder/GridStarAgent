@@ -71,7 +71,6 @@ def test_webui_contains_model_settings_center_contract():
     for tab in ('data-settings-tab="models"', 'data-settings-tab="skills"', 'data-settings-tab="mcp"'):
         assert tab in index
     assert 'class="provider-sidebar"' in index
-    assert "即将支持" in index
     for endpoint in ('request("/config")', 'request("/config/providers/test"', 'request("/config/providers/models"'):
         assert endpoint in script
     for contract in ("discoveredModels", "testingProviderId", "readingProviderId", "revision", "validateSettings", "addModel", "manual-model-id", "data-model-field=\"api\""):
@@ -125,10 +124,58 @@ def test_webui_model_listbox_has_static_provider_groups():
     assert 'className = "model-group"' in script
     assert 'setAttribute("role","group")' in script
     assert 'setAttribute("role","option")' in script
+    # 分组标题展示供应商名称，而不是供应商 ID（ID 仅作无名称时的回退）
+    group = script[script.index("function renderModelList"):script.index("function setConnection")]
+    assert "items[0].provider_name || provider" in group
+    assert "escapeHtml(label)" in group
     assert 'className = "tool-group"' in script
     assert 'document.createElement("details")' not in script[script.index("function renderModelList"):script.index("function setConnection")]
     assert ".model-listbox{" in stylesheet
     assert ".model-group-label{" in stylesheet
+
+
+def test_webui_mcp_panel_lists_backend_tools():
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # MCP 面板从"即将支持"占位改为工具列表容器
+    assert 'id="panel-mcp"' in index
+    assert 'class="settings-panel mcp-panel hidden"' in index
+    assert 'id="mcp-tools"' in index
+    assert 'id="refresh-mcp"' in index
+    assert 'id="mcp-count"' in index
+    mcp_panel = index[index.index('id="panel-mcp"'):]
+    mcp_panel = mcp_panel[: mcp_panel.index("</footer>")]
+    assert "即将支持" not in mcp_panel
+    # 前端拉取后端工具清单并按 tab 惰性加载
+    for contract in ('"/mcp/tools"', '"/mcp/tools?refresh=1"', "function renderMcpTools(", "function loadMcpTools(",
+                     "function schemaParams(", 'tab === "mcp" && !state.mcp.loaded'):
+        assert contract in script
+    assert ".mcp-panel{" in stylesheet
+    assert ".mcp-tool{" in stylesheet
+
+
+def test_webui_skills_panel_lists_registered_skills():
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 技能面板从"即将支持"占位改为已注册技能列表容器
+    assert 'id="panel-skills"' in index
+    assert 'class="settings-panel skills-panel hidden"' in index
+    assert 'id="skills-list"' in index
+    assert 'id="refresh-skills"' in index
+    assert 'id="skill-count"' in index
+    skills_panel = index[index.index('id="panel-skills"'):]
+    skills_panel = skills_panel[: skills_panel.index("</footer>")]
+    assert "即将支持" not in skills_panel
+    # 前端渲染 state.skills 并按 tab 惰性渲染，刷新按钮重新拉取 /skills
+    for contract in ("function renderSkills(", "function loadSkills(", 'tab === "skills"',
+                     'el.refreshSkills.onclick = () => loadSkills()', 'await request("/skills")'):
+        assert contract in script
+    assert ".skills-panel{" in stylesheet
+    assert ".skill-card{" in stylesheet
 
 
 def test_webui_history_render_matches_live_stream():
@@ -138,10 +185,21 @@ def test_webui_history_render_matches_live_stream():
     assert "appendReasoning(item, message.reasoning_content)" in script
     body = script[script.index("function renderHistoryMessage"):]
     body = body[: body.index("function showWelcome")]
-    # 工具调用必须先挂到消息节点再 finishAssistant，
+    render, close = body[: body.index("function finishHistoryTurn")], body[body.index("function finishHistoryTurn"):]
+    # 工具调用必须先挂到消息节点，收尾统一交给 finishHistoryTurn。
     # 否则"无正文、仅工具调用"的消息（自动模式常见）会被当空气泡移除，
     # 后续 tool 结果找不到 call-id，退化为独立 TOOL RESULT 气泡
-    assert body.index("(message.tool_calls || []).forEach") < body.index("finishAssistant(item)")
+    assert "(message.tool_calls || []).forEach" in render
+    assert "finishAssistant(" not in render
+    assert "finishAssistant(turn)" in close
+    assert "renderTokenUsage(turn" in close
+    # 实时流里一轮对话只有一个气泡，而持久化会按迭代拆成多条 assistant/tool 消息，
+    # 历史渲染必须按轮次合并，否则重开会话后变成"一条消息一个工具调用"
+    assert "function renderHistory(messages)" in close
+    assert 'message.role === "assistant" || message.role === "tool"' in close
+    assert "renderHistoryMessage(message, turn)" in close
+    assert "item.text += " in render
+    assert "renderHistory(state.session.messages)" in script
 
 
 def test_webui_surfaces_upstream_error_classification():

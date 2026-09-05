@@ -242,6 +242,33 @@ async def get_skills():
     ]}
 
 
+@app.get("/mcp/tools")
+async def get_mcp_tools(refresh: bool = False):
+    """设置页 MCP 工具列表：默认返回启动时缓存的工具清单，refresh=1 时重新向 MCP 服务读取。"""
+    if _mcp is None:
+        return JSONResponse({"connected": False, "tools": [], "error": "MCP 未启动"}, status_code=503)
+    error = ""
+    if refresh:
+        try:
+            await _mcp.list_tools()
+        except Exception as exc:
+            # 重新读取失败时保留上一次的缓存清单，只把错误反馈给前端
+            logger.warning("mcp list_tools failed: %s", exc)
+            error = f"{type(exc).__name__}: {exc}"
+    tools = sorted(
+        (
+            {
+                "name": str(tool.name),
+                "description": getattr(tool, "description", "") or "",
+                "input_schema": _mcp.tool_schema(tool.name),
+            }
+            for tool in _mcp.available_tools()
+        ),
+        key=lambda item: item["name"].lower(),
+    )
+    return {"connected": _mcp.connected, "error": error, "tools": tools}
+
+
 @app.get("/config")
 async def get_config():
     if current_config is None:
@@ -372,6 +399,7 @@ def _catalog_models():
             "id": item.config.id,
             "name": item.config.name or item.config.id,
             "provider": item.config.provider,
+            "provider_name": current_config.provider(item.config.provider).name or item.config.provider,
             "api": item.config.api or current_config.provider(item.config.provider).default_api,
             "enabled": item.config.enabled,
             "context_window": item.config.context_window,

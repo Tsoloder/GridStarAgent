@@ -166,6 +166,9 @@ def test_catalog_endpoints_and_health(monkeypatch):
     assert {item["key"] for item in body["models"]} == {"alpha/model-a", "alpha/model-b"}
     configured = next(item for item in body["models"] if item["key"] == "alpha/model-b")
     assert configured["api"] == "openai-chat"
+    # 前端模型下拉分组标题用供应商名称展示，目录必须带上它
+    assert configured["provider"] == "alpha"
+    assert configured["provider_name"] == "Alpha"
     assert configured["capabilities"]["tools"] is True
     assert configured["status"] == "configured_and_discovered"
 
@@ -173,6 +176,66 @@ def test_catalog_endpoints_and_health(monkeypatch):
     assert health["runtime_ready"] is True
     assert health["catalog_generation"] == 1
     assert health["catalog_models"] == 2
+
+
+def test_mcp_tools_endpoint_returns_sorted_cached_catalog(monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeMcp:
+        connected = True
+
+        def __init__(self):
+            self.refreshed = 0
+            self._tools = [
+                SimpleNamespace(name="zeta_tool", description="Zeta 工具",
+                                inputSchema={"type": "object",
+                                             "properties": {"b": {"type": "string", "description": "参数 B"}},
+                                             "required": ["b"]}),
+                SimpleNamespace(name="alpha_tool", description="", inputSchema={}),
+            ]
+
+        async def list_tools(self):
+            self.refreshed += 1
+            return self._tools
+
+        def available_tools(self):
+            return self._tools
+
+        def tool_schema(self, name):
+            for tool in self._tools:
+                if tool.name == name:
+                    return tool.inputSchema
+            return {}
+
+    fake = FakeMcp()
+    monkeypatch.setattr(server, "_mcp", fake)
+    client = TestClient(server.app)
+
+    cached = client.get("/mcp/tools")
+    assert cached.status_code == 200
+    body = cached.json()
+    assert body["connected"] is True
+    assert body["error"] == ""
+    # 工具按名称排序，默认只读缓存不触发 list_tools
+    assert [item["name"] for item in body["tools"]] == ["alpha_tool", "zeta_tool"]
+    assert fake.refreshed == 0
+    zeta = next(item for item in body["tools"] if item["name"] == "zeta_tool")
+    assert zeta["description"] == "Zeta 工具"
+    assert zeta["input_schema"]["required"] == ["b"]
+
+    refreshed = client.get("/mcp/tools?refresh=1")
+    assert refreshed.status_code == 200
+    assert fake.refreshed == 1
+
+
+def test_mcp_tools_endpoint_reports_unavailable_when_bridge_missing(monkeypatch):
+    monkeypatch.setattr(server, "_mcp", None)
+    client = TestClient(server.app)
+
+    response = client.get("/mcp/tools")
+    assert response.status_code == 503
+    assert response.json()["connected"] is False
+    assert response.json()["tools"] == []
 
 
 def test_lifespan_closes_runtime_and_mcp(monkeypatch):

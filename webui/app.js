@@ -15,6 +15,8 @@ const state = {
   controller: null, busy: false, assistant: null, workflow: null, configLoaded: false,
   modelListOpen: false, modelOptionIndex: -1, modelSearch: "",
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
+  mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
+  skillsLoading: false, skillsError: "",
 };
 const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
@@ -23,6 +25,8 @@ const el = {
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
   input: $("#message-input"), send: $("#send"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
+  mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
+  skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -74,8 +78,10 @@ function renderModelList() {
   const selected = el.model.value; el.modelListbox.innerHTML = "";
   const groups = new Map(); visibleModels().forEach(item => { if (!groups.has(item.provider)) groups.set(item.provider, []); groups.get(item.provider).push(item); });
   groups.forEach((items, provider) => {
-    const group = document.createElement("div"); group.className = "model-group"; group.setAttribute("role","group"); group.setAttribute("aria-label",provider);
-    group.innerHTML = `<div class="model-group-label">${escapeHtml(provider)}</div>`;
+    // 分组标题显示供应商名称，没有配置名称时回退到供应商 ID
+    const label = items[0].provider_name || provider;
+    const group = document.createElement("div"); group.className = "model-group"; group.setAttribute("role","group"); group.setAttribute("aria-label",label);
+    group.innerHTML = `<div class="model-group-label">${escapeHtml(label)}</div>`;
     items.forEach(item => { const key = modelKey(item), option = document.createElement("button"); option.type = "button"; option.className = `model-option${key === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(key === selected)); option.dataset.value = key; option.innerHTML = `<span class="model-check">${key === selected ? "✓" : ""}</span><strong>${escapeHtml(modelName(item))}</strong><small>${escapeHtml(item.model_id || item.id || key)}</small>`; option.onclick = () => selectModel(key); group.append(option); });
     el.modelListbox.append(group);
   });
@@ -403,31 +409,58 @@ function renderWorkflowEvent(event) {
   scrollMessages();
 }
 
-function renderHistoryMessage(message) {
+function skillLabel(item, skills) {
+  const label = (skills || []).join(" · "); if (!label) return;
+  let node = $(".message-label", item.bubble);
+  if (!node) { node = document.createElement("div"); node.className = "message-label"; item.bubble.insertBefore(node, item.bubble.firstChild); }
+  node.textContent = label;
+}
+// turn 为本轮已合并的气泡：实时流里一轮对话只有一个 assistant 气泡（文本累加、
+// 所有工具调用进同一个折叠组），而持久化会拆成多条消息，渲染时必须合并回去。
+function renderHistoryMessage(message, turn) {
   if (message.role === "user") return createMessage("user", message.display_content || message.content || "");
   if (message.role === "assistant") {
-    const item = createMessage("assistant", "", (message.active_skills || []).join(" · "));
-    item.text = message.content || "";
+    const item = turn || createMessage("assistant", "", "");
+    // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
+    skillLabel(item, message.active_skills);
+    if (message.content) item.text += (item.text ? "\n\n" : "") + message.content;
+    item.body.innerHTML = basicMarkdown(item.text);
     if (message.reasoning_content) appendReasoning(item, message.reasoning_content);
-    // 与实时流顺序一致：先把持久化的工具调用挂到消息节点，再 finishAssistant。
+    // 与实时流顺序一致：先把持久化的工具调用挂到消息节点，收尾留给 finishHistoryTurn。
     // 否则 finishAssistant 会把"无正文、仅工具调用"的消息（自动模式常见）当空气泡移除，
     // 后续 tool 结果找不到对应 call-id，退化为独立 TOOL RESULT 气泡。
     (message.tool_calls || []).forEach(call => { let args = {}; try { args = JSON.parse((call.function && call.function.arguments) || "{}"); } catch (_) {} renderToolCall({id:call.id,name:call.function && call.function.name,args}, item.node); });
-    finishAssistant(item);
-    if (message.usage) renderTokenUsage(item, {tokens: message.usage.total, tokens_input: message.usage.input, tokens_output: message.usage.output, tokens_estimated: !!message.usage.estimated});
+    if (message.usage) item.usage = message.usage;
     return item;
   }
   if (message.role === "tool") {
     const selector = `[data-call-id="${CSS.escape(message.tool_call_id || "")}"]`;
-    const existing = document.querySelector(selector);
-    const item = existing ? {node:existing.closest(".message")} : createMessage("tool", "", "TOOL RESULT");
-    renderToolResult({call_id:message.tool_call_id,name:message.tool_name,result:message.content}, item.node); return item;
+    const existing = (turn && turn.node.querySelector(selector)) || document.querySelector(selector);
+    // 结果回填到本轮气泡里的工具项；调用没落盘时才退化为独立 TOOL RESULT 气泡
+    const parent = existing ? existing.closest(".message") : createMessage("tool", "", "TOOL RESULT").node;
+    renderToolResult({call_id:message.tool_call_id,name:message.tool_name,result:message.content}, parent); return turn;
   }
   if (message.role === "workflow") {
     renderWorkflowEvent({type:"workflow_started"});
     (message.steps || []).forEach((step,index) => renderWorkflowEvent({type:"workflow_step",index,...step}));
     renderWorkflowEvent({type:"workflow_done",status:message.status,message:message.message});
   }
+}
+function finishHistoryTurn(turn) {
+  if (!turn) return null;
+  finishAssistant(turn);
+  const usage = turn.usage;
+  if (usage) renderTokenUsage(turn, {tokens: usage.total, tokens_input: usage.input, tokens_output: usage.output, tokens_estimated: !!usage.estimated});
+  return null;
+}
+// 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
+function renderHistory(messages) {
+  let turn = null;
+  (messages || []).forEach(message => {
+    if (message.role === "assistant" || message.role === "tool") { turn = renderHistoryMessage(message, turn) || turn; return; }
+    turn = finishHistoryTurn(turn); renderHistoryMessage(message, null);
+  });
+  finishHistoryTurn(turn);
 }
 function showWelcome() { el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>'; el.welcome = $("#welcome"); }
 async function loadSession(id) {
@@ -438,7 +471,7 @@ async function loadSession(id) {
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
     el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null;
     if (!state.session.messages.length) showWelcome();
-    else state.session.messages.forEach(renderHistoryMessage);
+    else renderHistory(state.session.messages);
     if (state.session.plan) renderPhase(state.session.plan);
     closeSessions(); updateSendState(); scrollMessages();
   } catch (error) { showToast(error.message); }
@@ -613,7 +646,62 @@ function renderModelCard(model, parent) {
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
 function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,context_window:32768,max_output_tokens:4096,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
-function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); }
+function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); }
+function schemaParams(schema) {
+  // 从 JSON Schema 提取入参摘要，用于工具列表展示每个工具的参数
+  const props = (schema && schema.properties) || {}, required = new Set((schema && schema.required) || []);
+  return Object.keys(props).map(name => { const p = props[name] || {}; return {name,type:p.type || "any",required:required.has(name),description:p.description || ""}; });
+}
+function renderMcpTools() {
+  const {tools,connected,error,loading} = state.mcp;
+  if (el.mcpCount) el.mcpCount.textContent = String(tools.length);
+  el.mcpStatus.textContent = loading && !tools.length ? "正在读取 MCP 工具…" : (error ? `MCP 读取失败：${error}` : (connected ? `已连接 · 共 ${tools.length} 个工具` : "MCP 服务未连接"));
+  el.mcpTools.innerHTML = "";
+  if (loading && !tools.length) return;
+  if (!tools.length) { el.mcpTools.innerHTML = '<div class="listbox-empty">暂无可用工具</div>'; return; }
+  tools.forEach(tool => {
+    const params = schemaParams(tool.input_schema), card = document.createElement("details"); card.className = "mcp-tool";
+    card.innerHTML = `<summary><strong>${escapeHtml(tool.name)}</strong><span class="mcp-param-count">${params.length} 参数</span></summary>${tool.description ? `<p class="mcp-tool-desc">${escapeHtml(tool.description)}</p>` : ""}${params.length ? `<ul class="mcp-param-list">${params.map(p => `<li><code>${escapeHtml(p.name)}</code><span class="mcp-param-type">${escapeHtml(p.type)}</span>${p.required ? '<span class="mcp-param-required">必填</span>' : ""}${p.description ? `<span class="mcp-param-desc">${escapeHtml(p.description)}</span>` : ""}</li>`).join("")}</ul>` : '<p class="mcp-tool-desc">无参数</p>'}`;
+    el.mcpTools.append(card);
+  });
+}
+async function loadMcpTools(refresh = false) {
+  if (state.mcp.loading) return;
+  state.mcp.loading = true; if (el.refreshMcp) el.refreshMcp.disabled = true; renderMcpTools();
+  try {
+    const data = await request(refresh ? "/mcp/tools?refresh=1" : "/mcp/tools");
+    state.mcp.tools = data.tools || []; state.mcp.connected = Boolean(data.connected); state.mcp.error = data.error || ""; state.mcp.loaded = true;
+  } catch (error) { state.mcp.tools = []; state.mcp.connected = false; state.mcp.error = error.message; }
+  finally { state.mcp.loading = false; if (el.refreshMcp) el.refreshMcp.disabled = false; renderMcpTools(); }
+}
+function renderSkills() {
+  // 设置页「技能」列表：展示后端已注册技能的名称、来源、版本、描述与可用工具
+  const skills = state.skills || [];
+  if (el.skillCount) el.skillCount.textContent = String(skills.length);
+  if (el.skillsStatus) el.skillsStatus.textContent = state.skillsLoading ? "正在读取技能…" : (state.skillsError ? `技能读取失败：${state.skillsError}` : `共 ${skills.length} 个技能`);
+  el.skillsList.innerHTML = "";
+  if (state.skillsLoading && !skills.length) return;
+  if (!skills.length) { el.skillsList.innerHTML = '<div class="listbox-empty">暂无可用技能</div>'; return; }
+  skills.forEach(skill => {
+    const tools = skill.allowed_tools || [], shadowed = skill.shadowed || [], card = document.createElement("details"); card.className = "skill-card";
+    card.innerHTML = `<summary><strong>${escapeHtml(skill.name || skill.id)}</strong>${skill.version ? `<span class="skill-version">v${escapeHtml(skill.version)}</span>` : ""}<span class="skill-source">${escapeHtml(skill.source || "")}</span><span class="skill-tool-count">${tools.length} 工具</span></summary>`
+      + (skill.description ? `<p class="skill-desc">${escapeHtml(skill.description)}</p>` : "")
+      + `<div class="skill-meta">ID <code>${escapeHtml(skill.id)}</code></div>`
+      + (tools.length ? `<ul class="skill-tool-list">${tools.map(name => `<li><code>${escapeHtml(name)}</code></li>`).join("")}</ul>` : '<p class="skill-desc">未限定可用工具</p>')
+      + (shadowed.length ? `<p class="skill-shadowed">覆盖了 ${shadowed.length} 个同名来源：${shadowed.map(item => escapeHtml(`${item.source || ""}${item.version ? " v" + item.version : ""}`)).join("、")}</p>` : "");
+    el.skillsList.append(card);
+  });
+}
+async function loadSkills() {
+  if (state.skillsLoading) return;
+  state.skillsLoading = true; state.skillsError = ""; if (el.refreshSkills) el.refreshSkills.disabled = true; renderSkills();
+  try {
+    const data = await request("/skills");
+    state.skills = data.skills || [];
+    if (el.skill.value && !selectedSkill()) selectSkill("");
+  } catch (error) { state.skillsError = error.message; }
+  finally { state.skillsLoading = false; if (el.refreshSkills) el.refreshSkills.disabled = false; renderSkills(); }
+}
 async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
 function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
 function providerPayload(provider) { return {provider:{...provider,headers:provider.headers || {},discover_models:provider.discover_models !== false}}; }
@@ -648,6 +736,8 @@ el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openMod
 el.skillTrigger.onclick = () => state.skillListOpen ? closeSkillList() : openSkillList();
 el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSettings(); el.cancelSettings.onclick = () => closeSettings(); el.saveSettings.onclick = saveSettings; el.addProvider.onclick = addProvider;
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
+if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
+if (el.refreshSkills) el.refreshSkills.onclick = () => loadSkills();
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
