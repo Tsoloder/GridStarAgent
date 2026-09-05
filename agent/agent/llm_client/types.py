@@ -198,20 +198,3 @@ class Error(StreamEvent):
     status_code: Optional[int] = None
     retry_after: Optional[float] = None
     type: Literal["error"] = "error"
-
-
-# Legacy extraction types retained for callers outside the new runtime.
-@dataclass
-class StreamDelta:
-    text: Optional[str] = None
-    tool_call_delta: Optional["LegacyToolCallDelta"] = None
-    usage: Optional[dict] = None
-    reasoning: Optional[str] = None
-
-
-@dataclass
-class LegacyToolCallDelta:
-    index: int
-    id: Optional[str] = None
-    name: Optional[str] = None
-    args_fragment: Optional[str] = None

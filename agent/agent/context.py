@@ -9,41 +9,21 @@ logger = logging.getLogger(__name__)
 
 MAX_TURNS = 99999
 
-# v4: MODEL_LIMITS 已迁移到 provider 层的 context_window 属性
-# 保留此字典作为 fallback，当无法创建 provider 时使用
-_MODEL_LIMITS_FALLBACK = {
-    "gpt-4": 8192,
-    "gpt-4-turbo": 128000,
-    "gpt-4o": 128000,
-    "claude-3-5-sonnet": 200000,
-    "claude-3-opus": 200000,
-    "claude-3-haiku": 200000,
-    "mimo": 32000,
-}
-
-
-def max_tokens_for(model_id: str) -> int:
-    """Fallback：当无法创建 provider 时使用。"""
-    lower = model_id.lower()
-    for k, v in _MODEL_LIMITS_FALLBACK.items():
-        if k in lower:
-            return v
-    return 32000
-
 
 def max_tokens_for_config(
     config: ApiConfig,
     model_key: str = "",
     runtime=None,
 ) -> int:
-    """返回当前完整 provider/model 标识对应的上下文窗口。"""
+    """返回当前完整 provider/model 标识对应的上下文窗口。
+
+    窗口大小只认 model catalog（runtime 里的 ModelConfig）。这里不再回落到按模型名
+    猜的硬编码表：解析不出来就是配置问题，直接抛出来，别让压缩预算悄悄偏离真实窗口。
+    """
     resolved_key = model_key or config.default_model
-    try:
-        if runtime is not None:
-            return runtime.context_window(resolved_key)
-        return config.model(resolved_key).context_window
-    except (KeyError, ValueError, AttributeError):
-        return max_tokens_for(resolved_key)
+    if runtime is not None:
+        return runtime.context_window(resolved_key)
+    return config.model(resolved_key).context_window
 
 
 class TokenCounter:

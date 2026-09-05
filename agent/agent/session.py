@@ -101,6 +101,20 @@ def _read_jsonl(path: str) -> list:
     return result
 
 
+def _normalize_message_content(messages) -> list:
+    """把缺失的正文归一为空串，保证内存与磁盘上 content 恒为字符串。
+
+    早期版本把"只有工具调用、没有正文"的 assistant 消息写成 content: null，
+    严格兼容网关（DashScope 等）会以该字段拒绝整轮请求。
+    """
+    if not isinstance(messages, list):
+        return []
+    for message in messages:
+        if isinstance(message, dict) and "content" in message and message["content"] is None:
+            message["content"] = ""
+    return messages
+
+
 def _write_jsonl(path: str, messages: list):
     """全量写入 JSONL 文件（用于原地修改后的重写）。"""
     dir_ = os.path.dirname(path)
@@ -159,12 +173,20 @@ class Session:
         # 追加写：只写这一条消息到 JSONL
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
-    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = ""):
+    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None):
         message = {"role": "assistant", "content": content}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         if active_skills:
             message["active_skills"] = sorted(set(active_skills))
+        if usage:
+            # 持久化本次回复的 token 用量，供历史会话展示
+            message["usage"] = {
+                "input": int(usage.get("input", 0)),
+                "output": int(usage.get("output", 0)),
+                "total": int(usage.get("total", 0)),
+                "estimated": bool(usage.get("estimated", False)),
+            }
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
@@ -181,7 +203,7 @@ class Session:
             }
             for tc in tool_call_events
         ]
-        message = {"role": "assistant", "content": text or None, "tool_calls": tool_calls_stored}
+        message = {"role": "assistant", "content": text or "", "tool_calls": tool_calls_stored}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         self.messages.append(message)
@@ -281,11 +303,11 @@ def load_session(sid: str):
         jsonl_path = target / "messages.jsonl"
         json_path = target / "messages.json"
         if jsonl_path.exists():
-            msgs = _read_jsonl(str(jsonl_path))
+            msgs = _normalize_message_content(_read_jsonl(str(jsonl_path)))
         elif json_path.exists():
             # 旧版兼容：读取 messages.json 并迁移为 JSONL
-            msgs = json.loads(json_path.read_text(encoding="utf-8"))
-            if isinstance(msgs, list) and msgs:
+            msgs = _normalize_message_content(json.loads(json_path.read_text(encoding="utf-8")))
+            if msgs:
                 _write_jsonl(str(jsonl_path), msgs)
                 logger.info("session %s migrated: messages.json -> messages.jsonl (%d messages)", sid, len(msgs))
         else:

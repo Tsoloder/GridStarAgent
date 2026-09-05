@@ -152,6 +152,39 @@ assert s_corrupt is not None, "FAIL: corrupt session should still load"
 assert len(s_corrupt.messages) == 2, "FAIL: expected 2 valid messages, got %d" % len(s_corrupt.messages)
 print("测试6 通过\n")
 
+print("=== 测试 7: content 落盘格式统一为空串 ===")
+s7 = create_session("Content Format")
+s7.append_user("跑一下")
+s7.append_assistant_with_tool_calls("", [
+    {"id": "tc_null", "name": "SomeTool", "args": {"k": "v"}}
+])
+assert s7.messages[1]["content"] == "", "FAIL: in-memory content should be empty string"
+save_session(s7)
+
+jsonl_path7 = os.path.join(tmp_dir, s7.id, "messages.jsonl")
+with open(jsonl_path7, "r", encoding="utf-8") as f:
+    persisted = f.read()
+assert '"content": null' not in persisted and '"content":null' not in persisted, \
+    "FAIL: null content still persisted"
+assert load_session(s7.id).messages[1]["content"] == "", "FAIL: reloaded content mismatch"
+
+# 历史数据里的 content: null 必须在读取时被归一
+sid_legacy = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+legacy_dir = os.path.join(tmp_dir, sid_legacy)
+os.makedirs(legacy_dir, exist_ok=True)
+with open(os.path.join(legacy_dir, "messages.jsonl"), "w", encoding="utf-8") as f:
+    f.write('{"role":"user","content":"旧输入"}\n')
+    f.write('{"role":"assistant","content":null,"tool_calls":[{"id":"c1"}]}\n')
+    f.write('{"role":"workflow","run_id":"r1","steps":[]}\n')
+with open(os.path.join(legacy_dir, "meta.json"), "w", encoding="utf-8") as f:
+    json.dump({"id": sid_legacy, "title": "Legacy", "created_at": "2026-01-01T00:00:00",
+               "updated_at": "2026-01-01T00:00:00", "archived": False, "model_id": ""}, f)
+
+legacy = load_session(sid_legacy)
+assert legacy.messages[1]["content"] == "", "FAIL: legacy null content not normalized"
+assert "content" not in legacy.messages[2], "FAIL: 无 content 字段的消息不应被凭空补一个"
+print("测试7 通过\n")
+
 # 清理
 shutil.rmtree(tmp_dir)
 print("全部验证通过!")

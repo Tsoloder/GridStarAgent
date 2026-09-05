@@ -187,6 +187,16 @@ function createMessage(role, content = "", label = "") {
   return {node, bubble, body, text: content, reasoning: "", structured: []};
 }
 function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
+function renderTokenUsage(message, event) {
+  if (!message || message.node.querySelector(".token-usage")) return;
+  const total = event.tokens || 0, input = event.tokens_input || 0, output = event.tokens_output || 0;
+  if (!total && !input && !output) return;
+  const usage = document.createElement("div");
+  usage.className = "token-usage";
+  // 供应商没回传 usage 时后端会给出本地估算值，用 ≈ 区分实测与估算。
+  usage.textContent = `${event.tokens_estimated ? "≈ " : ""}tokens ${total} · input ${input} · output ${output}`;
+  message.bubble.append(usage);
+}
 function finishAssistant(message) {
   if (!message || message.finished) return;
   message.finished = true;
@@ -397,8 +407,14 @@ function renderHistoryMessage(message) {
   if (message.role === "user") return createMessage("user", message.display_content || message.content || "");
   if (message.role === "assistant") {
     const item = createMessage("assistant", "", (message.active_skills || []).join(" · "));
-    item.text = message.content || ""; finishAssistant(item);
+    item.text = message.content || "";
+    if (message.reasoning_content) appendReasoning(item, message.reasoning_content);
+    // 与实时流顺序一致：先把持久化的工具调用挂到消息节点，再 finishAssistant。
+    // 否则 finishAssistant 会把"无正文、仅工具调用"的消息（自动模式常见）当空气泡移除，
+    // 后续 tool 结果找不到对应 call-id，退化为独立 TOOL RESULT 气泡。
     (message.tool_calls || []).forEach(call => { let args = {}; try { args = JSON.parse((call.function && call.function.arguments) || "{}"); } catch (_) {} renderToolCall({id:call.id,name:call.function && call.function.name,args}, item.node); });
+    finishAssistant(item);
+    if (message.usage) renderTokenUsage(item, {tokens: message.usage.total, tokens_input: message.usage.input, tokens_output: message.usage.output, tokens_estimated: !!message.usage.estimated});
     return item;
   }
   if (message.role === "tool") {
@@ -463,6 +479,45 @@ async function deleteSession(session) {
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
 
+const FAILURE_HINTS = {
+  rate_limited: "模型服务商限流",
+  network: "后端连不上模型服务",
+  stream_error: "模型流式响应中断",
+  upstream_http: "模型服务返回错误",
+  provider_error: "模型服务异常",
+};
+function streamFailure(event, fallback = "Agent 处理失败") {
+  const failure = new Error(event.message || fallback);
+  failure.stream = true;  // 后端回了结构化 error 事件，说明浏览器到后端这一段是通的
+  failure.category = event.category || "";
+  failure.retryable = event.retryable === true;
+  const wait = Number(event.retry_after);
+  failure.retryAfter = Number.isFinite(wait) && wait > 0 ? Math.ceil(wait) : 0;
+  return failure;
+}
+function failureText(error) {
+  if (!error.stream) return `${error.message || "请求失败"}\n请求没能走到模型这一步，确认后端服务在运行后重发。`;
+  const lines = [`${FAILURE_HINTS[error.category] || "模型服务异常"}：${error.message}`];
+  if (error.retryable) lines.push(error.retryAfter ? `这是瞬时故障，等 ${error.retryAfter} 秒后重发即可。` : "这是瞬时故障，可以直接重发。");
+  else lines.push("这类错误不会自己恢复，先按上面的提示改参数或模型配置。");
+  return lines.join("\n");
+}
+function renderFailure(error, retry) {
+  const notice = createMessage("assistant", failureText(error), error.retryable ? "RETRY" : "ERROR");
+  notice.bubble.style.borderColor = "var(--red)";
+  if (retry) {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "action-button"; button.style.marginTop = "10px";
+    button.textContent = "重发这条消息";
+    button.addEventListener("click", () => {
+      if (state.busy) { showToast("当前还有请求在处理中"); return; }
+      button.disabled = true;
+      sendMessage(retry.message, retry.display).finally(() => { button.disabled = false; });
+    });
+    notice.bubble.append(button);
+  }
+  if (!error.stream) setConnection("offline", "连接异常");
+}
 async function consumeSse(response, onEvent, controller) {
   if (!response.ok) { let message = `请求失败 (${response.status})`; try { const data = await response.json(); message = data.error || message; } catch (_) {} throw new Error(message); }
   if (!response.body) throw new Error("浏览器不支持流式响应");
@@ -502,14 +557,14 @@ async function sendMessage(rawMessage = null, displayContent = null) {
       else if (type === "tool_result") renderToolResult(event,assistant.node);
       else if (type === "tool_approval_required") renderApproval(event,assistant.node);
       else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
-      else if (type === "error") throw new Error(event.message || "Agent 处理失败");
-      else if (type === "done") finishAssistant(assistant);
+      else if (type === "error") throw streamFailure(event);
+      else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); }
     });
     finishAssistant(assistant); await refreshSessions();
   } catch (error) {
     finishAssistant(assistant);
     if (error.name === "AbortError") createMessage("assistant", "已停止接收当前响应。", "STOPPED");
-    else { createMessage("assistant", error.message, "ERROR").bubble.style.borderColor = "var(--red)"; setConnection("offline","连接异常"); }
+    else renderFailure(error, {message, display: shown});
   } finally { if (state.controller === controller) state.controller = null; setBusy(false); }
 }
 async function runWorkflow(steps) {
@@ -517,9 +572,9 @@ async function runWorkflow(steps) {
   const controller = createAbortController(); state.controller = controller; state.workflow = null; setBusy(true);
   try {
     const response = await fetch("/workflows/run", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,steps,selected_skills:el.skill.value?[{id:el.skill.value,params:{}}]:[]})});
-    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") renderApproval(event,state.workflow.message.node); else if (type === "error") throw new Error(event.message || "工作流失败"); }, controller);
+    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") renderApproval(event,state.workflow.message.node); else if (type === "error") throw streamFailure(event, "工作流失败"); }, controller);
     await refreshSessions();
-  } catch (error) { if (error.name !== "AbortError") showToast(error.message); }
+  } catch (error) { if (error.name !== "AbortError") showToast(failureText(error).replace(/\n/g, " · ")); }
   finally { if (state.controller === controller) state.controller = null; setBusy(false); }
 }
 

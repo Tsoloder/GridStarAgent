@@ -267,3 +267,72 @@ async def test_invalid_tool_arguments_are_not_executed(arguments, parse_error):
     assert not any(event["type"] == "tool_call" for event in events)
     assert events[-1]["type"] == "error"
     assert events[-1]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_upstream_error_classification_is_forwarded():
+    from types import SimpleNamespace
+    import agent_loop
+
+    class RateLimitedRuntime:
+        def context_window(self, model_key):
+            return 32000
+
+        async def stream(self, model_key, messages, tools=(), system_prompt=""):
+            yield SimpleNamespace(type="error", category="rate_limited",
+                                  message="Upstream HTTP 429", retryable=True,
+                                  status_code=429, retry_after=7.5)
+
+    events = [event async for event in agent_loop._stream_runtime(
+        RateLimitedRuntime(), "test/test-model", [], "base", []
+    )]
+
+    assert events == [{
+        "type": "error", "category": "rate_limited", "message": "Upstream HTTP 429",
+        "retryable": True, "status_code": 429, "retry_after": 7.5,
+    }]
+
+
+@pytest.mark.asyncio
+async def test_permanent_errors_do_not_advertise_a_retry_window():
+    from types import SimpleNamespace
+    import agent_loop
+
+    class BadRequestRuntime:
+        def context_window(self, model_key):
+            return 32000
+
+        async def stream(self, model_key, messages, tools=(), system_prompt=""):
+            yield SimpleNamespace(type="error", category="upstream_http",
+                                  message="Upstream HTTP 400", retryable=False,
+                                  status_code=400, retry_after=None)
+
+    events = [event async for event in agent_loop._stream_runtime(
+        BadRequestRuntime(), "test/test-model", [], "base", []
+    )]
+
+    assert events[-1]["retryable"] is False
+    assert events[-1]["status_code"] == 400
+    assert "retry_after" not in events[-1]
+
+
+@pytest.mark.asyncio
+async def test_transport_error_escapes_as_retryable():
+    import httpx
+    import agent_loop
+
+    class BrokenRuntime:
+        def context_window(self, model_key):
+            return 32000
+
+        async def stream(self, model_key, messages, tools=(), system_prompt=""):
+            raise httpx.ConnectError("connection refused")
+            yield  # 让 stream 保持异步生成器，异常在首次迭代时抛出
+
+    events = [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), "hi", "base", _make_config(), MockMcpBridge({}),
+        MockContextManager(), MockSkillRegistry(), model_runtime=BrokenRuntime(),
+    )]
+
+    assert events[-1]["type"] == "error"
+    assert events[-1]["retryable"] is True  # 网络抖动不该被说成永久失败

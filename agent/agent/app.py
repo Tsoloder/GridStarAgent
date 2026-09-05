@@ -14,7 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from agent_loop import run_agent_loop
+from agent_loop import classify_error, run_agent_loop
 from task_ledger import TaskLedger
 from config import (
     API_KEY_MASK,
@@ -852,11 +852,7 @@ async def _run_background_loop(
         logger.info(f"background task cancelled: {session_id}")
     except Exception as e:
         logger.exception("background agent loop failed")
-        await bg.queue.put({
-            "type": "error",
-            "message": str(e),
-            "retryable": False,
-        })
+        await bg.queue.put(classify_error(e))
     finally:
         await bg.queue.put({"type": "done"})
         bg.done_event.set()

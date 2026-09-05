@@ -10,6 +10,7 @@ from typing import AsyncIterator
 
 from config import ApiConfig
 from context import ContextManager, MAX_TURNS
+from llm_client.adapters.base import is_retryable
 from mcp_bridge import McpBridge
 from session import Session
 from tool_memory import (
@@ -28,6 +29,36 @@ from skill_runtime import (
 from task_ledger import PLAN_STATUSES, result_failed as _tool_result_failed
 
 logger = logging.getLogger(__name__)
+
+
+def _error_payload(message: str, *, category: str = None, retryable: bool = False,
+                   status_code: int = None, retry_after: float = None) -> dict:
+    """error 事件的统一形状。
+
+    分类字段只在上游给值时才输出，避免给旧客户端塞一串 null；retry_after=0
+    是有意义的等待时间，所以不能用真值判断筛掉。
+    """
+    payload = {"type": "error", "message": message, "retryable": bool(retryable)}
+    if category:
+        payload["category"] = category
+    if status_code is not None:
+        payload["status_code"] = status_code
+    if retry_after is not None:
+        payload["retry_after"] = retry_after
+    return payload
+
+
+def classify_error(exc: Exception, prefix: str = "") -> dict:
+    """把逃逸出来的异常翻译成 error 事件。
+
+    agent_loop 和 app.py 的兜底原先都硬编码 retryable=False，等于把网络抖动、
+    限流这类本该重试的故障一律说成永久失败；这里统一走一次真实分类。
+    """
+    return _error_payload(
+        "%s%s" % (prefix, exc), category=getattr(exc, "category", None),
+        retryable=is_retryable(exc), status_code=getattr(exc, "status_code", None),
+        retry_after=getattr(exc, "retry_after", None),
+    )
 
 
 async def _stream_runtime(runtime, model_key, messages, system_prompt, tools):
@@ -57,8 +88,12 @@ async def _stream_runtime(runtime, model_key, messages, system_prompt, tools):
         elif event.type == "done":
             yield {"type": "done", "stop_reason": event.stop_reason}
         elif event.type == "error":
-            yield {"type": "error", "message": event.message,
-                   "retryable": event.retryable}
+            # 上游给的分类要原样传下去：客户端得靠 category/status_code/
+            # retry_after 区分"限流等会儿再发"和"参数错了改了再发"。
+            yield _error_payload(
+                event.message, category=event.category, retryable=event.retryable,
+                status_code=event.status_code, retry_after=event.retry_after,
+            )
 
 
 def _calibration_text(messages: list, ctx_mgr) -> str:
@@ -70,6 +105,23 @@ def _calibration_text(messages: list, ctx_mgr) -> str:
         for message in messages
         if isinstance(message, dict)
     )
+
+
+def _estimate_tokens(text: str) -> int:
+    """供应商未回传 usage 时的兜底估算。
+
+    中日韩字符按 1 token 计，其余字符按 4 字符 1 token 计，避免用英文比例
+    低估中文对话。
+    """
+    if not text:
+        return 0
+    cjk = sum(
+        1 for ch in text
+        if "\u3040" <= ch <= "\u30ff"
+        or "\u4e00" <= ch <= "\u9fff"
+        or "\uac00" <= ch <= "\ud7af"
+    )
+    return cjk + (len(text) - cjk) // 4
 
 
 def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegistry) -> bool:
@@ -277,6 +329,10 @@ async def run_agent_loop(
     _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
+    # 累计本次消息全流程（多轮工具调用）的 token 用量
+    _usage_totals = {"input": 0, "output": 0, "total": 0}
+    # 供应商未回传 usage 时的本地估算（逐轮累计）
+    _estimated_totals = {"input": 0, "output": 0}
 
     while True:
         turn += 1
@@ -294,7 +350,7 @@ async def run_agent_loop(
         model_messages = []
         for message in compressed_messages:
             clean = {key: value for key, value in message.items()
-                     if key not in {"active_skills", "attachments", "display_content"}}
+                     if key not in {"active_skills", "attachments", "display_content", "usage"}}
             docs = message.get("attachments", [])
             if docs and message.get("role") == "user":
                 sections = []
@@ -360,6 +416,9 @@ async def run_agent_loop(
                     tool_calls.append(event)
                 elif event["type"] == "usage":
                     usage = event
+                    _usage_totals["input"] += event.get("input", 0)
+                    _usage_totals["output"] += event.get("output", 0)
+                    _usage_totals["total"] += event.get("total", 0)
                 elif event["type"] == "done":               # v4: 接收 stop_reason
                     _stop_reason = event.get("stop_reason", "stop")
                 elif event["type"] == "error":
@@ -373,8 +432,8 @@ async def run_agent_loop(
                     _last_heartbeat = _now
                     yield {"type": "heartbeat"}
         except Exception as e:
-            logger.exception("stream_chat failed")
-            yield {"type": "error", "message": f"LLM stream failed: {e}", "retryable": False}
+            logger.exception("model stream failed")
+            yield classify_error(e, "LLM stream failed: ")
             return
 
         # 结构化延续时文本被缓冲未发送，在此一次性补发，避免气泡空白
@@ -395,6 +454,13 @@ async def run_agent_loop(
                 _calibration_text(model_messages, ctx_mgr),
                 usage.get("input", 0),
             )
+        else:
+            # 流里没有 usage（例如模型未开启 stream_usage 能力），逐轮累计本地估算，
+            # 保证结束时气泡仍能显示本次对话的 token 量。
+            _estimated_totals["input"] += _estimate_tokens(
+                system_prompt + "\n" + _calibration_text(model_messages, ctx_mgr)
+            )
+            _estimated_totals["output"] += _estimate_tokens(text_acc + reasoning_acc)
 
         valid_tool_names = {tool.name for tool in external_tools + runtime_tools}
         invalid_tool_names = [
@@ -722,14 +788,35 @@ async def run_agent_loop(
                 )
                 continue
 
-            session.append_assistant(text_acc, loaded_skills, reasoning_acc)
+            _usage_estimated = not (
+                _usage_totals["total"] or _usage_totals["input"] or _usage_totals["output"]
+            )
+            if _usage_estimated:
+                _usage_totals["input"] = _estimated_totals["input"]
+                _usage_totals["output"] = _estimated_totals["output"]
+                _usage_totals["total"] = _usage_totals["input"] + _usage_totals["output"]
+            _total_tokens = _usage_totals["total"] or (
+                _usage_totals["input"] + _usage_totals["output"]
+            )
+            _usage_record = None
+            if _total_tokens or _usage_totals["input"] or _usage_totals["output"]:
+                _usage_record = {
+                    "input": _usage_totals["input"],
+                    "output": _usage_totals["output"],
+                    "total": _total_tokens,
+                    "estimated": _usage_estimated,
+                }
+            session.append_assistant(text_acc, loaded_skills, reasoning_acc, usage=_usage_record)
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
-            logger.info("[done] session=%s tokens=%s", session.id, usage.get("total", 0))
+            logger.info("[done] session=%s tokens=%s", session.id, _total_tokens)
             yield {
                 "type": "done",
                 "session_id": session.id,
-                "tokens": usage.get("total", 0),
+                "tokens": _total_tokens,
+                "tokens_input": _usage_totals["input"],
+                "tokens_output": _usage_totals["output"],
+                "tokens_estimated": _usage_estimated,
             }
             return

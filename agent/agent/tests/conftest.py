@@ -1,7 +1,7 @@
-"""pytest 配置：mock 掉 llm_client.stream_chat 和 mcp.call_tool。
+"""pytest 配置：mock 掉 ModelRuntime.stream 和 mcp.call_tool。
 
 测试策略：
-- mock 掉 llm_client.stream_chat，按 fixture 预设返回事件序列
+- mock 掉 ModelRuntime.stream，按 fixture 预设返回事件序列
 - mock 掉 mcp.call_tool，按 fixture 预设返回结果
 - mock 掉 mcp.available_tools / mcp.tool_schema / mcp.tool_schemas
 - 验证 agent_loop 产出的事件序列与 expected_event_types 匹配
@@ -76,7 +76,10 @@ class MockLLMClient:
                 yield SimpleNamespace(type="done", stop_reason=event.get("stop_reason", "stop"))
             elif event_type == "error":
                 yield SimpleNamespace(type="error", message=event["message"],
-                                      retryable=event.get("retryable", False))
+                                      category=event.get("category"),
+                                      retryable=event.get("retryable", False),
+                                      status_code=event.get("status_code"),
+                                      retry_after=event.get("retry_after"))
 
 
 class MockMcpBridge:

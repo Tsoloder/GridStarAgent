@@ -193,3 +193,35 @@ def test_lifespan_closes_runtime_and_mcp(monkeypatch):
     with TestClient(server.app):
         assert events == ["connect"]
     assert events == ["connect", "disconnect"]
+
+
+def test_background_fallback_keeps_error_classification(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+    from llm_client.adapters.base import UpstreamError
+
+    def exploding_loop(*args, **kwargs):
+        async def gen():
+            raise UpstreamError("connect timed out", category="network", retryable=True)
+            yield
+        return gen()
+
+    monkeypatch.setattr(server, "run_agent_loop", exploding_loop)
+    monkeypatch.setattr(server, "load_session",
+                        lambda _: SimpleNamespace(model_id="test/test-model", messages=[]))
+    monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
+
+    async def main():
+        bg = server.BackgroundSession("bg-1")
+        await server._run_background_loop(
+            bg, "bg-1", "hi", "base", [], [], "hi", "chat", ""
+        )
+        return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
+
+    queued = asyncio.run(main())
+    failure = queued[0]
+
+    assert failure["type"] == "error" and failure["retryable"] is True
+    assert failure["category"] == "network"
+    assert "retry_after" not in failure
+    assert queued[-1] == {"type": "done"}  # 兜底之后仍然补终态事件

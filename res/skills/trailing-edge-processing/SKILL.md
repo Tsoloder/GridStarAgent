@@ -57,7 +57,7 @@ allowed-tools: []
 
 处理完所有类型一后，**在处理类型二之前**：
 
-> ⚠️ **关键提醒：先调用 `read_skill_resource("trailing-edge-processing", "references/type2.md")` 重新加载类型二的参考文件。** 类型二有 6 条边，与类型一完全不同，**严禁使用 `MergeEdgesByDomain`**，第一步必须是 `IdentifyType2Roles`。
+> ⚠️ **关键提醒：先调用 `read_skill_resource("trailing-edge-processing", "references/type2.md")` 重新加载类型二的参考文件。** 类型二有 6 条边，与类型一完全不同，**严禁使用 `MergeEdgesByDomain`**，也**严禁使用 `IdentifyType2Roles`**（该工具有问题），角色判定通过分组网格线求交集 + 端点 ID 对比完成（见 type2.md 步骤 1）。
 
 ### 处理类型二
 

@@ -129,3 +129,31 @@ def test_webui_model_listbox_has_static_provider_groups():
     assert 'document.createElement("details")' not in script[script.index("function renderModelList"):script.index("function setConnection")]
     assert ".model-listbox{" in stylesheet
     assert ".model-group-label{" in stylesheet
+
+
+def test_webui_history_render_matches_live_stream():
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 历史渲染必须还原对话中持久化的思考过程
+    assert "appendReasoning(item, message.reasoning_content)" in script
+    body = script[script.index("function renderHistoryMessage"):]
+    body = body[: body.index("function showWelcome")]
+    # 工具调用必须先挂到消息节点再 finishAssistant，
+    # 否则"无正文、仅工具调用"的消息（自动模式常见）会被当空气泡移除，
+    # 后续 tool 结果找不到 call-id，退化为独立 TOOL RESULT 气泡
+    assert body.index("(message.tool_calls || []).forEach") < body.index("finishAssistant(item)")
+
+
+def test_webui_surfaces_upstream_error_classification():
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 后端透传的分类字段必须真的被用上，而不是只剩一句 message
+    for field in ("event.category", "event.retryable", "event.retry_after"):
+        assert field in script
+    assert "function streamFailure(" in script
+    assert "function renderFailure(" in script
+    assert 'retryable ? "RETRY" : "ERROR"' in script
+    assert "throw new Error(event.message" not in script
+    # 只有连不上后端才把顶栏标成离线，上游故障不该说"连接异常"
+    assert "if (!error.stream) setConnection(" in script
+    assert 'sendMessage(retry.message, retry.display)' in script

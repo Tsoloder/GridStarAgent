@@ -10,7 +10,7 @@
 > - 工具返回 `success` 为 `false` 时**立即停止**，报告失败。
 > - 交线判定失败（后缘面与翼梢面无公共短边）时立即停止。
 > - `SetConnectorPointCount`、`SetConnectorAverageDistribution`、`SetConnectorSmoothDistribution`、`CopyConnectorPointCount` 返回格式为 `{"success":true}`，**操作后网格线 ID 不变**，无需追踪新 ID。
-> - manual 模式下，中间步骤直接执行，**不输出 `tool_params`**。仅 `DeleteDomain` 通过 `options` 请求确认。
+> - manual 模式下，中间步骤直接执行，**不输出 `tool_params`**。仅 `DeleteDomain` 通过 `options` 请求确认；auto 模式下 `DeleteDomain` 直接执行，不请求确认。
 
 **间距参数**：
 - `bodySpacing` = 0.01489（靠近翼梢端）

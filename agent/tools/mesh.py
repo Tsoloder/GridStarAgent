@@ -210,11 +210,11 @@ def UGReDimensionSetSpecifiedValue(ids: str, number: int):
 
 
 def UGReDimensionCopy(ids: str, targetId: int):
-    """点数分布：拷贝网格点数.
+    """点数分布：拷贝网格分布.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
-        targetId: 被拷贝的网格线 ID.
+        ids: 被拷贝的网格线 ID列表,可以为"0"或者"0,5,6",要注意网格线的连接关系及方向要与目标网格线一致.
+        targetId: 目标网格线 ID.
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -382,12 +382,10 @@ def SetConnectorPointCount(ids: str, number: int):
 
 
 def CopyConnectorPointCount(sourceId: str, targetIds: str):
-    """拷贝网格线点数（ID 不变，从源网格线拷贝到目标网格线组）。
-
-    ⚠️ sourceId 是点数来源(拷贝源),targetIds 是接收点数的目标组,切勿搞反。
+    """拷贝网格线点数(ID 不变，从源网格线拷贝到目标网格线组)。
 
     Args:
-        sourceId: 点数来源的网格线 ID(拷贝源).
+        sourceId: 被拷贝的网格线 ID 列表，逗号分隔,如 "12,13"(拷贝源).
         targetIds: 目标网格线 ID 列表,逗号分隔,如 "12,13".
 
     Returns:

@@ -269,17 +269,38 @@ class SkillRegistry:
         ])
         return "\n".join(lines)
 
+    def _package_resources(self, skill: SkillDescriptor) -> List[str]:
+        """Relative POSIX paths of every readable text file inside a Skill package."""
+        resources: List[str] = []
+        for candidate in sorted(skill.root.rglob("*"), key=lambda p: p.as_posix().lower()):
+            if not candidate.is_file():
+                continue
+            if candidate.suffix.lower() not in _ALLOWED_RESOURCE_SUFFIXES:
+                continue
+            try:
+                relative = candidate.resolve().relative_to(skill.root)
+            except ValueError:
+                continue  # a symlink pointing outside the Skill directory
+            resources.append(relative.as_posix())
+        return resources
+
     def read_skill(self, skill_id: str) -> str:
         skill = self.get(skill_id)
         text = skill.entry.read_text(encoding="utf-8-sig")
-        return "Skill: %s\nVersion: %s\nContent-SHA256: %s\n\n%s" % (
-            skill.id, skill.version or "unspecified", skill.content_hash, text
+        header = "Skill: %s\nVersion: %s\nContent-SHA256: %s" % (
+            skill.id, skill.version or "unspecified", skill.content_hash
         )
+        resources = [path for path in self._package_resources(skill) if path != "SKILL.md"]
+        if resources:
+            header += ("\nResources: pass one of these exact paths to read_skill_resource -> %s"
+                       % ", ".join(resources))
+        return "%s\n\n%s" % (header, text)
 
     def read_resource(self, skill_id: str, relative_path: str) -> str:
         skill = self.get(skill_id)
-        relative = Path(relative_path or "")
-        if not relative_path or relative.is_absolute() or ".." in relative.parts:
+        normalized = str(relative_path or "").strip().replace("\\", "/")
+        relative = Path(normalized)
+        if not normalized or relative.is_absolute() or ".." in relative.parts:
             raise SkillError("resource path must be a safe relative path")
         target = (skill.root / relative).resolve()
         try:
@@ -287,12 +308,25 @@ class SkillRegistry:
         except ValueError:
             raise SkillError("resource path escapes the skill directory")
         if not target.is_file():
-            raise SkillError("skill resource not found")
+            target = self._match_resource(skill, normalized)
         if target.suffix.lower() not in _ALLOWED_RESOURCE_SUFFIXES:
             raise SkillError("skill resource type is not readable")
         if target.stat().st_size > _MAX_RESOURCE_BYTES:
             raise SkillError("skill resource exceeds the size limit")
         return target.read_text(encoding="utf-8-sig")
+
+    def _match_resource(self, skill: SkillDescriptor, requested: str) -> Path:
+        """Resolve a path the model shortened to a bare file name."""
+        resources = self._package_resources(skill)
+        name = Path(requested).name
+        matches = [path for path in resources if Path(path).name == name]
+        if len(matches) == 1:
+            return (skill.root / matches[0]).resolve()
+        if len(matches) > 1:
+            raise SkillError("skill resource %s is ambiguous; use one of: %s"
+                             % (name, ", ".join(matches)))
+        raise SkillError("skill resource not found: %s; files available in skill '%s': %s"
+                         % (requested, skill.id, ", ".join(resources) if resources else "none"))
 
     def create_skill(self, skill_id: str, files: Dict[str, str], overwrite: bool = False) -> str:
         """Create a complete Skill package under the configured user Skill root."""
