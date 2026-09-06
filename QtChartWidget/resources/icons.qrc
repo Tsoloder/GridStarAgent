@@ -1,0 +1,21 @@
+<RCC>
+    <qresource prefix="/icons">
+        <file alias="paperclip.svg">icons/paperclip.svg</file>
+        <file alias="mic.svg">icons/mic.svg</file>
+        <file alias="settings.svg">icons/settings.svg</file>
+        <file alias="arrow-up.svg">icons/arrow-up.svg</file>
+        <file alias="square.svg">icons/square.svg</file>
+        <file alias="plus.svg">icons/plus.svg</file>
+        <file alias="chevron-down.svg">icons/chevron-down.svg</file>
+        <file alias="chevron-up.svg">icons/chevron-up.svg</file>
+        <file alias="chevron-right.svg">icons/chevron-right.svg</file>
+        <file alias="chevrons-right.svg">icons/chevrons-right.svg</file>
+        <file alias="x.svg">icons/x.svg</file>
+        <file alias="pencil.svg">icons/pencil.svg</file>
+        <file alias="trash-2.svg">icons/trash-2.svg</file>
+        <file alias="zap.svg">icons/zap.svg</file>
+        <file alias="check.svg">icons/check.svg</file>
+        <file alias="circle.svg">icons/circle.svg</file>
+        <file alias="dot.svg">icons/dot.svg</file>
+    </qresource>
+</RCC>
