@@ -39,6 +39,7 @@ from document_loader import (
     load_attachments,
 )
 from llm_client.catalog import ModelCatalog as DiscoveryCatalog
+from llm_client.model_metadata import resolve as resolve_model_limits
 from llm_client.providers import AnthropicProvider, OpenAICompatibleProvider, OpenAIProvider
 from llm_client.registry import ProviderRegistry, default_adapter_registry
 from llm_client.runtime import ModelCatalog as RuntimeCatalog, ModelRuntime
@@ -327,6 +328,45 @@ async def get_config():
     }
 
 
+def _apply_model_limits(raw_config):
+    """为未显式配置上限的模型补上元数据里的真实值。
+
+    只有 JSON 中缺失字段时才补：写进配置的字段会被 `_specified_fields` 记为用户显式
+    指定，此后任何自动结果都不再覆盖它。所以「前端不填、保存时补」是唯一的写入时机，
+    补完之后值就固化在 config.json 里，运行时（ModelRuntime）直接用它算压缩预算。
+    """
+    if not isinstance(raw_config, dict):
+        return raw_config
+    providers, models = raw_config.get("providers"), raw_config.get("models")
+    if not isinstance(providers, list) or not isinstance(models, list):
+        return raw_config
+    base_urls = {
+        item["id"]: item["base_url"]
+        for item in providers
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and isinstance(item.get("base_url"), str)
+    }
+    for model in models:
+        if not isinstance(model, dict):
+            continue
+        model_id = model.get("id")
+        if not isinstance(model_id, str) or not model_id.strip():
+            continue
+        needs_window = "context_window" not in model
+        needs_output = "max_output_tokens" not in model
+        if not (needs_window or needs_output):
+            continue
+        limits = resolve_model_limits(model_id, base_urls.get(model.get("provider"), ""))
+        if limits is None:
+            continue
+        if needs_window:
+            model["context_window"] = limits.context_window
+        if needs_output and limits.max_output_tokens is not None:
+            window = model.get("context_window")
+            output = limits.max_output_tokens
+            model["max_output_tokens"] = min(output, window) if type(window) is int else output
+    return raw_config
+
+
 @app.post("/config")
 async def update_config(body: dict):
     global current_config, _model_catalog, _model_runtime, _config_lock
@@ -345,7 +385,7 @@ async def update_config(body: dict):
                 status_code=409,
             )
         try:
-            candidate = config_from_dict(raw_config)
+            candidate = config_from_dict(_apply_model_limits(raw_config))
             if current_config is not None:
                 candidate = preserve_masked_api_keys(candidate, current_config)
             candidate_catalog, candidate_runtime = _build_runtime(candidate)
@@ -422,11 +462,14 @@ async def provider_models(body: dict):
         for item in discovered:
             model_id = str(item.get("id", "")).strip()
             if model_id and model_id not in by_id:
+                limits = resolve_model_limits(model_id, provider.base_url)
                 by_id[model_id] = {
                     "id": model_id,
                     "name": str(item.get("name") or model_id),
                     "created": item.get("created"),
                     "owned_by": item.get("owned_by"),
+                    "context_window": limits.context_window if limits else None,
+                    "max_output_tokens": limits.max_output_tokens if limits else None,
                 }
         return {"models": [by_id[key] for key in sorted(by_id, key=str.casefold)]}
     except (ConfigError, ValueError) as exc:
