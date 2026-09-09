@@ -18,33 +18,16 @@ def ProcessWithServer(serverHost: str, serverPort: int, outputDir: str):
         返回 JSON 格式的7类部件分组结果,例如：
         [{"group_name":"nose","faces":[...]}, {"group_name":"fuselage","faces":[...]}, ...]
         其中 main_wing 组会被进一步拆分为：
-            jiyi_wing_upper_surface / jiyi_wing_lower_surface / jiyi_wing_tip / jiyi_trailing_edge
+            wingUpperSurface / wingLowerSurface / wingTip / wingTrailingEdge
         失败时返回 "false"。
     """
     return send_post_request("ProcessWithServer", {"serverHost":serverHost, "serverPort":serverPort, "outputDir":outputDir}, timeout=360)
 
 
-def SegmentPartDirect(pointCloudPath: str):
-    """直接远程部件分割：传入已有的点云文件路径,直接执行远程 AI 部件分割后清除网格。
-
-    使用场景：已经有点云文件（f6.txt 格式）,不需要重新生成。
-    执行后返回 JSON 格式的部件分割结果。
-
-    Args:
-        pointCloudPath: 点云文件完整路径（f6.txt 格式）。
-
-    Returns:
-        返回 JSON 格式的部件分组结果,例如：
-        [{"group_name":"wing","faces":[4,31,55]}, {"group_name":"tail","faces":[0,1,3,5]}]
-        失败时返回 "false"。
-    """
-    return send_post_request("SegmentPartDirect", {"pointCloudPath":pointCloudPath})
-
-
 def ClassifyTrailingEdgeDomains():
     """判定所有后缘面的类型。
 
-    一次性获取 jiyi_trailing_edge / jiyi_wing_tip / engine / fuselage 分组,
+    一次性获取 wingTrailingEdge / wingTip / engine / fuselage 分组,
     通过网格线交集自动判断每个后缘面的类型（类型一:翼梢相邻, 类型二:吊舱-机身相邻）。
 
     使用场景：后缘面处理的第一步,获取每个后缘面的类型标签和关联的分组信息。
@@ -134,5 +117,47 @@ def IdentifyType2Roles(teDomainId: int, engineDomainIds: str, fuselageDomainIds:
         "fuselageDomainIds": fuselageDomainIds,
         "upperSurfaceDomainIds": upperSurfaceDomainIds,
         "lowerSurfaceDomainIds": lowerSurfaceDomainIds
+    })
+
+
+def IdentifyLeadingEdge(
+    upperSurfaceDomainIds: str,
+    lowerSurfaceDomainIds: str,
+    fuselageDomainIds: str,
+    wingTipDomainIds: str):
+    """识别机翼前缘线及其与机身、翼梢的共点关系。
+
+    通过机翼上表面、下表面、机身和翼梢的网格面ID集合，
+    自动找出前缘线（机翼上表面与下表面的共边），
+    并判断前缘线与机身、翼梢的共点关系（首点还是尾点）。
+
+    使用场景：部件分割完成后，已有机翼上/下表面、机身、翼梢的面ID集合。
+
+    Args:
+        upperSurfaceDomainIds: 机翼上表面的网格面ID列表，逗号分隔，如 "1,2,3"。
+        lowerSurfaceDomainIds: 机翼下表面的网格面ID列表，逗号分隔，如 "4,5,6"。
+        fuselageDomainIds: 机身的网格面ID列表，逗号分隔，如 "7,8"。
+        wingTipDomainIds: 翼梢的网格面ID列表，逗号分隔，如 "9,10"。
+
+    Returns:
+        JSON字符串，格式：
+        {
+          "leading_edge_ids": [101, 102, 103],
+          "fuselage_adjacent": {
+            "connector_id": 101,
+            "common_point": "start"
+          },
+          "wing_tip_adjacent": {
+            "connector_id": 103,
+            "common_point": "end"
+          }
+        }
+        失败时返回 {"status": "error", "message": "错误描述"}。
+    """
+    return send_post_request("IdentifyLeadingEdge", {
+        "upperSurfaceDomainIds": upperSurfaceDomainIds,
+        "lowerSurfaceDomainIds": lowerSurfaceDomainIds,
+        "fuselageDomainIds": fuselageDomainIds,
+        "wingTipDomainIds": wingTipDomainIds
     })
 

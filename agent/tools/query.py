@@ -34,7 +34,7 @@ def GetCurrentSelectedIDs(type: int):
             7: 网格块
 
     Returns:
-        返回 ID 的集合,例如{"info":[0,5,6]},如果为空则表示没有选择对象.
+        返回 ID 的集合,例如{"info":[5,6,7]},如果为空则表示没有选择对象.
     """
     return send_post_request("GetCurrentSelectedIDs", {"type":type})
 
@@ -53,7 +53,7 @@ def GetAllObjectByType(type: int):
             7: 网格块
 
     Returns:
-        返回 ID 的集合,例如{"info":[0,5,6]},如果为空则表示没有此类型的对象.
+        返回 ID 的集合,例如{"info":[5,6,7]},如果为空则表示没有此类型的对象.
     """
     return send_post_request("GetAllObjectByType", {"type":type})
 

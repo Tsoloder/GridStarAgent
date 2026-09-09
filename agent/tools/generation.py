@@ -10,7 +10,7 @@ def UGSur(type: int, ids: str, targetSize: float, minSize: float, adaptAngle: fl
 
     Args:
         type: 选择对象类型,0 表示超面,1 表示网格面.
-        ids: 选择的对象 ID（根据 type 的值决定是什么对象）,可以为"0"或者"0,5,6".
+        ids: 选择的对象 ID（根据 type 的值决定是什么对象）,例如"5,6,7".
         targetSize: 全局目标尺寸.
         minSize: 全局最小尺寸.
         adaptAngle: 曲率自适应角度.
@@ -31,7 +31,7 @@ def UGBlockCreate(geoParam: str, chooseParam: str, centerCoor: str, meshType: in
                     其中头部方向值：0 表示 +X,1 表示 -X,2 表示 +Y,3 表示 -Y,4 表示 +Z,5 表示 -Z。
                     体类型值：0 表示外场,1 表示加密区域。
                     外场形状值：0 表示球形,1 表示立方体,2 表示圆柱,3 表示弓形。
-        centerCoor: 中心点坐标,可以为"0"或者"0,5,6".
+        centerCoor: 中心点坐标,例如"5,6,7".
         meshType: 值为 0 或 1,用于控制参数 meshSizeOrDimension 的值,默认值为0.
         meshSizeOrDimension: 当 meshType 的值为 0 表示给定尺寸,为 1 表示期望点数,期望点数默认值为41.
 
@@ -41,29 +41,28 @@ def UGBlockCreate(geoParam: str, chooseParam: str, centerCoor: str, meshType: in
     return send_post_request("UGBlockCreate", {"geoParam":geoParam,"chooseParam":chooseParam,"centerCoor":centerCoor,"meshType":meshType,"meshSizeOrDimension":meshSizeOrDimension})
 
 
-def UGUGSp(layer: int, growRate: float, caliperFirst: float, diffusionFactor: float, diffusionDensity: float, generateWay: int, revetId: str):
+def UGUGSp(generateWay: int, ids: str, layer: int, growRate: float, caliperFirst: float, diffusionFactor: float):
     """生成空间网格.
 
     Args:
+        generateWay: 生成方法,0 表示构造法,1 表示层推法.
+        ids: 选择的网格块 ID,例如"5,6,7"
         layer: 附面层层数,默认值为40.
         growRate: 增长率,默认值为1.2.
         caliperFirst: 第一层厚度,默认值为0.001.
         diffusionFactor: 扩散因子,默认值为0.5.
-        diffusionDensity: 扩散密度,默认值为0.5.
-        generateWay: 生成方法,0 表示构造法,1 表示层推法.
-        revetId: 需要反向的网格面 ID,可以为"0"或者"0,5,6".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
     """
-    return send_post_request("UGUGSp", {"layer":layer,"growRate":growRate,"caliperFirst":caliperFirst,"diffusionFactor":diffusionFactor,"diffusionDensity":diffusionDensity,"generateWay":generateWay,"revetId":revetId})
+    return send_post_request("UGUGSp", {"generateWay":generateWay,"ids":ids,"layer":layer,"growRate":growRate,"caliperFirst":caliperFirst,"diffusionFactor":diffusionFactor})
 
 
 def GenerateSurMeshBySpitAssemblyGroupProperty(ids: str, targetSize: float, minSize: float, adaptAngle: float, way: int, groupProperty: str):
     """根据分部件分组的属性生成表面网格.
 
     Args:
-        ids: 选择的超面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的超面 ID,例如"5,6,7".
         targetSize: 全局目标尺寸.
         minSize: 全局最小尺寸.
         adaptAngle: 曲率自适应角度.
@@ -80,7 +79,7 @@ def GenerateLongAndNarrowFaceGrid(ids: str):
     """生成狭长面网格
 
     Args:
-        ids: 网格面 ID,可以为"0"或者"0,5,6".
+        ids: 网格面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -88,18 +87,20 @@ def GenerateLongAndNarrowFaceGrid(ids: str):
     return send_post_request("GenerateLongAndNarrowFaceGrid", {"ids":ids})
 
 
-def GenerateANisoDomainGrid(domainID:int, ids:str, fistHigh:float, growthRate:float, controlLayer:float):
-    """生成各向异性网格。
+def GenerateANisoDomainGrid(anisoGroupsJson: str):
+    """生成各向异性网格，支持多个各向异性组同时设置。
 
     Args:
-        domainID: 单个网格面 ID
-        ids: 网格面上需要设置参数的网格线 ID,可以为"0"或者"0,5,6".
-        fistHigh: 首层高度
-        growthRate: 增长率
-        controlLayer: 控制层数
+        anisoGroupsJson: JSON 字符串，包含多个各向异性组的信息。
+            外层为 JSON 数组，每个元素包含：
+            - objects: 对象列表，每个对象含 domainID（网格面ID）和 connectorIDs（网格线ID数组）
+            - firstHigh: 首层高度
+            - growthRate: 增长率
+            - controlLayer: 控制层数
+            示例：[{"objects":[{"domainID":5,"connectorIDs":[6,7,8]}],"firstHigh":0.001,"growthRate":1.2,"controlLayer":40}]
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
     """
-    return send_post_request("GenerateANisoDomainGrid", {"domainID":domainID,"ids":ids,"fistHigh":fistHigh,"growthRate":growthRate,"controlLayer":controlLayer})
+    return send_post_request("GenerateANisoDomainGrid", {"anisoGroupsJson": anisoGroupsJson})
 

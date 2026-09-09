@@ -7,7 +7,7 @@ def ExamineConnector(connectorIDs: str, type: int):
     """网格线质量检查.
 
     Args:
-        connectorIDs: 待检查的网格线 ID,可以为"0"或者"0,5,6".
+        connectorIDs: 待检查的网格线 ID,例如"5,6,7".
         type: 检查类型,当前只能设置为 1.
 
     Returns:
@@ -37,7 +37,7 @@ def ExamineBlock(examType: str, ids: str):
             ExamineLengthRatioK                             //K方向长度比
             ExamineLengthRatioL                             //L方向长度比
             ExamineCellCount"                               //单元计数
-        ids: 选择的网格块 ID,可以为"0"或者"0,5,6"。如果没有选择网格块,则为"".
+        ids: 选择的网格块 ID,例如"5,6,7"。如果没有选择网格块,则为"".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -67,7 +67,7 @@ def ExamineDomain(examType: str, ids: str):
 			EquiAreaSkewness,				//等面积偏斜
 			EquiAngleSkewness,				//角度扭值
 			Warp							//翘曲
-        ids: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.

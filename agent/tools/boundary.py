@@ -51,7 +51,7 @@ def BorderConditionSaveDataToDomain(domainIDs: str, name: str, groupID: int, pro
     """将边界条件组的属性设置到网格面上.
 
     Args:
-        domainIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domainIDs: 选择的网格面 ID,例如"5,6,7".
         name: 边界条件组名称.
         groupID: 边界条件组 ID.
         property: 边界条件组的属性,-10 表示无边界条件,1 表示传值,2 表示对接,3 表示无粘固壁,

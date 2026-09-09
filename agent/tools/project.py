@@ -129,7 +129,7 @@ def ExportCADFile(filename: str, ids: str):
 
     Args:
         filename: 数模文件输出的路径.
-        ids: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的数模面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -157,7 +157,7 @@ def ExportSolver_FTS(name: str, outIDs: str, dataType: int, precision: int):
 
     Args:
         name: 导出的文件名.
-        outIDs: 导出的网格对象 id,可以为"0"或者"0,5,6".
+        outIDs: 导出的网格对象 id,例如"5,6,7".
         dataType: 导出的数据格式,默认值为 0。0 表示二进制,1 表示十进制,2 表示无格式.
         precision: 导出数据精度类型,默认值为 1。0 表示单精度,1 表示双精度.
 
@@ -173,7 +173,7 @@ def ExportSolver(outType: str, objType: str, name: str, outIDs: str):
     Args:
         outType: 导出的文件格式,支持的类型为"CGNS_3.21"、"CGNS_2.54"、"CGNS_Hybrid"、"PMB3D"、"CFD++"、"FluentMesh".
         name: 导出的文件名.
-        outIDs: 导出的网格对象 id,可以为"0"或者"0,5,6".
+        outIDs: 导出的网格对象 id,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.

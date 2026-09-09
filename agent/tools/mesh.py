@@ -7,7 +7,7 @@ def DeleteConnector(conIDs: str):
     """删除网格线.
 
     Args:
-        conIDs: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        conIDs: 选择的网格线 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -19,7 +19,7 @@ def DeleteDomain(domainIDs: str, isDeleteConnector: int):
     """删除网格面.
 
     Args:
-        domainIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domainIDs: 选择的网格面 ID,例如"5,6,7".
         isDeleteConnector: 是否删除关联的网格线,默认值为 0。0 表示不删除,1 表示删除.
 
     Returns:
@@ -32,7 +32,7 @@ def DeleteBlock(blockIDs: str, isDeleteDomain: int, isDeleteConnector: int):
     """删除网格块.
 
     Args:
-        blockIDs: 选择的网格块 ID,可以为"0"或者"0,5,6".
+        blockIDs: 选择的网格块 ID,例如"5,6,7".
         isDeleteDomain: 是否删除所属网格面,默认值为 0。0 表示不删除,1 表示删除.
         isDeleteConnector: 是否删除关联的网格面所属的网格线,默认值为 0。0 表示不删除,1 表示删除.
 
@@ -47,7 +47,7 @@ def TranslateMesh(isBlock: str, domainIDs: str, isCopy: str, isRebuild: str, sta
 
     Args:
         isBlock: 是否操作网格块标志,默认值 0。0 表示不是,1 表示是.
-        domainIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domainIDs: 选择的网格面 ID,例如"5,6,7".
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         isRebuild: 是否重建,默认值为 0。0 表示不重建,1 表示重建.
         startPoint: 轴起点坐标,例如 [1,5,7].
@@ -63,7 +63,7 @@ def UGZoomMesh(domIDs: str, dZoomMeshParam: int, isCopy: int, selectType: int):
     """网格面缩放.
 
     Args:
-        domIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domIDs: 选择的网格面 ID,例如"5,6,7".
         dZoomMeshParam: 当前缩放尺寸,表示 x、y、z 三个轴方向的缩放比例,可以为 [0.1,0.5,2.3].
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         selectType: 当前操作的对象类型,1 表示网格面,2 表示网格块.
@@ -79,7 +79,7 @@ def UGMirrorSur(selectType: int, domIDs: str, useSymmetry: int, symmetry: int, c
 
     Args:
         selectType: 当前操作的对象类型,2 表示网格面,3 表示网格块.
-        domIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domIDs: 选择的网格面 ID,例如"5,6,7".
         useSymmetry: 是否是对称面操作,默认值为 0。0 表示不是,1 表示是.
         symmetry: 对称面的类型,0 表示 XY 面,1 表示 ZX 面,2 表示 ZY 面.
         coords: 确定平面的三个坐标,其形式为 [1,2,3,5,6,4,2,6,2]。其中每三个数字代表一个点的 X、Y、Z 坐标.
@@ -96,7 +96,7 @@ def UGRotateSurf(selectType: int, domIDs: str, startPoint: str, endPoint: str, a
 
     Args:
         selectType: 当前操作的对象类型,1 表示网格面,2 表示网格块.
-        domIDs: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        domIDs: 选择的网格面 ID,例如"5,6,7".
         startPoint: 轴起点坐标,例如 [1,5,7].
         endPoint: 轴尾点坐标,例如 [1,5,7].
         angle: 旋转角度,比如需要旋转的角度为 num 度,则此参数为 (num/180)*3.1415926.
@@ -109,23 +109,23 @@ def UGRotateSurf(selectType: int, domIDs: str, startPoint: str, endPoint: str, a
     return send_post_request("UGRotateSurf", {"selectType":selectType,"domIDs":domIDs,"startPoint":startPoint,"endPoint":endPoint,"angle":angle,"times":times,"isCopy":isCopy})
 
 
-def UGJoinConnector(ids: str):
+def JoinConnector(ids: str):
     """网格线合并.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
     """
-    return send_post_request("UGJoinConnector", {"cnIDs":ids})
+    return send_post_request("JoinConnector", {"cnIDs":ids})
 
 
 def UGJoinDomain(ids: str):
     """网格面合并.
 
     Args:
-        ids: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -137,7 +137,7 @@ def UGHalfModelLine(cnIDs: str, symmetry: int):
     """设置半模边界线.
 
     Args:
-        cnIDs: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        cnIDs: 选择的网格线 ID,例如"5,6,7".
         symmetry: 对称面,默认值为 0。0 表示 ZY 面,1 表示 ZX 面,2 表示 XY 面.
 
     Returns:
@@ -164,7 +164,7 @@ def AssembleDomain(ids: str):
     """结构网格面自动装配.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -176,7 +176,7 @@ def UGAssembleDomain(ids: str):
     """非结构网格面手动装配.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6",网格线要按连接顺序（首尾点相连）排布.
+        ids: 选择的网格线 ID,例如"5,6,7",网格线要按连接顺序（首尾点相连）排布.
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -188,7 +188,7 @@ def UGInitialDomain(ids: str):
     """网格面初始化.
 
     Args:
-        ids: 选择的网格面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -200,7 +200,7 @@ def UGReDimensionSetSpecifiedValue(ids: str, number: int):
     """点数分布：设置网格线点数为指定值.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         number: 网格点数.
 
     Returns:
@@ -210,10 +210,10 @@ def UGReDimensionSetSpecifiedValue(ids: str, number: int):
 
 
 def UGReDimensionCopy(ids: str, targetId: int):
-    """点数分布：拷贝网格分布.
+    """点数分布：拷贝网格分布.将ids中的网格线集合的分布拷贝到targetId中
 
     Args:
-        ids: 被拷贝的网格线 ID列表,可以为"0"或者"0,5,6",要注意网格线的连接关系及方向要与目标网格线一致.
+        ids: 被拷贝的网格线 ID列表,例如"5,6,7".
         targetId: 目标网格线 ID.
 
     Returns:
@@ -226,7 +226,7 @@ def UGReDimensionMatch(ids: str, targetId: int):
     """点数分布：匹配网格点数.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         targetId: 目标网格线 ID.
 
     Returns:
@@ -239,7 +239,7 @@ def UGReDimensionAverageDistribution(ids: str):
     """点数分布：平均分布.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -251,7 +251,7 @@ def UGReDimensionInversionDistribution(ids: str):
     """点数分布：分布反向.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -263,7 +263,7 @@ def UGReDimensionConfigDistribution(ids: str, headspace: float, tailspace: float
     """点数分布：设置增长分布.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         headspace: 首端间距.
         tailspace: 尾端间距.
         params: 分布参数配置,严格格式为 "headRate,headLayer,tailRate,tailLayer"。
@@ -283,7 +283,7 @@ def UGReDimensionSmoothDistribution(ids: str, headspace: float, tailspace: float
     """点数分布：平滑分布.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         headspace: 首端间距.
         tailspace: 尾端间距.
         params: 分布参数配置,严格格式为 "headRate,headLayer,tailRate,tailLayer"。
@@ -303,7 +303,7 @@ def UGSplitConnector(ids: str, splitWay: int, value: float):
     """网格线分割.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         splitWay: 切分方式,0 表示网格点,1 表示任意点.
         value: 当 splitWay 的值为 0 时,此参数表示分割点的位置；为 1 时表示切分值.
 
@@ -317,7 +317,7 @@ def TranslateConnector(ids: str, startPoint: str, endPoint: str, isCopy: str):
     """网格线平移.
 
     Args:
-        ids: 选择的网格线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格线 ID,例如"5,6,7".
         startPoint: 轴起点坐标,例如 [1,5,7].
         endPoint: 轴尾点坐标,例如 [1,5,7].
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
@@ -358,7 +358,7 @@ def SplitBlock(ids: str, direction: int, splitValue: str):
     """网格块分割.
 
     Args:
-        ids: 选择的网格块 ID,可以为"0"或者"0,5,6".
+        ids: 选择的网格块 ID,例如"5,6,7".
         direction: 分割方向,1 表示 J 方向,2 表示 K 方向,3 表示 L 方向.
         splitValue: 分割点的位置,其形式为 [1,2,3,5,6].
 
@@ -382,10 +382,12 @@ def SetConnectorPointCount(ids: str, number: int):
 
 
 def CopyConnectorPointCount(sourceId: str, targetIds: str):
-    """拷贝网格线点数(ID 不变，从源网格线拷贝到目标网格线组)。
+    """拷贝网格线点数（ID 不变，从源网格线拷贝到目标网格线组）。
+
+    ⚠️ sourceId 是点数来源(拷贝源),targetIds 是接收点数的目标组,切勿搞反。
 
     Args:
-        sourceId: 被拷贝的网格线 ID 列表，逗号分隔,如 "12,13"(拷贝源).
+        sourceId: 点数来源的网格线 ID(拷贝源).
         targetIds: 目标网格线 ID 列表,逗号分隔,如 "12,13".
 
     Returns:

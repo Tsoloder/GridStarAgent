@@ -7,7 +7,7 @@ def UGCADSurfaceTranslate(surfaceIDs: str, startPoint: str, lastPoint: str, isCo
     """超面平移.
 
     Args:
-        surfaceIDs: 选择的超面 ID,可以为"0"或者"0,5,6".
+        surfaceIDs: 选择的超面 ID,例如"5,6,7".
         startPoint: 当前移动的首点坐标,例如 [1,5,7].
         lastPoint: 当前移动的尾点坐标,例如 [1,5,7].
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
@@ -22,7 +22,7 @@ def UGCADSurfaceRotate(surfaceIDs: str, startPoint: str, endpoint: str, rotate_a
     """超面旋转.
 
     Args:
-        surfaceIDs: 选择的超面 ID,可以为"0"或者"0,5,6".
+        surfaceIDs: 选择的超面 ID,例如"5,6,7".
         startPoint: 轴起点坐标,例如 [1,5,7].
         endpoint: 轴尾点坐标,例如 [1,5,7].
         rotate_angle: 旋转角度.
@@ -39,7 +39,7 @@ def UGCADSurfaceScale(surfaceIDs: str, zoomCenter: str, isCopy: int):
     """超面缩放.
 
     Args:
-        surfaceIDs: 选择的超面 ID,可以为"0"或者"0,5,6".
+        surfaceIDs: 选择的超面 ID,例如"5,6,7".
         zoomCenter: 缩放中心坐标,例如 [1,5,7].
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
 
@@ -53,7 +53,7 @@ def UGCADSurfaceMirror(surfaceIDs: str, useSymmetry: int, isCopy: int):
     """超面镜像.
 
     Args:
-        surfaceIDs: 选择的超面 ID,可以为"0"或者"0,5,6".
+        surfaceIDs: 选择的超面 ID,例如"5,6,7".
         useSymmetry: 对称面,默认值为 0。0 表示 XY 面,1 表示 ZX 面,2 表示 ZY 面.
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
 
@@ -67,7 +67,7 @@ def UGSurfaceProcessing(edgeIDs: str, type: int, tolerance: float, minLenth: flo
     """碎面处理.
 
     Args:
-        edgeIDs: 选择的超边 ID,可以为"0"或者"0,5,6".
+        edgeIDs: 选择的超边 ID,例如"5,6,7".
         type: 当前操作的类型,-1 表示合并,2 表示打散,3 表示删除.
         tolerance: 面积比.
         minLenth: 最小边长.
@@ -82,7 +82,7 @@ def UGDamageRepari(edgeIDs: str, repairPattern: int, fillStyle: float):
     """碎面修复.
 
     Args:
-        edgeIDs: 选择的超边 ID,可以为"0"或者"0,5,6".
+        edgeIDs: 选择的超边 ID,例如"5,6,7".
         repairPattern: 修复模式,-1 表示合并,2 表示打散,3 表示删除.
         fillStyle: 填充方式.
 
@@ -96,7 +96,7 @@ def DeleteFC(ids: str, flag: int):
     """删除数模线.
 
     Args:
-        ids: 选择的数模线 ID,可以为"0"或者"0,5,6".
+        ids: 选择的数模线 ID,例如"5,6,7".
         flag: 是否删除关联的数模面,默认值为 0。0 表示不删除,1 表示删除.
 
     Returns:
@@ -109,7 +109,7 @@ def DeleteNbsFace(ids: str, flag: int):
     """删除数模面.
 
     Args:
-        ids: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的数模面 ID,例如"5,6,7".
         flag: 是否删除关联的数模线,默认值为 0。0 表示不删除,1 表示删除.
 
     Returns:
@@ -139,7 +139,7 @@ def UGSpitAssemblyMoveNodesToNewGroup(selectType: str, groupName: str, ids: str)
     Args:
         selectType: 选择的对象类型,0 表示超边,1 表示超面.
         groupName: 目标分部件组名.
-        ids: 选择的对象 ID,可以为"0"或者"0,5,6".
+        ids: 选择的对象 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -176,7 +176,7 @@ def TranslateSurface(faceIDs: str, isCopy: str, startPoint: str, endPoint: str):
     """数模面平移.
 
     Args:
-        faceIDs: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        faceIDs: 选择的数模面 ID,例如"5,6,7".
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         startPoint: 轴起点坐标,例如 [1,5,7].
         endPoint: 轴尾点坐标,例如 [1,5,7].
@@ -191,7 +191,7 @@ def UGDelRedundantDom(selectedID: str, domType: int, precisio: float, overlapRat
     """删除多余面（重面）.
 
     Args:
-        selectedID: 选择的超面 ID,可以为"0"或者"0,5,6".
+        selectedID: 选择的超面 ID,例如"5,6,7".
         domType: 面的类型,1 表示重面,2 表示 topo 错误面,3 表示内部面.
         precisio: 重面检测距离值.
         overlapRatio: 重面检测比例值.
@@ -206,7 +206,7 @@ def UGRepairRedundantDom(selectedID: str, domType: int, precisio: float, overlap
     """修复多余面（重面）.
 
     Args:
-        selectedID: 选择的超面 ID,可以为"0"或者"0,5,6".
+        selectedID: 选择的超面 ID,例如"5,6,7".
         domType: 面的类型,1 表示重面,2 表示 topo 错误面,3 表示内部面.
         precisio: 重面检测距离值.
         overlapRatio: 重面检测比例值.
@@ -221,8 +221,8 @@ def CADIntersect(idsA: str, idsB: str):
     """提取交线.
 
     Args:
-        idsA: 选择的数模面 ID,可以为"0"或者"0,5,6".
-        idsB: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        idsA: 选择的数模面 ID,例如"5,6,7".
+        idsB: 选择的数模面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -234,7 +234,7 @@ def UGDeleteSubassembly(ids: str):
     """组件删除.
 
     Args:
-        ids: 选择的超面 ID,可以为"0"或者"0,5,6".
+        ids: 选择的超面 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -246,7 +246,7 @@ def CreateCoons(ids: str):
     """创建双曲性曲面.
 
     Args:
-        ids: 选择的超边 ID,可以为"0"或者"0,5,6".
+        ids: 选择的超边 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -258,7 +258,7 @@ def ManualExtractConnector(ids: str, precision: float):
     """手动提取边界线.
 
     Args:
-        ids: 选择的超边 ID,可以为"0"或者"0,5,6".
+        ids: 选择的超边 ID,例如"5,6,7".
         precision: 合并精度.
 
     Returns:
@@ -271,7 +271,7 @@ def AutoExtractConnector(ids: str):
     """自动提取边界线.
 
     Args:
-        ids: 选择的超边 ID,可以为"0"或者"0,5,6".
+        ids: 选择的超边 ID,例如"5,6,7".
 
     Returns:
         工具调用结果,"true"代表成功,"false"代表失败.
@@ -283,7 +283,7 @@ def CADSurfaceScale(surfaceIDs: str, isCopy: int, xyz: str):
     """数模面缩放.
 
     Args:
-        surfaceIDs: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        surfaceIDs: 选择的数模面 ID,例如"5,6,7".
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         xyz: 当前缩放尺寸,表示 x、y、z 三个轴方向的缩放比例,可以为 [0.1,0.5,2.3].
 
@@ -297,7 +297,7 @@ def CADSurfaceRotate(faceIDs: str, isCopy: int, startPoint: str, endpoint: str, 
     """数模面旋转.
 
     Args:
-        faceIDs: 选择的超面 ID,可以为"0"或者"0,5,6".
+        faceIDs: 选择的超面 ID,例如"5,6,7".
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         startPoint: 轴起点坐标,例如 [1,5,7].
         endpoint: 轴尾点坐标,例如 [1,5,7].
@@ -314,7 +314,7 @@ def CADSurfaceMirror(faceIDs: str, isCopy: int, coords: str):
     """数模面镜像.
 
     Args:
-        faceIDs: 选择的数模面 ID,可以为"0"或者"0,5,6".
+        faceIDs: 选择的数模面 ID,例如"5,6,7".
         isCopy: 是否复制,默认值为 0。0 表示不复制,1 表示复制.
         coords: 确定平面的三个坐标,其形式为 [1,2,3,5,6,4,2,6,2]。其中每三个数字代表一个点的 X、Y、Z 坐标.
 
