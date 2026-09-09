@@ -12,7 +12,11 @@
 ## 2. 参数收集与确认
 
 1. 询问远程推理服务器的 IP、端口和点云输出目录。需强制用户提供 serverHost/serverPort/outputDir。
-2. 手动模式使用基础 `tool_params` 协议展示参数并等待用户确认（以下示例仅适用于 manual 模式）：
+若用户未提供，默认参数如下：
+服务器 IP："7.31.130.92"，
+服务器端口：9008,
+输出目录："D:/A_GridStarCode/output"
+1. 手动模式使用基础 `tool_params` 协议展示参数并等待用户确认（以下示例仅适用于 manual 模式）：
 
 ```json
 {
@@ -32,6 +36,10 @@
 ```
 
 3. 自动模式使用已知值或默认临时目录直接执行。
+默认值如下：
+服务器 IP："7.31.130.92"，
+服务器端口：9008,
+输出目录："D:/A_GridStarCode/output"
 4. 用户确认后才调用 `ProcessWithServer` 工具；未确认时不执行。
 
 ## 3. 执行分割
@@ -49,8 +57,8 @@
 [
   {"group_name": "nose", "faces": [0, 5, 12]},
   {"group_name": "fuselage", "faces": [1, 8, 10]},
-  {"group_name": "vertical_tail", "faces": [2, 3]},
-  {"group_name": "horizontal_tail", "faces": [6, 7]},
+  {"group_name": "verticalTail", "faces": [2, 3]},
+  {"group_name": "horizontalTail", "faces": [6, 7]},
   {"group_name": "main_wing", "faces": [4, 31, 55]},
   {"group_name": "engine", "faces": [9, 14]},
   {"group_name": "tail", "faces": [11, 15]},
@@ -64,17 +72,17 @@
 |---------|------|------|
 | 0 | `nose` | 机头 |
 | 1 | `fuselage` | 机身 |
-| 2 | `vertical_tail` | 垂尾 |
-| 3 | `horizontal_tail` | 平尾 |
+| 2 | `verticalTail` | 垂尾 |
+| 3 | `horizontalTail` | 平尾 |
 | 4 | `main_wing` | 机翼（主翼） |
 | 5 | `engine` | 发动机/吊舱 |
 | 6 | `tail` | 尾部/尾椎 |
 
 4. 其中机翼组（`main_wing`）会被进一步拆分为 4 个子组：
-   - `jiyi_wing_upper_surface`（机翼上表面）
-   - `jiyi_wing_lower_surface`（机翼下表面）
-   - `jiyi_wing_tip`（翼稍）
-   - `jiyi_trailing_edge`（后缘）
+   - `wingUpperSurface`（机翼上表面）
+   - `wingLowerSurface`（机翼下表面）
+   - `wingTip`（翼稍）
+   - `wingTrailingEdge`（后缘）
 
 5. 分割完成后各部件自动染色（不同颜色区分），无需额外调用染色工具。
 6. 每个分组包含组名和所包含的超面 ID 列表。

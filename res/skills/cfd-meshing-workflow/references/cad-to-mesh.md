@@ -61,9 +61,11 @@ phase_plan 通用格式与输出规则参见系统提示词第 5.1 节。本流�
 1. 通过工具`GetGenerateSurMeshDefaultParam`获取表面网格生成默认参数。
 2. 用户没有要求则默认生成所有超面（使用工具`GetAllObjectByType`获取所有超面的ID）的表面网格。
 3. 如果需要已有的网格面加密或者稀疏，则再次调用工具`UGSur`生成表面网格即可。
-4. 如果已通过 AI 自动部件分割（`SegmentPart`）或手动分组完成了分部件处理，且 MAC 值已知，建议改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。
+4. 如果已通过 AI 自动部件分割（`ProcessWithServer`）或手动分组完成了分部件处理，且 MAC 值已知，建议改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。
 
-## 5. 体网格与空间网格
+## 5. 后缘面处理
+1. 使用`references/trailing-edge-processing.md`的流程。
+## 6. 体网格与空间网格
 
 **阶段闸门（强制）**：表面网格生成成功后，必须完成体网格块创建（`UGBlockCreate`），然后才能进入空间网格生成（`UGUGSp`）。任何时候都不得在表面网格生成后直接调用 `UGUGSp`。
 
@@ -105,12 +107,11 @@ phase_plan 通用格式与输出规则参见系统提示词第 5.1 节。本流�
    - 层数：40（默认）。
    - 扩散因子：粗网格 0.5 / 中等 0.8 / 细网格 0.98。
    - 单元类型：四面体（默认）。
-   - **预留工具**：`CalculateFirstLayerHeight`（附面层首层高度计算）— 当前不存在，AI 按公式计算或向用户询问。
-2. 确定需要反向法向量的网格面 ID（`revetId`）。
-3. 调用 `UGUGSp(layer, growRate, caliperFirst, diffusionFactor, diffusionDensity, generateWay, revetId)` 生成空间网格。
+
+3. 调用 `UGUGSp` 生成空间网格。
 4. 手动模式使用 `tool_params` 确认，自动模式使用查询或 Schema 默认参数直接执行。
 
-## 6. 导出
+## 7. 导出
 
 1. 询问导出格式和目标文件。
 2. 根据实时导出工具 Schema 获取对象类型、对象 ID、数据格式、精度和单位等参数。

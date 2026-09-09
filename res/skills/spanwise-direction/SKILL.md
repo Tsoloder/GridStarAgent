@@ -1,12 +1,12 @@
 ---
 name: spanwise-direction
-description: 机翼展向（spanwise direction）各向异性网格线分布处理，处理对象就是前缘线（机翼上表面与下表面分部件分组的交线）。前缘线按与机身 fuselage / 翼梢 jiyi_wing_tip 是否共点分为类型一、类型二，只处理最两端两根：共点端取 0.1% × 半展长，另一端保留原网格线端分布，中间值与翼面尺寸一致。当总 Skill anisotropic-mesh-processing 路由到机翼展向处理、前缘面处理或前缘线处理时加载本 Skill。
+description: 机翼展向（spanwise direction）各向异性网格线分布处理，处理对象就是前缘线（机翼上表面与下表面分部件分组的交线）。前缘线按与机身 fuselage / 翼梢 wingTip 是否共点分为类型一、类型二，只处理最两端两根：共点端取 0.1% × 半展长，另一端保留原网格线端分布，中间值与翼面尺寸一致。当总 Skill anisotropic-mesh-processing 路由到机翼展向处理、前缘面处理或前缘线处理时加载本 Skill。
 aliases: [展向分布, 展向加密, spanwise, 机翼展向, 翼根加密, 翼梢加密, 前缘面处理, 前缘面, 前缘线]
 tags: [CFD, 网格, 各向异性, 展向, 机翼, 前缘面]
 category: CFD
-version: 1.0.0
+version: 2.0.0
 author: QtChatWidget
-allowed-tools: []
+allowed-tools: [IdentifyLeadingEdge]
 ---
 
 # 机翼展向各向异性网格线分布（前缘线处理）
@@ -15,17 +15,17 @@ allowed-tools: []
 
 ## 处理对象与范围
 
-- **前缘线**：分部件分组**机翼上表面** **`jiyi_wing_upper_surface`** 与**机翼下表面** **`jiyi_wing_lower_surface`** 的**交线**（两组网格面共有的网格线）。
+- **前缘线**：分部件分组**机翼上表面** **`wingUpperSurface`** 与**机翼下表面** **`wingLowerSurface`** 的**交线**（两组网格面共有的网格线）。
 - 前缘线通常有**多根**（沿展向分段），**只处理最两端的两根**，中间段一律保持原分布不动。
 
 | 类型  | 判定依据                              | 位置     | 共点端间距      | 另一端间距 |
 | --- | --------------------------------- | ------ | ---------- | ----- |
 | 类型一 | 与机身 `fuselage` 分组的网格面有**共点**      | 翼根端那一根 | 0.1% × 半展长 | 原分布值  |
-| 类型二 | 与翼梢 `jiyi_wing_tip` 分组的网格面有**共点** | 翼梢端那一根 | 0.1% × 半展长 | 原分布值  |
+| 类型二 | 与翼梢 `wingTip` 分组的网格面有**共点** | 翼梢端那一根 | 0.1% × 半展长 | 原分布值  |
 
 ## 前置条件
 
-1. 调用 `GetAllSpitAssemblyGroupProperty`，返回中存在 `fuselage`、`jiyi_wing_tip`、`jiyi_wing_upper_surface`、`jiyi_wing_lower_surface` 四个分组。
+1. 调用 `GetAllSpitAssemblyGroupProperty`，返回中存在 `fuselage`、`wingTip`、`wingUpperSurface`、`wingLowerSurface` 四个分组。
 2. 调用 `GetModelParameters`，获取机翼半展长与 MAC；返回 0 时回退 `cfd-meshing-workflow/references/geometry-parameters.md` 默认值（半展长 586.10、MAC 144.74）。
 3. 表面网格已生成：`GetAllObjectByType`(6) 返回非空。
 4. 上述任一条件不满足时停止。
@@ -46,21 +46,25 @@ allowed-tools: []
 
 ## 执行步骤
 
-1. **求前缘线集合**：
-   1. `GetSpliteAssemlyDomains`（`groupName` = `jiyi_wing_upper_surface`）→ 上表面网格面 ID 列表。
-   2. `GetSpliteAssemlyDomains`（`groupName` = `jiyi_wing_lower_surface`）→ 下表面网格面 ID 列表。
-   3. 对两组返回的每个网格面 ID 调用 `GetConnectorsByDomain`，分别汇总为上表面网格线集合、下表面网格线集合。
-   4. 取两集合的**交集** → 前缘线 ID 列表（多根）。交集为空 → 失败停止。
-2. **建立机身网点集合** **`P_fus`**：
-   1. `GetSpliteAssemlyDomains`（`groupName` = `fuselage`）→ 机身网格面 ID 列表。
-   2. 逐面调用 `GetConnectorsByDomain` → 机身网格线 ID 列表。
-   3. 逐线调用 `GetStartAndEndPointByConnector` → 收集 `start_point.pointID` 与 `end_point.pointID`，汇总为 `P_fus`。
-3. **建立翼梢网点集合** **`P_tip`**：同步骤 2，`groupName` 换为 `jiyi_wing_tip`，得到 `P_tip`。
-4. **类型判定 + 共点端判定**：对每根前缘线调用 `GetStartAndEndPointByConnector`，得到 `L_start`、`L_end`：
-   - `L_start` 或 `L_end` ∈ `P_fus` → **类型一**，命中的那一端即**共点端**。
-   - `L_start` 或 `L_end` ∈ `P_tip` → **类型二**，命中的那一端即**共点端**。
-   - 两端均不命中 → 中间段，**跳过不处理**。
-   - 同一类型命中多于一根，或没有任何前缘线命中 → 失败停止并报告。
+1. **获取各分组网格面 ID**：
+   1. `GetSpliteAssemlyDomains`（`groupName` = `wingUpperSurface`）→ 上表面网格面 ID 列表字符串（如 `"1,2,3"`）。
+   2. `GetSpliteAssemlyDomains`（`groupName` = `wingLowerSurface`）→ 下表面网格面 ID 列表字符串。
+   3. `GetSpliteAssemlyDomains`（`groupName` = `fuselage`）→ 机身网格面 ID 列表字符串。
+   4. `GetSpliteAssemlyDomains`（`groupName` = `wingTip`）→ 翼梢网格面 ID 列表字符串。
+   任一返回为空 → 失败停止。
+
+2. **识别前缘线**：调用 `IdentifyLeadingEdge`（
+      `upperSurfaceDomainIds` = 上表面面ID字符串，
+      `lowerSurfaceDomainIds` = 下表面面ID字符串，
+      `fuselageDomainIds` = 机身面ID字符串，
+      `wingTipDomainIds` = 翼梢面ID字符串）
+   ↓
+   返回 JSON 包含：
+   - `leading_edge_ids`：所有前缘线 ID 列表
+   - `fuselage_adjacent`：与机身共点的前缘线 ID + 共点端（`start`/`end`）→ **类型一**
+   - `wing_tip_adjacent`：与翼梢共点的前缘线 ID + 共点端（`start`/`end`）→ **类型二**
+   `leading_edge_ids` 为空或 `fuselage_adjacent`/`wing_tip_adjacent` 缺失 → 失败停止。
+   不在上述两端的其他前缘线 → **中间段，跳过不处理**。
 5. **读取原分布值**：对类型一、类型二各调用 `GetConnectorStartAndEndUnitLenth`（线 ID）→ `{"start": s0, "end": e0}`。
    > 必须在 `UGReDimensionConfigDistribution` **之前**读取，否则原值会被覆盖。
 6. **计算间距**：`edgeSpacing` = 0.001 × 半展长；`mindValue` = 翼面尺寸。
@@ -82,6 +86,7 @@ allowed-tools: []
 
 ## 完成标准
 
+- `IdentifyLeadingEdge` 成功返回，`fuselage_adjacent` 与 `wing_tip_adjacent` 均非空。
 - 类型一（与机身共点）与类型二（与翼梢共点）各识别出一根前缘线。
 - 两根线的共点端间距为 0.1% × 半展长，另一端为原分布值；中间段未被修改。
 - `UGReDimensionConfigDistribution` 调用返回 `success` 为 `true`。

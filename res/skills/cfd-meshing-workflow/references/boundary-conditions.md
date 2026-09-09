@@ -26,7 +26,7 @@ manual 模式使用 `options` 询问；auto 模式根据用户原始目标自动
 
 | 参数 | 取值规则 |
 |---|---|
-| `name` | 直接使用分部件分组名称（如 `fuselage`、`jiyi_wing_upper_surface`） |
+| `name` | 直接使用分部件分组名称（如 `fuselage`、`wingUpperSurface`） |
 | `groupID` | 从 100 开始递增，每个分组 +1（100, 101, 102, …） |
 | `colorNumber` | 按分组顺序循环取 0-5（第 1 个组取 0，第 2 个取 1，… 第 7 个回到 0） |
 

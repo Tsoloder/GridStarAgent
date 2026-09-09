@@ -4,7 +4,7 @@
 
 ## 1. 前置条件
 
-- 部件分割已完成（AI 自动 `SegmentPart` 或手动分组），分组信息已写入分部件组列表。
+- 部件分割已完成（AI 自动 `ProcessWithServer` 或手动分组），分组信息已写入分部件组列表。
 - MAC（平均气动弦长）已获取。通过 `GetModelParameters` MCP 工具一次性获取（返回 JSON 中的 `mac` 字段），或按 `geometry-parameters.md` 的公式手动计算。
 - 如需自定义分组属性，先调用 `GetAllSpitAssemblyGroupProperty` 获取当前分组属性 JSON。
 
@@ -17,7 +17,7 @@
 | 机头 | 含 `jitou`、`nose`、`机头`、`forebody`、`前机身` | 2% |
 | 机尾 | 含 `weibu`、`tail`、`jiwei`、`机尾`、`aft`、`后机身`、`fin`、`rudder`、`尾翼`、`水平尾翼` | 2% |
 | 机身 | 含 `jishen`、`fuselage`、`body`、`机身`、`中机身` | 4% |
-| 机翼 | 含 `jiyi`、`main_wing`、`机翼`（含各子组如 `jiyi_wing_upper_surface`、`jiyi_wing_lower_surface`、`jiyi_wing_tip`、`jiyi_trailing_edge`） | 2% |
+| 机翼 | 含 `jiyi`、`main_wing`、`机翼`（含各子组如 `wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`） | 2% |
 | 其他 | 以上均不匹配的组 | 4% |
 
 ## 3. 参数计算表
@@ -46,7 +46,7 @@
 
 ```json
 [
-  {"jiyi_wing_upper_surface": {
+  {"wingUpperSurface": {
     "line": [{"targetSize":12.34,"minSize":56.78,"angle":56.78,"ids":[1,2,3]}],
     "domain": [{"targetSize":6.7,"minSize":33.44,"angle":56.78,"ids":[1,2,3]}]}
   },
@@ -88,13 +88,13 @@
       {"name": "MAC", "description": "平均气动弦长", "value": "134.75"},
       {"name": "way", "description": "生成方案：0=组合法 1=狭长面 2=四边形占优", "value": "0"},
       {"name": "groups", "description": "各部件组参数", "value": [
-        {"name": "jitou", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
-        {"name": "jishen", "targetSize": 5.39, "minSize": 0.54, "angle": 10},
-        {"name": "weibu",  "targetSize": 2.70, "minSize": 0.27, "angle": 10},
-        {"name": "jiyi_wing_upper_surface", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
-        {"name": "jiyi_wing_lower_surface", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
-        {"name": "jiyi_wing_tip",          "targetSize": 2.70, "minSize": 0.27, "angle": 10},
-        {"name": "jiyi_trailing_edge",     "targetSize": 2.70, "minSize": 0.27, "angle": 10}
+        {"name": "nose", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
+        {"name": "fuselage", "targetSize": 5.39, "minSize": 0.54, "angle": 10},
+        {"name": "tail",  "targetSize": 2.70, "minSize": 0.27, "angle": 10},
+        {"name": "wingUpperSurface", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
+        {"name": "wingLowerSurface", "targetSize": 2.70, "minSize": 0.27, "angle": 10},
+        {"name": "wingTip",          "targetSize": 2.70, "minSize": 0.27, "angle": 10},
+        {"name": "wingTrailingEdge",     "targetSize": 2.70, "minSize": 0.27, "angle": 10}
       ]}
     ]
   },

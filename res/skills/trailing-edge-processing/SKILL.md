@@ -16,12 +16,12 @@ allowed-tools: []
 ## 开始任务前
 
 1. 从实时 MCP 工具列表识别可用工具和 Schema。
-2. 确认以下分组已存在：`jiyi_trailing_edge`、`jiyi_wing_tip`、`engine`、`fuselage`。
+2. 确认以下分组已存在：`wingTrailingEdge`、`wingTip`、`engine`、`fuselage`。
 3. 读取 `references/type1.md` 和 `references/type2.md`，了解两种类型的完整步骤。
 
 ## 前置条件
 
-1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在 `jiyi_trailing_edge`、`jiyi_wing_tip`、`engine`、`fuselage` 分组。
+1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在 `wingTrailingEdge`、`wingTip`、`engine`、`fuselage` 分组。
 2. 通过 `GetModelParameters`，返回值中的参数均为有效值。
 3. 通过 `GetAllObjectByType`(6)，返回值中有网格面。
 4. 上述任一条件不满足时停止。

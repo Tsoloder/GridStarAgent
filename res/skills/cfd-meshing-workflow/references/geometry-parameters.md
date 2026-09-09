@@ -12,14 +12,14 @@
 
 ## 1.1 自动分割提取（软件原生参数）
 
-运行 `SegmentPart`（部件分割）MCP 工具后，`CalculateDimensions` 从点云和分割结果计算出四个尺寸值，并通过 `Data` 类的公开接口持久化存储。
+运行 `ProcessWithServer`（部件分割）MCP 工具后，`CalculateDimensions` 从点云和分割结果计算出四个尺寸值，并通过 `Data` 类的公开接口持久化存储。
 
 | 尺寸名称 | Data Getter | 说明 |
 |---|---|---|
 | 机身长度 | `data->GetFuselageLength()` | 机头到机尾在主方向上的跨度 |
 | 机翼半展长 | `data->GetWingHalfSpan()` | 翼梢到翼根的距离（全模型取半、半模型取全） |
 | 翼根弦长 | `data->GetWingRootChord()` | 翼根位置前后缘在主方向上的距离 |
-| 翼尖弦长 | `data->GetWingTipChord()` | 翼尖组 (`jiyi_wing_tip`) 在主方向上的跨度 |
+| 翼尖弦长 | `data->GetWingTipChord()` | 翼尖组 (`wingTip`) 在主方向上的跨度 |
 
 ### 访问方式
 
@@ -34,7 +34,7 @@ double c_t  = data->GetWingTipChord();
 
 在 Python/Script 脚本中通过调用 `workflows/run` 或后续 MCP 工具（如 `GetPartDimensions`，预留）读取。
 
-> **前提条件**：必须先运行 `SegmentPart`（部件分割）流程，否则四个值均为 0.0。
+> **前提条件**：必须先运行 `ProcessWithServer`（部件分割）流程，否则四个值均为 0.0。
 >
 > **回退策略**：若 `GetModelParameters` 返回全 0 或部分为 0，使用 §1.2 文档默认值替代。
 
@@ -88,7 +88,7 @@ double c_t  = data->GetWingTipChord();
 
 ## 4. 关键尺寸测量清单
 
-> **自动工具**：`GetModelParameters` — 获取所有已自动计算的几何参数。需先运行部件分割（`SegmentPart`）方可获取翼根弦长、翼尖弦长、机翼半展长、机身长度；特征长度（包围盒对角线）和 MAC 在任何状态下均可计算。
+> **自动工具**：`GetModelParameters` — 获取所有已自动计算的几何参数。需先运行部件分割（`ProcessWithServer`）方可获取翼根弦长、翼尖弦长、机翼半展长、机身长度；特征长度（包围盒对角线）和 MAC 在任何状态下均可计算。
 >
 > **预留工具**：`MeasureDistance`（两点距离测量）和 `GetPointOnSurface`（获取数模点坐标）— 当前 MCP 工具列表中尚不存在。在工具就绪前，优先使用 `GetModelParameters` 或向用户询问参数。
 
@@ -112,7 +112,7 @@ double c_t  = data->GetWingTipChord();
 
 ### 路径 A：已运行部件分割（推荐）
 
-1. 确认用户已运行「部件分割」（`SegmentPart`）。
+1. 确认用户已运行「部件分割」（`ProcessWithServer`）。
 2. 调用 `GetModelParameters` 工具，一次性获取 C_root、C_tip、b/2、L、MAC 和特征长度。
 3. 检查返回值中是否有 0.0 字段，若有则用 §1.2 文档默认值替代。
 4. 用户可确认数值是否有误。

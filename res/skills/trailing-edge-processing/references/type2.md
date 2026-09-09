@@ -26,12 +26,12 @@
 
 | 角色 | 类型 | 属性                                                      |
 | -- | -- | ------------------------------------------------------- |
-| A  | 短边 | 连接 engine（吊舱），与 E、D 共点；属于下表面（`jiyi_wing_lower_surface`） |
+| A  | 短边 | 连接 engine（吊舱），与 E、D 共点；属于下表面（`wingLowerSurface`） |
 | B  | 短边 | 与 fuselage（机身）共边，与 D、F 共点                               |
 | C  | 短边 | 连接 E 和 F；与类型一的面共边                                       |
-| D  | 长边 | 属于下表面（`jiyi_wing_lower_surface`），与 A、B 共点               |
-| E  | 长边 | 属于下表面（`jiyi_wing_lower_surface`），与 A、C 共点               |
-| F  | 长边 | 属于上表面（`jiyi_wing_upper_surface`），与 B、C 共点               |
+| D  | 长边 | 属于下表面（`wingLowerSurface`），与 A、B 共点               |
+| E  | 长边 | 属于下表面（`wingLowerSurface`），与 A、C 共点               |
+| F  | 长边 | 属于上表面（`wingUpperSurface`），与 B、C 共点               |
 
 环顺序：**A — E — C — F — B — D — (回到 A)**
 
@@ -40,7 +40,7 @@
 ## 步骤
 
 1. **识别角色**（使用 `IdentifyType2Roles` 一次获取角色线 ID 与端点信息）：
-   1. 调用 `GetSpliteAssemlyDomains`（4 次，`groupName` 分别为 `engine`、`fuselage`、`jiyi_wing_upper_surface`、`jiyi_wing_lower_surface`），得到吊舱、机身、机翼上表面、机翼下表面各分组的**网格面 ID 列表**。
+   1. 调用 `GetSpliteAssemlyDomains`（4 次，`groupName` 分别为 `engine`、`fuselage`、`wingUpperSurface`、`wingLowerSurface`），得到吊舱、机身、机翼上表面、机翼下表面各分组的**网格面 ID 列表**。
    2. 调用 `IdentifyType2Roles`（`teDomainId`=当前后缘面 ID，`engineDomainIds`、`fuselageDomainIds`、`upperSurfaceDomainIds`、`lowerSurfaceDomainIds` 分别为第 1 步得到的各分组网格面 ID，逗号分隔），返回：
       - 各角色线 ID：`A`、`B`、`C`、`D`、`E`、`F`
       - 每条线的首尾点 ID：`A_start`/`A_end`、`B_start`/`B_end`、`C_start`/`C_end`、`D_start`/`D_end`、`E_start`/`E_end`、`F_start`/`F_end`
@@ -74,12 +74,29 @@
      - 若 D 的 start 端连 A → headspace=`aSpacing`, tailspace=`bodySpacing`
      - 若 D 的 end 端连 A → headspace=`bodySpacing`, tailspace=`aSpacing`
    - `SetConnectorSmoothDistribution`（D, headspace, tailspace, params, rootSpacing）
-6. **F 设点数 + 拷贝 E、A、D 的分布**
-   1. 分别调用 `GetPointCount`（E）、`GetPointCount`（A）、`GetPointCount`（D），得到三条线的点数。
-   2. 计算目标点数：`F点数 = E点数 + A点数 + D点数 - 2`。
-   3. 调用 `UGReDimensionSetSpecifiedValue`（F, 目标点数）显式设置 F 的点数。
-   4. 用 `UGReDimensionCopy` 把 E、A、D 三条线的**分布**拷贝到 F。
-   5. 若拷贝后发现 F 的疏密方向反了（F 的 start 端间距不等于链首端的间距），调用 `UGReDimensionInversionDistribution`（F）翻转分布方向。
+6. **F 设点数**
+   - 先获取 E、A、D 的当前点数，计算并设置 F 的点数：
+     - 分别调用 `GetPointCount`（E）、`GetPointCount`（A）、`GetPointCount`（D），得到 `eCount`、`aCount`、`dCount`
+     - 计算 `fPointCount = eCount + aCount + dCount - 2`
+     - `SetConnectorPointCount`（F, fPointCount）
+     - `SetConnectorAverageDistribution`（F）
+   - 再拷贝 E、A、D 的分布模式到 F：
+     - **必须使用** **`UGReDimensionCopy`**
+     - `UGReDimensionCopy`（`"E,A,D"`, `F`）
+     - 参数说明：`ids` = E、A、D 三条线的 ID 逗号分隔，`targetId` = F 的 ID
+   - 拷贝后，判断 F 与 E、D 的首尾点方向是否一致（通过第一步得到的端点 ID 对比）：
+     - 通过端点 ID 对比，判断 F 的哪一端连接 C：
+       - 若 `F_start` == `C_start` 或 `F_start` == `C_end` → F 的 start 端连 C
+       - 若 `F_end` == `C_start` 或 `F_end` == `C_end` → F 的 end 端连 C
+     - 同理判断 E 的哪一端连接 C
+     - 同理判断 D 的哪一端连接 B
+     - **方向一致的条件**：
+       - F 的 start 端连 C（F_start == C 的共点）
+       - 且 E 的 start 端也连 C（E_start == C 的共点）
+       - 且 D 的 end 端连 B（D_end == B 的共点）
+       - 即三条线在环上朝向一致：F 从 C→B、E 从 C→A、D 从 A→B
+     - 若任一条件不满足（即 F 的 end 端连 C，方向不一致）：
+       - `UGReDimensionInversionDistribution`（F）→ 对 F 的分布进行反向
 7. `DeleteDomain`（当前后缘面 ID, isDeleteConnector=0）
 8. `AssembleConnectorsToDomain`（6 条网格线按环顺序排列，逗号分隔）
    - 装配顺序沿第 1 步校验过的环顺序：`A,E,C,F,B,D`（A — E — C — F — B — D — 回到 A）
