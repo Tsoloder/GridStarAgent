@@ -500,6 +500,17 @@ async def run_agent_loop(
             )
             _estimated_totals["output"] += _estimate_tokens(text_acc + reasoning_acc)
 
+        # 实时 token 计数：每轮 LLM 调用结束后发中间事件，让前端可以即时更新
+        _real_input = _usage_totals["input"] or _estimated_totals["input"]
+        _real_output = _usage_totals["output"] or _estimated_totals["output"]
+        yield {
+            "type": "token_usage",
+            "tokens": _real_input + _real_output,
+            "tokens_input": _real_input,
+            "tokens_output": _real_output,
+            "tokens_estimated": not bool(_usage_totals["total"] or _usage_totals["input"] or _usage_totals["output"]),
+        }
+
         valid_tool_names = {tool.name for tool in external_tools + runtime_tools}
         invalid_tool_names = [
             str(tc.get("name", "")) for tc in tool_calls

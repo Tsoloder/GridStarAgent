@@ -312,14 +312,17 @@ function createMessage(role, content = "", label = "", attachments = null) {
 }
 function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
 function renderTokenUsage(message, event) {
-  if (!message || message.node.querySelector(".token-usage")) return;
+  if (!message) return;
   const total = event.tokens || 0, input = event.tokens_input || 0, output = event.tokens_output || 0;
   if (!total && !input && !output) return;
-  const usage = document.createElement("div");
-  usage.className = "token-usage";
+  let usage = message.node.querySelector(".token-usage");
+  if (!usage) {
+    usage = document.createElement("div");
+    usage.className = "token-usage";
+    message.bubble.append(usage);
+  }
   // 供应商没回传 usage 时后端会给出本地估算值，用 ≈ 区分实测与估算。
   usage.textContent = `${event.tokens_estimated ? "≈ " : ""}tokens ${total} · input ${input} · output ${output}`;
-  message.bubble.append(usage);
 }
 function finishAssistant(message) {
   if (!message || message.finished) return;
@@ -716,6 +719,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
       else if (type === "tool_approval_required") renderApproval(event,assistant.node);
       else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
       else if (type === "notice") showToast(event.message || "附件处理提示");
+      else if (type === "token_usage") renderTokenUsage(assistant, event);
       else if (type === "error") throw streamFailure(event);
       else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); }
     });
