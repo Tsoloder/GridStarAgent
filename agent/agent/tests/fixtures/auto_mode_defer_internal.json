@@ -39,10 +39,12 @@
   },
   "expected_event_types": [
     "heartbeat",
+    "token_usage",
     "text_chunk",
     "tool_call",
     "tool_result",
     "heartbeat",
+    "token_usage",
     "text_chunk",
     "tool_call",
     "plan_updated",
@@ -50,6 +52,7 @@
     "tool_call",
     "tool_result",
     "heartbeat",
+    "token_usage",
     "text_chunk",
     "done"
   ],
