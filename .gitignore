@@ -1,0 +1,19 @@
+# Python 字节码与测试缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# Qt / qmake 构建产物
+QtChartWidget/bin/
+QtChartWidget/build/
+_qt_*/release/
+_qt_*/debug/
+_qt_*/Makefile*
+_qt_*/.qmake.stash
+
+# 离线分发包
+*.zip
+
+# IDE / 工具临时产物
+.superpowers/
