@@ -67,8 +67,8 @@ allowed-tools: []
 
 1. 判断场景（外场面是否存在、全模/半模）。半模场景先调 `UGHalfModelLine` 设置半模边界线。
 2. 外场不存在时先通过体创建生成外场（亚音速 20 倍特征长度/球形，超音速 >1.5 倍特征长度/弓形）。
-3. 调 `GetCreateBlockDefaultParam` 获取默认参数。
-4. 调 `UGBlockCreate` 创建体网格块。
+3. 调 `GetCreateBlockDefaultParam` 获取默认参数（默认 `geoParam` 与 `meshSize`）。
+4. 调 `UGBlockCreate` 创建体网格块；若按外场规则调整后的 `geoParam` 尺寸与默认值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整：系数 = 实际 `geoParam` / 默认 `geoParam`，尺寸 = 默认 `meshSize` × 系数（详见 `references/cad-to-mesh.md` 第 5.3 节）。
 5. 体网格块创建成功后，若用户目标包含空间网格，继续下一阶段。
 
 ---

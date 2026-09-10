@@ -92,10 +92,15 @@ phase_plan 通用格式与输出规则参见系统提示词第 5.1 节。本流�
 
 ### 5.3 体创建
 
-1. 查询体创建所需参数：调用 `GetCreateBlockDefaultParam()`。
-2. 确认参数并调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)` 创建体网格块。
+1. 查询体创建所需参数：调用 `GetCreateBlockDefaultParam()`，记返回的默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）与 `meshSize`。
+2. 按 5.2 节外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
+   - 缩放系数 = 实际 `geoParam` 尺寸值 / 默认 `geoParam` 尺寸值
+   - `meshSizeOrDimension` = 默认 `meshSize` × 缩放系数
+   - 示例：默认 `geoParam`=121.107、`meshSize`=14.23，外场按 20 倍特征长度放大为 853.6 时，系数=853.6/121.107≈7.05，`meshSizeOrDimension`=14.23×7.05≈100.3。
+3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)` 创建体网格块。
    - `chooseParam` 的外场形状值：0=球形，1=立方体，2=圆柱，3=弓形。
-3. 体网格块成功后，manual 模式使用 `options` 询问是否生成空间网格；auto 模式根据用户原始目标判断。
+   - `meshType`=0 表示给定尺寸时，`meshSizeOrDimension` 传缩放后的值；=1 表示期望点数时不受此规则影响。
+4. 体网格块成功后，manual 模式使用 `options` 询问是否生成空间网格；auto 模式根据用户原始目标判断。
 
 ### 5.4 空间网格生成
 
