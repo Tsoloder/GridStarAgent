@@ -437,7 +437,7 @@ async def test_provider(body: dict):
     try:
         provider = _provider_from_body(body)
         client = _provider_client(provider)
-        response = await client.client().get("")
+        response = await client.client().get("/models")
         response.raise_for_status()
         return {"ok": True, "status_code": response.status_code}
     except (ConfigError, ValueError) as exc:

@@ -128,7 +128,7 @@ def test_provider_test_and_model_read_are_independent_sorted_and_closed(monkeypa
 
     tested = client.post("/config/providers/test", json={"provider": provider})
     assert tested.status_code == 200
-    assert calls == [("test", "")]
+    assert calls == [("test", "/models")]
 
     calls.clear()
     models = client.post("/config/providers/models", json={"provider": provider})
