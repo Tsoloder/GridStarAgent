@@ -199,6 +199,19 @@ UPDATE_PLAN_TOOL = RuntimeTool(
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill", UPDATE_PLAN_TOOL_NAME}
 
 
+def _only_readonly_calls(tool_calls) -> bool:
+    """本批次工具调用是否全部为只读（内部工具或查询类 MCP 工具）。
+
+    auto 模式的建计划门禁只应拦住会产生副作用的操作类工具。单步只读查询
+    （如"现在有哪些网格面"）直接放行，否则会白烧一次携带全量工具 schema 的
+    请求，而前端规划面板对这类查询也没有可展示的价值。
+    """
+    return bool(tool_calls) and all(
+        tc["name"] in _NON_EXEC_TOOLS or _is_query_tool(tc["name"])
+        for tc in tool_calls
+    )
+
+
 def _auto_plan_waits_for_choice(text: str, ledger) -> bool:
     """台账计划未完成（有 pending/in_progress 阶段）且输出 options 时返回 True。
 
@@ -649,8 +662,10 @@ async def run_agent_loop(
         # 检查是否需要先创建计划（auto 模式：台账无计划时拦截外部工具调用）
         _only_internal = all(tc["name"] in _NON_EXEC_TOOLS for tc in tool_calls)
         _has_plan_call = any(tc["name"] == UPDATE_PLAN_TOOL_NAME for tc in tool_calls)
+        # 纯只读批次豁免门禁：查询类工具不产生副作用，无需先建计划
+        _readonly_only = _only_readonly_calls(tool_calls)
         _plan_missing = (interaction_mode == "auto" and tool_calls
-                         and not _only_internal and not _has_plan_call
+                         and not _readonly_only and not _has_plan_call
                          and ledger is not None and ledger.plan is None
                          and not _update_plan_reminded)
         _skip_plan_reminder = False
@@ -693,7 +708,7 @@ async def run_agent_loop(
 
         # 已提醒过 update_plan 但模型仍无视时，注入提醒但不阻止工具执行
         if _update_plan_reminded and not _plan_missing and interaction_mode == "auto" \
-           and tool_calls and not _only_internal and not _has_plan_call \
+           and tool_calls and not _readonly_only and not _has_plan_call \
            and ledger is not None and ledger.plan is None \
            and _update_plan_retry_count < 2:
             _update_plan_retry_count += 1

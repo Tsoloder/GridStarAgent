@@ -198,12 +198,19 @@ class Session:
             message["active_skills"] = sorted(set(active_skills))
         if usage:
             # 持久化本次回复的 token 用量，供历史会话展示
-            message["usage"] = {
+            record = {
                 "input": int(usage.get("input", 0)),
                 "output": int(usage.get("output", 0)),
                 "total": int(usage.get("total", 0)),
                 "estimated": bool(usage.get("estimated", False)),
             }
+            # 缓存/推理明细与模型 ID 一并落盘，否则历史会话看不到缓存命中率
+            for key in ("cache_read", "cache_write", "reasoning"):
+                if usage.get(key):
+                    record[key] = int(usage[key])
+            if usage.get("model"):
+                record["model"] = str(usage["model"])
+            message["usage"] = record
         if elapsed_ms is not None:
             # 本轮（含多轮工具调用）总耗时，供历史会话气泡展示
             message["elapsed_ms"] = int(elapsed_ms)

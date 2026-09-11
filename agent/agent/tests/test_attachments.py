@@ -289,7 +289,8 @@ def test_anthropic_sends_base64_image_source():
 
     assert body["messages"][0]["content"] == [
         {"type": "text", "text": "看图"},
-        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"}},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "AAAA"},
+         "cache_control": {"type": "ephemeral"}},
     ]
 
 

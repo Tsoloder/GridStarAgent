@@ -1,0 +1,32 @@
+{
+  "name": "auto_mode_readonly_query_exempt",
+  "description": "auto 模式门禁豁免：单步只读查询直接执行，不拦截、不建计划、不多烧一次请求",
+  "input": {
+    "session_id": "test-auto-003",
+    "message": "现在有哪些网格面",
+    "interaction_mode": "auto",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "查询当前网格面。"},
+        {"type": "tool_call", "id": "tc-query-001", "name": "ListMeshFaces", "args": {}},
+        {"type": "usage", "input": 22120, "output": 30, "total": 22150, "cache_read": 21504}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "当前共有 3 个网格面。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"划分表面网格\", \"value\": \"surmesh\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 22400, "output": 25, "total": 22425, "cache_read": 21504}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "ListMeshFaces": "{\"faces\": [\"face_1\", \"face_2\", \"face_3\"]}"
+  },
+  "expected_text_contains": "当前共有 3 个网格面"
+}

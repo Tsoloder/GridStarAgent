@@ -188,7 +188,7 @@ async def test_auto_mode_defer_internal_tools(tmp_path, monkeypatch):
     # 执行类工具全程只出现一次（首轮被暂缓，第二轮建计划后才真正执行）
     exec_calls = [i for i, e in enumerate(events)
                   if e["type"] == "tool_call"
-                  and e["name"] == "GetGenerateSurMeshDefaultParam"]
+                  and e["name"] == "GenerateSurMesh"]
     assert len(exec_calls) == 1
     assert types.index("plan_updated") < exec_calls[0]
 
@@ -202,9 +202,51 @@ async def test_auto_mode_defer_internal_tools(tmp_path, monkeypatch):
     # 台账：内部工具与被暂缓后重发的执行类工具均入账，被暂缓的首次调用不入账
     tools_called = [call["tool"] for call in ledger.calls]
     assert "read_skill_resource" in tools_called
-    assert "GetGenerateSurMeshDefaultParam" in tools_called
-    assert tools_called.count("GetGenerateSurMeshDefaultParam") == 1
+    assert "GenerateSurMesh" in tools_called
+    assert tools_called.count("GenerateSurMesh") == 1
     assert all(call["ok"] for call in ledger.calls)
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_readonly_query_exempt_from_plan_gate(tmp_path, monkeypatch):
+    """单步只读查询豁免建计划门禁：直接执行，不暂缓、不建计划、不多烧一次请求。"""
+    import json
+    import uuid
+    import session as session_mod
+    from task_ledger import TaskLedger
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    sid = str(uuid.uuid5(uuid.NAMESPACE_URL, "test-auto-003"))
+    ledger = TaskLedger(sid)
+
+    events = await _run_fixture("auto_mode_readonly_query_exempt", ledger=ledger)
+    types = _event_types(events)
+
+    # 门禁未触发：查询工具首轮就真正执行，没有 [deferred] 占位结果
+    query_call = next(e for e in events if e["type"] == "tool_call")
+    assert query_call["name"] == "ListMeshFaces"
+    query_result = next(e for e in events if e["type"] == "tool_result")
+    assert "[deferred]" not in query_result["result"]
+    assert "face_1" in query_result["result"]
+
+    # 只读查询不需要阶段计划，也不该为补计划再花一次请求
+    assert "plan_updated" not in types
+    assert ledger.plan is None
+    assert types.count("traj_request_start") == 2
+    assert types[-1] == "done"
+
+    # 台账照常记账（无活动阶段时归属为空）
+    assert [call["tool"] for call in ledger.calls] == ["ListMeshFaces"]
+    assert ledger.calls[0]["phase"] == ""
+
+    # 缓存用量透传到 done 事件并落盘，前端才能显示真实命中率
+    assert events[-1]["cache_read_tokens"] == 21504 * 2
+    stored = [json.loads(line) for line in
+              (tmp_path / sid / "messages.jsonl").read_text(encoding="utf-8").splitlines()]
+    usage = next(m["usage"] for m in stored
+                 if m.get("role") == "assistant" and m.get("usage"))
+    assert usage["cache_read"] == 21504 * 2
+    assert usage["model"] == "test-model"
 
 
 @pytest.mark.asyncio

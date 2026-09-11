@@ -2,9 +2,11 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
+from types import SimpleNamespace
 
 import httpx
 
+from llm_client.adapters.anthropic_messages import AnthropicMessagesAdapter
 from llm_client.adapters.base import RetryPolicy, parse_retry_after, stream_failure
 from llm_client.adapters.openai_chat import OpenAIChatAdapter
 from llm_client.providers.openai import OpenAIProvider
@@ -105,6 +107,43 @@ def test_openai_chat_tool_result_uses_json_not_python_repr():
     body = OpenAIChatAdapter().build_request(_chat_model(), [message], [])
 
     assert body["messages"][0]["content"] == '{"ok": true, "名称": "网格"}'
+
+
+def _anthropic_model(**compat):
+    return ModelConfig("claude-test", "vendor", "anthropic-messages", compat=compat)
+
+
+def test_anthropic_sets_cache_breakpoints_by_default():
+    """/messages 的提示词缓存必须手动打 cache_control 断点，不打就完全不缓存。
+
+    3 个断点覆盖逐轮增长的稳定前缀：system、最后一个 tool、末条消息的末块。
+    """
+    messages = MessageTransformer().from_legacy(
+        [{"role": "user", "content": "你好"}], "system prompt")
+    tools = [SimpleNamespace(name="GetLine", description="查询", inputSchema={}),
+             SimpleNamespace(name="SetLine", description="操作", inputSchema={})]
+
+    body = AnthropicMessagesAdapter().build_request(_anthropic_model(), messages, tools)
+
+    assert body["system"] == [{"type": "text", "text": "system prompt",
+                               "cache_control": {"type": "ephemeral"}}]
+    assert "cache_control" not in body["tools"][0]  # 只打最后一个，前面的自然被前缀覆盖
+    assert body["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert body["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_anthropic_prompt_caching_compat_flag_disables_breakpoints():
+    """网关不认 cache_control 字段时，用 compat.prompt_caching=false 关闭断点。"""
+    messages = MessageTransformer().from_legacy(
+        [{"role": "user", "content": "你好"}], "system prompt")
+    tools = [SimpleNamespace(name="GetLine", description="", inputSchema={})]
+
+    body = AnthropicMessagesAdapter().build_request(
+        _anthropic_model(prompt_caching=False), messages, tools)
+
+    assert body["system"] == "system prompt"
+    assert "cache_control" not in body["tools"][-1]
+    assert "cache_control" not in body["messages"][-1]["content"][-1]
 
 
 NO_WAIT = RetryPolicy(base_delay=0.0, max_delay=0.0)  # 退避归零，测试不真等

@@ -71,7 +71,10 @@ class MockLLMClient:
             elif event_type == "usage":
                 yield SimpleNamespace(type="usage", input_tokens=event.get("input"),
                                       output_tokens=event.get("output"),
-                                      total_tokens=event.get("total"))
+                                      total_tokens=event.get("total"),
+                                      cache_read_tokens=event.get("cache_read"),
+                                      cache_write_tokens=event.get("cache_write"),
+                                      reasoning_tokens=event.get("reasoning"))
             elif event_type == "done":
                 yield SimpleNamespace(type="done", stop_reason=event.get("stop_reason", "stop"))
             elif event_type == "error":
