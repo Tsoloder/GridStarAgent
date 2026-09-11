@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
-  <link rel="stylesheet" href="style.css?v=19">
+  <link rel="stylesheet" href="style.css?v=24">
 </head>
 <body>
   <main class="app-shell">
@@ -20,6 +20,11 @@
       </button>
     </section>
 
+    <nav class="view-tabs" role="tablist" aria-label="视图切换">
+      <button id="tab-chat" class="view-tab active" type="button" role="tab" aria-selected="true">对话</button>
+      <button id="tab-trajectory" class="view-tab" type="button" role="tab" aria-selected="false">轨迹</button>
+    </nav>
+
     <div id="session-panel" class="session-panel hidden" role="dialog" aria-label="会话历史">
       <div class="panel-head">
         <input id="session-search" type="search" placeholder="搜索会话" aria-label="搜索会话">
@@ -33,6 +38,22 @@
         <div class="empty-symbol">⌁</div>
         <strong>对话已就绪</strong>
         <p>描述你的工程目标，Agent 将按当前模式执行。</p>
+      </div>
+    </section>
+
+    <section id="trajectory-view" class="trajectory-view hidden" aria-label="轨迹视图">
+      <div class="traj-toolbar">
+        <div class="traj-views" role="group" aria-label="轨迹分组">
+          <button type="button" data-traj-view="duration" class="active" title="按耗时展示">时长</button>
+          <button type="button" data-traj-view="turn" title="按轮次分组">轮次</button>
+          <button type="button" data-traj-view="call" title="按模型调用分组">调用</button>
+        </div>
+        <input id="traj-search" type="search" placeholder="搜索轨迹" aria-label="搜索轨迹">
+      </div>
+      <div id="traj-timeline" class="traj-timeline" aria-label="时间轴概览"></div>
+      <div class="traj-body">
+        <div id="traj-ledger" class="traj-ledger" role="list"></div>
+        <aside id="traj-inspector" class="traj-inspector hidden" aria-label="记录详情"></aside>
       </div>
     </section>
 
@@ -108,6 +129,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=24" defer></script>
+  <script src="app.js?v=31" defer></script>
 </body>
 </html>

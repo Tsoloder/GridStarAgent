@@ -18,6 +18,8 @@ const state = {
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
+  viewTab: "chat",
+  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, showTimeline:true},
 };
 const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
@@ -29,6 +31,9 @@ const el = {
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
   skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
+  tabChat: $("#tab-chat"), tabTraj: $("#tab-trajectory"), trajView: $("#trajectory-view"),
+  trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
+  trajTimeline: $("#traj-timeline"), composer: $(".composer"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -45,6 +50,36 @@ function showToast(message) {
   el.toast.classList.remove("hidden");
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.toast.classList.add("hidden"), 5000);
+}
+// 气泡时间：HH:MM:SS；无效/空值返回空串（老会话没有 ts 时不显示）
+function formatClock(value) {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (isNaN(date.getTime())) return "";
+  const pad = n => (n < 10 ? "0" : "") + n;
+  return pad(date.getHours()) + ":" + pad(date.getMinutes()) + ":" + pad(date.getSeconds());
+}
+// 气泡用时：紧凑格式（dsh 风格）
+function formatDuration(ms) {
+  if (ms == null || isNaN(ms) || ms < 0) return "";
+  if (ms < 1000) return Math.round(ms) + "ms";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "s";
+  const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+  return m + "m" + (s < 10 ? "0" : "") + s + "s";
+}
+// 剪贴板：优先 async API，失败回退 execCommand（兼容旧内核/非安全上下文）
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  const area = document.createElement("textarea");
+  area.value = text;
+  area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+  document.body.append(area);
+  area.select();
+  try { document.execCommand("copy"); } catch (_) {}
+  area.remove();
+  return Promise.resolve();
 }
 function showDialog({title, message = "", input, confirmText = "确定", cancelText = "取消", danger = false}) {
   return new Promise(resolve => {
@@ -305,10 +340,39 @@ function createMessage(role, content = "", label = "", attachments = null) {
   bubble.className = "bubble";
   if (label) bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
   const body = document.createElement("div"); body.className = "markdown"; body.innerHTML = basicMarkdown(content);
-  bubble.append(body); node.append(bubble); el.messages.append(node);
+  bubble.append(body);
+  const msg = {node, bubble, body, text: content, reasoning: "", structured: []};
+  // 对话气泡底部栏：最左复制按钮；右下角时间，assistant 在时间左边再显示用时
+  if (role === "user" || role === "assistant") {
+    const footer = document.createElement("div");
+    footer.className = "bubble-footer";
+    footer.innerHTML = '<button class="bubble-copy" type="button" title="复制内容" aria-label="复制内容">'
+      + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
+      + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button>'
+      + '<span class="bubble-meta"><span class="bubble-duration"></span><span class="bubble-time"></span></span>';
+    bubble.append(footer);
+    msg.footer = footer;
+    msg.durationEl = footer.querySelector(".bubble-duration");
+    msg.timeEl = footer.querySelector(".bubble-time");
+    // 实时消息默认填当前时间；历史渲染会用消息自带 ts 覆盖（老会话无 ts 则清空）
+    msg.timeEl.textContent = formatClock(new Date());
+    footer.querySelector(".bubble-copy").addEventListener("click", () => {
+      const text = msg.text || (msg.body ? msg.body.textContent : "") || "";
+      if (!text.trim()) { showToast("没有可复制的内容"); return; }
+      copyText(text).then(() => showToast("已复制到剪贴板"), () => showToast("复制失败"));
+    });
+  }
+  node.append(bubble); el.messages.append(node);
   renderMessageAttachments(bubble, attachments);
   scrollMessages();
-  return {node, bubble, body, text: content, reasoning: "", structured: []};
+  return msg;
+}
+function setBubbleTime(msg, value) {
+  if (msg && msg.timeEl) msg.timeEl.textContent = formatClock(value);
+}
+function setBubbleDuration(msg, ms) {
+  if (msg && msg.durationEl) msg.durationEl.textContent = formatDuration(ms);
 }
 function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
 function renderTokenUsage(message, event) {
@@ -319,7 +383,9 @@ function renderTokenUsage(message, event) {
   if (!usage) {
     usage = document.createElement("div");
     usage.className = "token-usage";
-    message.bubble.append(usage);
+    // 保持在底部操作栏上方
+    if (message.footer) message.bubble.insertBefore(usage, message.footer);
+    else message.bubble.append(usage);
   }
   // 供应商没回传 usage 时后端会给出本地估算值，用 ≈ 区分实测与估算。
   usage.textContent = `${event.tokens_estimated ? "≈ " : ""}tokens ${total} · input ${input} · output ${output}`;
@@ -446,10 +512,21 @@ function updateToolGroup(group) {
   status.textContent = running ? "执行中" : failed ? "失败" : "完成";
   status.className = `status ${running ? "" : failed ? "failed" : "succeeded"}`;
 }
+function toolArgsTableHtml(args) {
+  const entries = args && typeof args === "object" && !Array.isArray(args) ? Object.entries(args) : [];
+  if (!entries.length) return '<div class="tool-args-empty">（无参数）</div>';
+  const rows = entries.map(([key, value]) => {
+    const structured = value !== null && typeof value === "object";
+    const text = structured ? JSON.stringify(value) : String(value == null ? "" : value);
+    const cls = structured ? ' class="tool-args-json"' : "";
+    return `<tr><th scope="row">${escapeHtml(key)}</th><td${cls}>${escapeHtml(text)}</td></tr>`;
+  }).join("");
+  return `<div class="tool-args-scroll"><table class="tool-args-table"><thead><tr><th scope="col">参数</th><th scope="col">值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
 function renderToolCall(event, parent) {
   const group = toolGroup(parent); const item = document.createElement("details");
   item.className = "tool-item"; item.dataset.callId = event.id || event.call_id || ""; item.dataset.state = "running";
-  item.innerHTML = `<summary><span class="tool-dot" aria-hidden="true"></span><strong>${escapeHtml(event.name || "工具调用")}</strong><span class="status">执行中</span></summary><div class="tool-detail"><span class="tool-detail-label">调用参数</span><pre class="tool-args">${escapeHtml(JSON.stringify(event.args || {}, null, 2))}</pre><div class="tool-result hidden"><span class="tool-detail-label">调用结果</span><pre></pre></div></div>`;
+  item.innerHTML = `<summary><span class="tool-dot" aria-hidden="true"></span><strong>${escapeHtml(event.name || "工具调用")}</strong><span class="status">执行中</span></summary><div class="tool-detail"><span class="tool-detail-label">调用参数</span>${toolArgsTableHtml(event.args)}<div class="tool-result hidden"><span class="tool-detail-label">调用结果</span><pre></pre></div></div>`;
   $(".tool-list", group).append(item); updateToolGroup(group); scrollMessages();
 }
 function renderToolResult(event, parent) {
@@ -539,7 +616,11 @@ function skillLabel(item, skills) {
 // turn 为本轮已合并的气泡：实时流里一轮对话只有一个 assistant 气泡（文本累加、
 // 所有工具调用进同一个折叠组），而持久化会拆成多条消息，渲染时必须合并回去。
 function renderHistoryMessage(message, turn) {
-  if (message.role === "user") return createMessage("user", message.display_content || message.content || "", "", message.attachments);
+  if (message.role === "user") {
+    const item = createMessage("user", message.display_content || message.content || "", "", message.attachments);
+    setBubbleTime(item, message.ts || "");
+    return item;
+  }
   if (message.role === "assistant") {
     const item = turn || createMessage("assistant", "", "");
     // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
@@ -552,6 +633,9 @@ function renderHistoryMessage(message, turn) {
     // 后续 tool 结果找不到对应 call-id，退化为独立 TOOL RESULT 气泡。
     (message.tool_calls || []).forEach(call => { let args = {}; try { args = JSON.parse((call.function && call.function.arguments) || "{}"); } catch (_) {} renderToolCall({id:call.id,name:call.function && call.function.name,args}, item.node); });
     if (message.usage) item.usage = message.usage;
+    // 本轮可能由多条 assistant 消息合并，取最后一条的 ts/elapsed_ms（即完成时刻与总耗时）
+    if (message.ts) item.ts = message.ts;
+    if (message.elapsed_ms != null) item.elapsed_ms = message.elapsed_ms;
     return item;
   }
   if (message.role === "tool") {
@@ -572,6 +656,9 @@ function finishHistoryTurn(turn) {
   finishAssistant(turn);
   const usage = turn.usage;
   if (usage) renderTokenUsage(turn, {tokens: usage.total, tokens_input: usage.input, tokens_output: usage.output, tokens_estimated: !!usage.estimated});
+  // 历史气泡：时间取本轮最后一条消息的 ts（老会话无 ts 则清空默认值），用时取落盘 elapsed_ms
+  setBubbleTime(turn, turn.ts || "");
+  if (turn.elapsed_ms != null) setBubbleDuration(turn, turn.elapsed_ms);
   return null;
 }
 // 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
@@ -594,6 +681,9 @@ async function loadSession(id) {
     if (!state.session.messages.length) showWelcome();
     else renderHistory(state.session.messages);
     if (state.session.plan) renderPhase(state.session.plan);
+    state.traj.events = []; state.traj.keys = {}; state.traj.count = {};
+    state.traj.records = []; state.traj.selected = null; state.traj.range = null; state.traj.collapsed = {};
+    if (state.viewTab === "traj") loadTrajectory();
     closeSessions(); clearAttachments(); updateSendState(); scrollMessages();
   } catch (error) { showToast(error.message); }
 }
@@ -711,6 +801,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
     const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
     await consumeSse(response, async (type, event) => {
+      if (TRAJ_LIVE_TYPES.indexOf(type) >= 0) { trajIngest(event); scheduleTrajRender(); }
       if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
       else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
       else if (type === "plan_updated") renderPhase(event.plan);
@@ -721,7 +812,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
       else if (type === "notice") showToast(event.message || "附件处理提示");
       else if (type === "token_usage") renderTokenUsage(assistant, event);
       else if (type === "error") throw streamFailure(event);
-      else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); }
+      else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); setBubbleDuration(assistant, event.elapsed_ms); setBubbleTime(assistant, new Date()); }
     });
     finishAssistant(assistant); await refreshSessions();
   } catch (error) {
@@ -1055,5 +1146,477 @@ function toggleVoice() {
   if (voice.recording) stopRecording(); else startRecording();
 }
 if (el.voiceBtn) el.voiceBtn.onclick = toggleVoice;
+
+/* ================= 轨迹视图：事件账本投影 ================= */
+const TRAJ_LIVE_TYPES = ["user", "traj_system_prompt", "traj_context", "traj_request_start", "traj_request_end", "tool_call", "tool_result"];
+const TRAJ_SOURCE_LABEL = {system: "系统", user: "用户", context: "上下文", assistant: "助手", tool: "工具"};
+const TRAJ_FAILED_RE = /^(Tool error:|Tool execution denied|Tool blocked by active Skill policy|\[deferred\])/;
+
+// 与后端 _estimate_tokens 一致：中日韩 1 token，其余 4 字符 1 token
+function trajEstimateTokens(text) {
+  const str = String(text == null ? "" : text);
+  let cjk = 0;
+  for (let i = 0; i < str.length; i++) {
+    const code = str.charCodeAt(i);
+    if ((code >= 0x3040 && code <= 0x30ff) || (code >= 0x4e00 && code <= 0x9fff) || (code >= 0xac00 && code <= 0xd7af)) cjk += 1;
+  }
+  return cjk + Math.floor((str.length - cjk) / 4);
+}
+function trajKey(ev) {
+  switch (ev.type) {
+    case "user": return "u" + ev.turn;
+    case "traj_system_prompt": return "sp" + ev.turn;
+    case "traj_context": return "cx" + ev.turn + "." + ev.request + "." + (ev.kind || "");
+    case "traj_request_start": return "rs" + ev.turn + "." + ev.request;
+    case "traj_request_end": return "re" + ev.turn + "." + ev.request;
+    case "tool_call": return "tc" + ev.id;
+    case "tool_result": return "tr" + ev.call_id;
+    default: return "";
+  }
+}
+// 摄入事件并按「基础键 + 出现序号」去重：落盘回放与实时流顺序一致，序号天然对齐
+function trajIngest(events) {
+  const st = state.traj;
+  const list = Array.isArray(events) ? events : [events];
+  for (let i = 0; i < list.length; i++) {
+    const ev = list[i];
+    if (!ev || !ev.type) continue;
+    const base = trajKey(ev);
+    if (!base) continue;
+    const n = st.count[base] || 0;
+    st.count[base] = n + 1;
+    const key = base + "#" + n;
+    if (st.keys[key]) continue;
+    st.keys[key] = true;
+    st.events.push(ev);
+  }
+}
+function scheduleTrajRender() {
+  const st = state.traj;
+  if (st.renderPending) return;
+  st.renderPending = true;
+  requestAnimationFrame(() => { st.renderPending = false; renderTrajectory(); });
+}
+function trajTimeMs(rec) {
+  const raw = (rec.timing && rec.timing.start) || rec.ts || "";
+  const t = Date.parse(raw);
+  return isNaN(t) ? NaN : t;
+}
+function trajFormatMs(ms) {
+  if (ms == null || isNaN(ms)) return "—";
+  if (ms < 1000) return Math.round(ms) + " 毫秒";
+  return (ms / 1000).toFixed(2) + " 秒";
+}
+// 投影：原始事件流 → 业务记录（加载与实时共用同一套逻辑）
+function trajProject(events) {
+  const records = [];
+  const openRequests = {};
+  const openTools = {};
+  let seq = 0;
+  const push = rec => { rec.id = "r" + (++seq); records.push(rec); return rec; };
+  const newRequest = (turn, req, model, startIso, raw) => push({
+    source: "assistant", kind: "request", turn: turn, request: req, step: 0,
+    status: "running", label: "请求 #" + req, model: model || "", content: "", reasoning: "",
+    toolCalls: [], tokens: null, timing: {start: startIso || "", total_ms: null, ttft_ms: null, gen_ms: null, tok_per_s: null},
+    raw: raw, ts: startIso || (raw && raw.ts) || "",
+  });
+  const newTool = (ev, resultEv) => push({
+    source: "tool", kind: "tool_call", turn: ev.turn || 0, request: ev.request || 0, step: ev.step || 0,
+    status: "running", name: ev.name || "", args: ev.args || {}, callId: ev.id || (resultEv && resultEv.call_id) || "",
+    content: "", durationMs: null, tokens: null, timing: null,
+    raw: resultEv ? {tool_call: ev, tool_result: resultEv} : ev, ts: (ev && ev.ts) || "",
+  });
+  events.forEach(ev => {
+    const ts = ev.ts || "";
+    if (ev.type === "user") {
+      const content = ev.display_content || ev.content || "";
+      push({source: "user", kind: "user", turn: ev.turn || 0, request: 0, step: 0, status: "completed",
+        label: "用户消息", content: content, reasoning: "", model: "", toolCalls: [], timing: null,
+        tokens: {total: trajEstimateTokens(content), reasoning: 0, content: trajEstimateTokens(content), estimated: true},
+        raw: ev, ts: ts});
+    } else if (ev.type === "traj_system_prompt") {
+      push({source: "system", kind: "system_prompt", turn: ev.turn || 0, request: 0, step: 0, status: "completed",
+        label: "初始系统提示词", content: ev.content || "", reasoning: "", model: "", toolCalls: [], timing: null,
+        tokens: {total: trajEstimateTokens(ev.content), reasoning: 0, content: trajEstimateTokens(ev.content), estimated: true},
+        raw: ev, ts: ts});
+    } else if (ev.type === "traj_context") {
+      const kind = ev.kind || "context";
+      push({source: "context", kind: kind, turn: ev.turn || 0, request: ev.request || 0, step: 0, status: "completed",
+        label: kind === "ledger_snapshot" ? "台账快照" : "上下文注入", content: ev.content || "",
+        reasoning: "", model: "", toolCalls: [], timing: null,
+        tokens: {total: trajEstimateTokens(ev.content), reasoning: 0, content: trajEstimateTokens(ev.content), estimated: true},
+        raw: ev, ts: ts});
+    } else if (ev.type === "traj_request_start") {
+      openRequests[ev.turn + "." + ev.request] = newRequest(ev.turn, ev.request, ev.model, ev.start || ts, ev);
+    } else if (ev.type === "traj_request_end") {
+      const mapKey = ev.turn + "." + ev.request;
+      let rec = openRequests[mapKey];
+      if (!rec) { rec = newRequest(ev.turn, ev.request, ev.model, (ev.timing && ev.timing.start) || ts, ev); openRequests[mapKey] = rec; }
+      rec.status = ev.status || "completed";
+      rec.model = ev.model || rec.model;
+      rec.content = ev.content || "";
+      rec.reasoning = ev.reasoning || "";
+      rec.toolCalls = (ev.tool_calls || []).map(tc => ({id: tc.id || "", name: tc.name || "", args: tc.args || {}}));
+      if (ev.timing) rec.timing = {start: ev.timing.start || rec.timing.start, total_ms: ev.timing.total_ms, ttft_ms: ev.timing.ttft_ms, gen_ms: ev.timing.gen_ms, tok_per_s: ev.timing.tok_per_s};
+      rec.raw = ev;
+      const usage = ev.usage || {};
+      const contentTok = trajEstimateTokens(rec.content);
+      const reasoningTok = trajEstimateTokens(rec.reasoning);
+      rec.tokens = {
+        input: usage.input || null,
+        output: usage.output || null,
+        total: usage.total || (usage.output || (contentTok + reasoningTok)),
+        reasoning: reasoningTok,
+        content: contentTok,
+        estimated: !usage.total,
+      };
+      delete openRequests[mapKey];
+    } else if (ev.type === "tool_call") {
+      openTools[ev.id] = newTool(ev, null);
+    } else if (ev.type === "tool_result") {
+      let rec = openTools[ev.call_id];
+      if (!rec) { rec = newTool({id: ev.call_id, name: ev.name, turn: ev.turn, request: ev.request, step: ev.step, ts: ts}, ev); openTools[ev.call_id] = rec; }
+      const result = String(ev.result == null ? "" : ev.result);
+      rec.content = result;
+      rec.status = TRAJ_FAILED_RE.test(result) ? "failed" : "completed";
+      rec.durationMs = typeof ev.duration_ms === "number" ? ev.duration_ms : null;
+      if (ev.ts) rec.ts = ev.ts;
+      rec.raw = {tool_call: rec.raw && rec.raw.tool_call ? rec.raw.tool_call : rec.raw, tool_result: ev};
+      delete openTools[ev.call_id];
+    }
+  });
+  return records;
+}
+function trajRecordText(rec) {
+  const parts = [rec.label || "", rec.name || "", rec.model || "", rec.content || "", rec.reasoning || ""];
+  if (rec.args) parts.push(JSON.stringify(rec.args));
+  (rec.toolCalls || []).forEach(tc => { parts.push(tc.name); parts.push(JSON.stringify(tc.args || {})); });
+  return parts.join("\n");
+}
+function trajRecordMs(rec) {
+  if (rec.kind === "request" && rec.timing && rec.timing.total_ms != null) return rec.timing.total_ms;
+  if (rec.source === "tool" && rec.durationMs != null) return rec.durationMs;
+  return null;
+}
+function trajPreview(text, limit) {
+  const str = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+  return str.length > limit ? str.slice(0, limit) + "…" : str;
+}
+function trajRowMeta(rec) {
+  const bits = [];
+  if (rec.tokens && rec.tokens.total) bits.push(rec.tokens.total + " tok" + (rec.tokens.estimated ? "≈" : ""));
+  const ms = trajRecordMs(rec);
+  if (ms != null) bits.push(trajFormatMs(ms));
+  return bits.join(" · ");
+}
+function renderTrajectory() {
+  if (!el.trajView || state.viewTab !== "traj") return;
+  const st = state.traj;
+  st.records = trajProject(st.events);
+  markTurnStarts(st.records);
+  if (st.showTimeline) { el.trajTimeline.classList.remove("hidden"); renderTrajTimeline(); }
+  else el.trajTimeline.classList.add("hidden");
+  const query = st.query.trim().toLowerCase();
+  let records = st.records;
+  if (query) records = records.filter(rec => trajRecordText(rec).toLowerCase().indexOf(query) >= 0);
+  if (st.range) records = records.filter(rec => { const t = trajTimeMs(rec); return !isNaN(t) && t >= st.range.start && t <= st.range.end; });
+  let maxMs = 0;
+  records.forEach(rec => { const ms = trajRecordMs(rec); if (ms != null && ms > maxMs) maxMs = ms; });
+  const chunks = [];
+  let lastGroup = null;
+  if (!records.length) chunks.push('<div class="empty-state"><p>暂无轨迹记录</p></div>');
+  const groupCounts = {}, groupTok = {}, groupMs = {};
+  records.forEach(rec => {
+    const k = trajGroupKey(st.view, rec);
+    if (!k) return;
+    groupCounts[k] = (groupCounts[k] || 0) + 1;
+    if (rec.tokens && rec.tokens.total) groupTok[k] = (groupTok[k] || 0) + rec.tokens.total;
+    const ms = trajRecordMs(rec);
+    if (ms != null) groupMs[k] = (groupMs[k] || 0) + ms;
+  });
+  records.forEach(rec => {
+    const groupKey = trajGroupKey(st.view, rec);
+    if (groupKey !== lastGroup) {
+      lastGroup = groupKey;
+      if (groupKey) {
+        const isCollapsed = !!st.collapsed[groupKey];
+        const label = st.view === "turn" ? `第 ${rec.turn} 轮`
+          : (rec.request ? `第 ${rec.turn} 轮 · 请求 #${rec.request}` : `第 ${rec.turn} 轮 · 输入与上下文`);
+        const metaBits = [groupCounts[groupKey] + " 条"];
+        if (groupTok[groupKey]) metaBits.push(groupTok[groupKey] + " tok");
+        if (groupMs[groupKey]) metaBits.push(trajFormatMs(groupMs[groupKey]));
+        chunks.push(`<div class="traj-group${isCollapsed ? " collapsed" : ""}" role="button" tabindex="0" aria-expanded="${isCollapsed ? "false" : "true"}" data-group="${groupKey}"><span class="traj-group-caret">${isCollapsed ? "▸" : "▾"}</span>${escapeHtml(label)}<small>${groupCounts[groupKey] || 0}</small><span class="traj-group-meta">${escapeHtml(metaBits.join(" · "))}</span></div>`);
+      }
+    }
+    if (groupKey && st.collapsed[groupKey]) return;
+    const cls = ["traj-row", "source-" + rec.source];
+    if (rec.id === st.selected) cls.push("selected");
+    if (st.view !== "call" && rec.__turnStart) cls.push("turn-start");
+    const main = rec.source === "tool"
+      ? `<strong>${escapeHtml(rec.name)}</strong><span class="traj-row-preview">${escapeHtml(trajPreview(rec.status === "running" ? JSON.stringify(rec.args) : rec.content, 160))}</span>`
+      : `<span class="traj-row-label">${escapeHtml(rec.label)}${rec.model ? ` <small>${escapeHtml(rec.model)}</small>` : ""}</span><span class="traj-row-preview">${escapeHtml(trajPreview(rec.content, 160))}</span>`;
+    const bar = (st.view === "duration" && st.showTimeline && maxMs > 0) ? (() => {
+      const ms = trajRecordMs(rec);
+      const pct = ms == null ? 0 : Math.max(0.5, (ms / maxMs) * 100);
+      return ms == null ? "" : `<span class="traj-row-bar"><i style="width:${pct.toFixed(2)}%"></i></span>`;
+    })() : "";
+    const statusCls = rec.status === "failed" ? " failed" : (rec.status === "running" ? " running" : "");
+    chunks.push(`<div class="${cls.join(" ")}${statusCls}" role="listitem" tabindex="0" data-id="${rec.id}"><span class="traj-badge source-${rec.source}">${TRAJ_SOURCE_LABEL[rec.source]}</span><span class="traj-row-main">${main}</span><span class="traj-row-meta">${escapeHtml(trajRowMeta(rec))}</span>${bar}</div>`);
+  });
+  el.trajLedger.innerHTML = chunks.join("");
+  renderTrajInspector();
+}
+// 分组键：轮次视图按 turn，调用视图按 turn.request；时长视图不分组
+function trajGroupKey(view, rec) {
+  if (view === "turn") return "t" + rec.turn;
+  if (view === "call") return "c" + rec.turn + "." + rec.request;
+  return null;
+}
+function trajAllGroupKeys(view, records) {
+  const keys = [];
+  records.forEach(rec => { const k = trajGroupKey(view, rec); if (k && keys.indexOf(k) < 0) keys.push(k); });
+  return keys;
+}
+// 轮次边界粗线：投影后按 turn 变化打标
+function markTurnStarts(records) {
+  let last = null;
+  records.forEach(rec => { rec.__turnStart = rec.turn !== last; last = rec.turn; });
+}
+function renderTrajTimeline() {
+  const st = state.traj;
+  const spans = [];
+  st.records.forEach(rec => {
+    if (rec.source === "user") {
+      const t = trajTimeMs(rec);
+      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user"});
+    } else if (rec.kind === "request" && rec.timing && rec.timing.start) {
+      const t = Date.parse(rec.timing.start);
+      if (isNaN(t)) return;
+      const total = rec.timing.total_ms != null ? rec.timing.total_ms : 0;
+      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model"});
+      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft"});
+    } else if (rec.source === "tool" && rec.durationMs != null) {
+      const endT = trajTimeMs(rec);
+      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool"});
+    }
+  });
+  const lanes = [[], [], []];
+  let tMin = Infinity, tMax = -Infinity;
+  spans.forEach(sp => { lanes[sp.lane].push(sp); if (sp.start < tMin) tMin = sp.start; if (sp.end > tMax) tMax = sp.end; });
+  if (!isFinite(tMin)) { el.trajTimeline.innerHTML = '<div class="traj-lanes"><div class="traj-lane"><span class="traj-lane-label">输入</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">模型</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">工具</span><div class="traj-lane-track"></div></div></div>'; st.scale = null; return; }
+  const pad = Math.max((tMax - tMin) * 0.01, 50);
+  tMin -= pad; tMax += pad;
+  st.scale = {min: tMin, max: tMax};
+  const names = ["输入", "模型", "工具"];
+  const laneHtml = lanes.map((list, idx) => {
+    const items = list.map(sp => {
+      const left = ((sp.start - tMin) / (tMax - tMin)) * 100;
+      const width = Math.max(((sp.end - sp.start) / (tMax - tMin)) * 100, 0.35);
+      return `<i class="traj-span ${sp.cls}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%"></i>`;
+    }).join("");
+    return `<div class="traj-lane"><span class="traj-lane-label">${names[idx]}</span><div class="traj-lane-track">${items}</div></div>`;
+  }).join("");
+  const rangeHtml = st.range ? (() => {
+    const left = Math.max(0, ((st.range.start - tMin) / (tMax - tMin)) * 100);
+    const right = Math.min(100, ((st.range.end - tMin) / (tMax - tMin)) * 100);
+    return `<div class="traj-range" style="left:${left.toFixed(3)}%;width:${Math.max(right - left, 0).toFixed(3)}%"></div>`;
+  })() : "";
+  el.trajTimeline.innerHTML = `<div class="traj-lanes">${laneHtml}${rangeHtml}</div>`;
+}
+function trajInspectorRows(rec) {
+  const rows = [];
+  const pos = [];
+  if (rec.turn) pos.push("第 " + rec.turn + " 轮");
+  if (rec.request) pos.push("请求 #" + rec.request);
+  if (rec.step) pos.push("步骤 " + rec.step);
+  const sourceText = rec.source === "assistant" ? ("请求 #" + rec.request + " ›")
+    : rec.source === "tool" ? (rec.name || "工具")
+    : TRAJ_SOURCE_LABEL[rec.source];
+  rows.push(["来源", escapeHtml(sourceText) + (pos.length ? ` <small>${escapeHtml(pos.join(" · "))}</small>` : "")]);
+  rows.push(["状态", rec.status === "completed" ? "已完成" : rec.status === "failed" ? "失败" : "进行中"]);
+  if (rec.tokens) {
+    rows.push(["Token", rec.tokens.total + " tok" + (rec.tokens.estimated ? "（估算）" : "")]);
+    rows.push(["推理", rec.tokens.reasoning + " tok"]);
+    rows.push(["内容", rec.tokens.content + " tok"]);
+  }
+  if (rec.source === "tool") {
+    rows.push(["耗时", trajFormatMs(rec.durationMs)]);
+    rows.push(["参数", escapeHtml(trajPreview(JSON.stringify(rec.args || {}), 120))]);
+  }
+  return rows;
+}
+function renderTrajInspector() {
+  const st = state.traj;
+  const rec = st.records.find(item => item.id === st.selected);
+  if (!rec) { el.trajInspector.classList.add("hidden"); el.trajInspector.innerHTML = ""; return; }
+  el.trajInspector.classList.remove("hidden");
+  const pos = [];
+  if (rec.turn) pos.push("第 " + rec.turn + " 轮");
+  if (rec.request) pos.push("请求 #" + rec.request);
+  if (rec.step) pos.push("步骤 " + rec.step);
+  const tabs = ["overview", "preview", "raw"];
+  const tabLabel = {overview: "概述", preview: "预览", raw: "原始内容"};
+  if (tabs.indexOf(st.inspectorTab) < 0) st.inspectorTab = "overview";
+  let body = "";
+  if (st.inspectorTab === "overview") {
+    const rows = trajInspectorRows(rec);
+    let html = '<div class="traj-insp-grid">' + rows.map(row => `<div class="traj-insp-row"><span>${row[0]}</span><b>${row[1]}</b></div>`).join("") + "</div>";
+    if (rec.kind === "request" && rec.timing) {
+      const t = rec.timing;
+      const timingRows = [
+        ["开始时间", escapeHtml(String(t.start || "—"))],
+        ["总时长", trajFormatMs(t.total_ms)],
+        ["首 token 延迟", trajFormatMs(t.ttft_ms)],
+        ["生成", trajFormatMs(t.gen_ms)],
+        ["吞吐量", t.tok_per_s != null ? t.tok_per_s + " tok/s" : "—"],
+      ];
+      html += '<div class="traj-insp-section">请求计时</div><div class="traj-insp-grid">' + timingRows.map(row => `<div class="traj-insp-row"><span>${row[0]}</span><b>${row[1]}</b></div>`).join("") + "</div>";
+    }
+    if (rec.kind === "request" && rec.toolCalls && rec.toolCalls.length) {
+      html += '<div class="traj-insp-section">工具调用</div><div class="traj-insp-grid">' + rec.toolCalls.map((tc, idx) => `<div class="traj-insp-row"><span>${idx + 1}</span><b>${escapeHtml(tc.name)}</b></div>`).join("") + "</div>";
+    }
+    body = html;
+  } else if (st.inspectorTab === "preview") {
+    body = `<div class="traj-insp-preview">${rec.content ? basicMarkdown(rec.content) : '<p class="traj-empty">（无内容）</p>'}</div>`;
+  } else {
+    body = `<pre class="traj-insp-raw">${escapeHtml(JSON.stringify(rec.raw, null, 2))}</pre>`;
+  }
+  el.trajInspector.innerHTML =
+    `<header class="traj-insp-head"><span class="traj-badge source-${rec.source}">${TRAJ_SOURCE_LABEL[rec.source]}</span><span class="traj-insp-pos">${escapeHtml(pos.join(" · ") || "—")}</span><button class="icon-button" type="button" data-insp-close aria-label="关闭详情">×</button></header>` +
+    `<div class="traj-insp-tabs" role="tablist">${tabs.map(tab => `<button type="button" data-insp-tab="${tab}" class="${tab === st.inspectorTab ? "active" : ""}">${tabLabel[tab]}</button>`).join("")}</div>` +
+    `<div class="traj-insp-body">${body}</div>`;
+}
+async function loadTrajectory() {
+  if (!state.session) return;
+  const st = state.traj;
+  if (st.loading) return;
+  st.loading = true;
+  try {
+    const data = await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/trajectory`);
+    // 服务端先落盘后入队：落盘集 ⊇ 已实时收到集，重置后回放安全
+    st.events = []; st.keys = {}; st.count = {};
+    trajIngest(data.events || []);
+    renderTrajectory();
+  } catch (error) { showToast(error.message); }
+  finally { st.loading = false; }
+}
+function switchViewTab(tab) {
+  if (state.viewTab === tab) return;
+  state.viewTab = tab;
+  const traj = tab === "traj";
+  el.tabChat.classList.toggle("active", !traj);
+  el.tabChat.setAttribute("aria-selected", String(!traj));
+  el.tabTraj.classList.toggle("active", traj);
+  el.tabTraj.setAttribute("aria-selected", String(traj));
+  el.trajView.classList.toggle("hidden", !traj);
+  el.messages.classList.toggle("hidden", traj);
+  el.composer.classList.toggle("hidden", traj);
+  if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
+  else { if (el.phasePanel.innerHTML.trim()) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
+}
+// 时间轴拖拽选区间
+(function bindTrajTimelineDrag() {
+  let drag = null;
+  const timeAt = clientX => {
+    const scale = state.traj.scale;
+    const rect = el.trajTimeline.getBoundingClientRect();
+    if (!scale || !rect.width) return null;
+    const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
+    return scale.min + ratio * (scale.max - scale.min);
+  };
+  el.trajTimeline.addEventListener("mousedown", event => {
+    const t = timeAt(event.clientX);
+    if (t == null) return;
+    drag = {startT: t, startX: event.clientX, moved: false};
+    event.preventDefault();
+  });
+  document.addEventListener("mousemove", event => {
+    if (!drag) return;
+    const t = timeAt(event.clientX);
+    if (t == null) return;
+    if (Math.abs(event.clientX - drag.startX) > 3) drag.moved = true;
+    if (!drag.moved) return;
+    state.traj.range = {start: Math.min(drag.startT, t), end: Math.max(drag.startT, t)};
+    scheduleTrajRender();
+  });
+  document.addEventListener("mouseup", event => {
+    if (!drag) return;
+    if (!drag.moved) { state.traj.range = null; scheduleTrajRender(); }
+    drag = null;
+  });
+  el.trajTimeline.addEventListener("dblclick", () => { state.traj.range = null; scheduleTrajRender(); });
+})();
+el.tabChat.addEventListener("click", () => switchViewTab("chat"));
+el.tabTraj.addEventListener("click", () => switchViewTab("traj"));
+// 工具栏按钮高亮：时长为开关（同时反映条状显示开闭），轮次/调用为分组选中态
+function trajSyncViewButtons() {
+  const st = state.traj;
+  Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), other => {
+    const v = other.getAttribute("data-traj-view");
+    const active = v === "duration" ? (st.view === "duration" && st.showTimeline) : st.view === v;
+    other.classList.toggle("active", active);
+  });
+}
+Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), button => {
+  button.addEventListener("click", () => {
+    const view = button.getAttribute("data-traj-view");
+    const st = state.traj;
+    if (view === "duration") {
+      // 时长是开关：时长视图内再点切换时间轴泳道与行内时长条的显示；其他视图下点击回到时长视图
+      if (st.view === "duration") st.showTimeline = !st.showTimeline;
+      else { st.view = "duration"; st.showTimeline = true; }
+      trajSyncViewButtons();
+      renderTrajectory();
+      return;
+    }
+    if (st.view === view) {
+      // 再点已激活的分组视图按钮：在全部折叠 / 全部展开间切换
+      const keys = trajAllGroupKeys(view, st.records);
+      const allCollapsed = keys.length > 0 && keys.every(key => st.collapsed[key]);
+      keys.forEach(key => { if (allCollapsed) delete st.collapsed[key]; else st.collapsed[key] = true; });
+      renderTrajectory();
+      return;
+    }
+    st.view = view;
+    // 进入分组视图默认全部折叠（每轮/每请求一行摘要）
+    st.collapsed = {};
+    trajAllGroupKeys(view, st.records).forEach(key => { st.collapsed[key] = true; });
+    trajSyncViewButtons();
+    renderTrajectory();
+  });
+});
+el.trajSearch.addEventListener("input", () => { state.traj.query = el.trajSearch.value; renderTrajectory(); });
+el.trajLedger.addEventListener("click", event => {
+  const group = event.target.closest(".traj-group");
+  if (group) {
+    const key = group.getAttribute("data-group");
+    if (state.traj.collapsed[key]) delete state.traj.collapsed[key];
+    else state.traj.collapsed[key] = true;
+    renderTrajectory();
+    return;
+  }
+  const row = event.target.closest(".traj-row");
+  if (!row) return;
+  state.traj.selected = row.getAttribute("data-id");
+  renderTrajectory();
+});
+el.trajInspector.addEventListener("click", event => {
+  if (event.target.closest("[data-insp-close]")) { state.traj.selected = null; renderTrajectory(); return; }
+  const tabBtn = event.target.closest("[data-insp-tab]");
+  if (tabBtn) { state.traj.inspectorTab = tabBtn.getAttribute("data-insp-tab"); renderTrajInspector(); }
+});
+// 点击详情面板与账本行之外的区域收起 inspector；
+// 用捕获阶段判定，避免各处理器重建 innerHTML 后 event.target 脱离文档导致 contains 误判
+document.addEventListener("click", event => {
+  const st = state.traj;
+  if (state.viewTab !== "traj" || st.selected == null) return;
+  const target = event.target;
+  if (!target || !target.closest) return;
+  if (el.trajInspector.contains(target) || target.closest(".traj-row") || target.closest(".traj-group")) return;
+  st.selected = null;
+  const sel = el.trajLedger.querySelector(".traj-row.selected");
+  if (sel) sel.classList.remove("selected");
+  renderTrajInspector();
+}, true);
 
 bootstrap();

@@ -77,6 +77,11 @@ def atomic_write(path: str, data: str):
         raise
 
 
+def _now_ts() -> str:
+    """消息级时间戳（本地时间，毫秒精度），供前端气泡展示。"""
+    return datetime.now().isoformat(timespec="milliseconds")
+
+
 def _append_jsonl(path: str, obj: dict):
     """追加一行 JSON 到 JSONL 文件。每行一个 JSON 对象，用换行符分隔。"""
     dir_ = os.path.dirname(path)
@@ -165,7 +170,7 @@ class Session:
         return self.model_id.split("/", 1)[0] if "/" in self.model_id else ""
 
     def append_user(self, content: str, active_skills=None, attachments=None, display_content: str = ""):
-        message = {"role": "user", "content": content}
+        message = {"role": "user", "content": content, "ts": _now_ts()}
         if display_content:
             message["display_content"] = display_content
         if active_skills:
@@ -184,8 +189,8 @@ class Session:
         # 追加写：只写这一条消息到 JSONL
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
-    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None):
-        message = {"role": "assistant", "content": content}
+    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None, elapsed_ms=None):
+        message = {"role": "assistant", "content": content, "ts": _now_ts()}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         if active_skills:
@@ -198,6 +203,9 @@ class Session:
                 "total": int(usage.get("total", 0)),
                 "estimated": bool(usage.get("estimated", False)),
             }
+        if elapsed_ms is not None:
+            # 本轮（含多轮工具调用）总耗时，供历史会话气泡展示
+            message["elapsed_ms"] = int(elapsed_ms)
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
@@ -214,7 +222,7 @@ class Session:
             }
             for tc in tool_call_events
         ]
-        message = {"role": "assistant", "content": text or "", "tool_calls": tool_calls_stored}
+        message = {"role": "assistant", "content": text or "", "tool_calls": tool_calls_stored, "ts": _now_ts()}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         self.messages.append(message)
@@ -231,12 +239,24 @@ class Session:
                     return
 
     def append_tool_result(self, tool_call_id: str, result: str, tool_name: str = ""):
-        message = {"role": "tool", "tool_call_id": tool_call_id, "content": result}
+        message = {"role": "tool", "tool_call_id": tool_call_id, "content": result, "ts": _now_ts()}
         if tool_name:
             message["tool_name"] = tool_name
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
+
+    def append_trajectory(self, event: dict):
+        """轨迹事件追加写 trajectory.jsonl（append-only 会话日志）。"""
+        record = dict(event)
+        record.setdefault("ts", datetime.now().isoformat(timespec="milliseconds"))
+        _append_jsonl(str(session_dir(self.id) / "trajectory.jsonl"), record)
+
+    def read_trajectory(self) -> list:
+        path = session_dir(self.id) / "trajectory.jsonl"
+        if not path.exists():
+            return []
+        return _read_jsonl(str(path))
 
     def begin_workflow_run(self, run_id: str, steps: list):
         message = {

@@ -78,6 +78,12 @@ _config_lock: Optional[asyncio.Lock] = None
 _session_async_locks = {}
 _pending_approvals = {}
 
+# 需要落盘 trajectory.jsonl 的轨迹事件类型
+_TRAJ_EVENTS = {
+    "traj_system_prompt", "traj_context", "traj_request_start",
+    "traj_request_end", "tool_call", "tool_result",
+}
+
 
 def _runtime_provider_config(provider) -> RuntimeProviderConfig:
     return RuntimeProviderConfig(
@@ -794,6 +800,88 @@ async def get_session(session_id: str):
     }
 
 
+def _safe_json_dict(text) -> dict:
+    try:
+        parsed = json.loads(text or "{}")
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _synthesize_trajectory(session) -> list:
+    """老会话无 trajectory.jsonl 时，从 messages.jsonl 反推近似轨迹事件。
+
+    形状与实时轨迹事件保持一致，前端投影逻辑可统一处理。
+    """
+    events = []
+    turn = 0
+    request = 0
+    for m in session.messages:
+        role = m.get("role")
+        ts = m.get("ts") or ""
+        if role == "user":
+            turn += 1
+            request = 0
+            content = m.get("content", "") or ""
+            events.append({
+                "type": "user", "turn": turn, "ts": ts,
+                "content": content,
+                "display_content": m.get("display_content") or content,
+            })
+        elif role == "assistant":
+            request += 1
+            tool_calls = []
+            for tc in m.get("tool_calls", []) or []:
+                fn = tc.get("function", {}) or {}
+                tool_calls.append({
+                    "id": tc.get("id", ""),
+                    "name": fn.get("name", ""),
+                    "args": _safe_json_dict(fn.get("arguments", "")),
+                })
+            events.append({
+                "type": "traj_request_end",
+                "turn": turn, "request": request, "ts": ts,
+                "status": "completed",
+                "model": "",
+                "usage": m.get("usage") or {},
+                "content": m.get("content", "") or "",
+                "reasoning": m.get("reasoning_content", "") or "",
+                "tool_calls": tool_calls,
+                "timing": None,
+            })
+            for idx, tc in enumerate(tool_calls, 1):
+                events.append({
+                    "type": "tool_call", "ts": ts,
+                    "id": tc["id"], "name": tc["name"], "args": tc["args"],
+                    "turn": turn, "request": request, "step": idx,
+                })
+        elif role == "tool":
+            events.append({
+                "type": "tool_result", "ts": ts,
+                "call_id": m.get("tool_call_id", ""),
+                "name": m.get("tool_name", ""),
+                "result": m.get("content", "") or "",
+                "turn": turn, "request": request,
+            })
+    return events
+
+
+@app.get("/sessions/{session_id}/trajectory")
+async def get_trajectory(session_id: str):
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    with locked_session(session_id):
+        session = load_session(session_id)
+    if session is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    events = session.read_trajectory()
+    if not events:
+        events = _synthesize_trajectory(session)
+    return {"events": events}
+
+
 @app.put("/sessions/{session_id}/rename")
 async def rename_session(session_id: str, body: dict = None):
     body = body or {}
@@ -936,6 +1024,17 @@ async def _run_background_loop(
     bg.started_at = datetime.now().isoformat()
     ledger = TaskLedger(session_id)
 
+    # 轨迹：user 记录先落盘并入队，保证实时视图与 trajectory.jsonl 顺序一致
+    _traj_turn = sum(1 for m in session.messages if m.get("role") == "user") + 1
+    _traj_user = {
+        "type": "user",
+        "turn": _traj_turn,
+        "content": message,
+        "display_content": display_content or message,
+    }
+    session.append_trajectory(_traj_user)
+    await bg.queue.put(dict(_traj_user))
+
     try:
         stored_attachments = []
         if attachments:
@@ -991,6 +1090,10 @@ async def _run_background_loop(
             elif event["type"] == "skill_loaded":
                 logger.info("[skill_loaded] session=%s skill_id=%s", session_id,
                             event.get("skill_id", ""))
+
+            # 轨迹事件先落盘再入队，保证落盘集合 ⊇ 实时收到集合
+            if event["type"] in _TRAJ_EVENTS:
+                session.append_trajectory(event)
 
             # 持久化关键事件
             if event["type"] in {"tool_call", "tool_result", "done"}:

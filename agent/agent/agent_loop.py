@@ -5,6 +5,8 @@ import json
 import logging
 import os
 import re
+import time as _time
+from datetime import datetime
 from pathlib import Path
 from typing import AsyncIterator
 
@@ -264,6 +266,8 @@ async def run_agent_loop(
                 continued_skills.update(previous.get("active_skills", []))
                 break
     session.append_user(user_message, selected_ids, attachments, display_content)
+    # 本轮总耗时起点（含多轮工具调用），done 时回传并落盘供气泡展示
+    _turn_t0 = _time.monotonic()
     loaded_skills = set(selected_ids) | continued_skills
     selected_bodies = []
     for skill_id in selected_ids:
@@ -336,6 +340,9 @@ async def run_agent_loop(
     _fmt_parts.append("</output_format_reminder>")
     system_parts.append("".join(_fmt_parts))
     system_prompt = "\n\n".join(system_parts)
+    # 轨迹：turn 以用户消息序号计（本次消息为第 N 条 user）
+    _traj_turn = sum(1 for m in session.messages if m.get("role") == "user")
+    yield {"type": "traj_system_prompt", "turn": _traj_turn, "content": system_prompt}
     turn = 0
     format_retry = 0
     MAX_FORMAT_RETRIES = 1
@@ -365,7 +372,7 @@ async def run_agent_loop(
         model_messages = []
         for message in compressed_messages:
             clean = {key: value for key, value in message.items()
-                     if key not in {"active_skills", "attachments", "display_content", "usage"}}
+                     if key not in {"active_skills", "attachments", "display_content", "usage", "ts", "elapsed_ms"}}
             docs = message.get("attachments", [])
             if docs and message.get("role") == "user":
                 sections = []
@@ -409,19 +416,22 @@ async def run_agent_loop(
             model_messages.append(clean)
         for reminder in _pending_reminders:
             model_messages.append({"role": "user", "content": reminder})
+            yield {"type": "traj_context", "turn": _traj_turn, "request": turn,
+                   "kind": "reminder", "content": reminder}
         _pending_reminders.clear()
         # 台账快照只进本轮请求，不写回 session.messages——永不累积、免疫压缩
         if ledger is not None:
             _progress_snapshot = ledger.render_task_progress()
             if _progress_snapshot:
                 model_messages.append({"role": "user", "content": _progress_snapshot})
+                yield {"type": "traj_context", "turn": _traj_turn, "request": turn,
+                       "kind": "ledger_snapshot", "content": _progress_snapshot}
 
         text_acc = ""
         reasoning_acc = ""
         tool_calls = []
         usage = {}
         _stop_reason = "stop"   # v4: 接收 provider 返回的 stop_reason
-        import time as _time
         _last_heartbeat = _time.monotonic()
 
         # Send an immediate heartbeat so the Qt client can stop its
@@ -429,6 +439,49 @@ async def run_agent_loop(
         # latency can exceed 30 s, which would otherwise trigger a
         # first-byte timeout on the client side.
         yield {"type": "heartbeat"}
+
+        # 轨迹：请求级计时（turn=request 序号）
+        _req_t0 = _time.monotonic()
+        _req_start_iso = datetime.now().isoformat(timespec="milliseconds")
+        _first_token_at = None
+
+        def _traj_request_end(status):
+            _total_ms = int(round((_time.monotonic() - _req_t0) * 1000))
+            _ttft_ms = (int(round((_first_token_at - _req_t0) * 1000))
+                        if _first_token_at is not None else None)
+            _gen_ms = (int(round((_time.monotonic() - _first_token_at) * 1000))
+                       if _first_token_at is not None else None)
+            _out_tok = int(usage.get("output", 0) or 0)
+            _tok_per_s = round(_out_tok * 1000.0 / _gen_ms, 1) if (_gen_ms and _gen_ms > 0) else None
+            return {
+                "type": "traj_request_end",
+                "turn": _traj_turn,
+                "request": turn,
+                "status": status,
+                "model": call_model_id,
+                "usage": {
+                    "input": int(usage.get("input", 0) or 0),
+                    "output": _out_tok,
+                    "total": int(usage.get("total", 0) or 0),
+                },
+                "content": text_acc,
+                "reasoning": reasoning_acc,
+                "tool_calls": [
+                    {"id": tc.get("id", ""), "name": tc.get("name", ""),
+                     "args": tc.get("args", {})}
+                    for tc in tool_calls
+                ],
+                "timing": {
+                    "start": _req_start_iso,
+                    "total_ms": _total_ms,
+                    "ttft_ms": _ttft_ms,
+                    "gen_ms": _gen_ms,
+                    "tok_per_s": _tok_per_s,
+                },
+            }
+
+        yield {"type": "traj_request_start", "turn": _traj_turn, "request": turn,
+               "model": call_model_id, "start": _req_start_iso}
 
         try:
             external_tools = [
@@ -444,11 +497,15 @@ async def run_agent_loop(
             ):
                 if event["type"] == "text_chunk":
                     text_acc += event["delta"]
+                    if _first_token_at is None:
+                        _first_token_at = _time.monotonic()
                     # 自动模式先缓冲整段文本，校验阶段计划后再发送，避免无效 options 闪现。
                     if not is_structured_continuation and interaction_mode != "auto":
                         yield event
                 elif event["type"] == "reasoning_chunk":   # v4: 透传并保留推理过程
                     reasoning_acc += event.get("delta", "")
+                    if _first_token_at is None:
+                        _first_token_at = _time.monotonic()
                     yield event
                 elif event["type"] == "tool_call":
                     tool_calls.append(event)
@@ -460,6 +517,7 @@ async def run_agent_loop(
                 elif event["type"] == "done":               # v4: 接收 stop_reason
                     _stop_reason = event.get("stop_reason", "stop")
                 elif event["type"] == "error":
+                    yield _traj_request_end("failed")
                     yield event
                     return
 
@@ -471,8 +529,10 @@ async def run_agent_loop(
                     yield {"type": "heartbeat"}
         except Exception as e:
             logger.exception("model stream failed")
+            yield _traj_request_end("failed")
             yield classify_error(e, "LLM stream failed: ")
             return
+        yield _traj_request_end("completed")
 
         # 结构化延续时文本被缓冲未发送，在此一次性补发，避免气泡空白
         if is_structured_continuation and text_acc:
@@ -653,7 +713,7 @@ async def run_agent_loop(
             logger.info("[tool exec] 开始执行 %d 个工具", len(tool_calls))
 
             session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
-            for tc in tool_calls:
+            for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME}
                 # 工具执行日志
@@ -665,8 +725,12 @@ async def run_agent_loop(
                     "name": tc["name"],
                     "args": tc["args"],
                     "internal": internal_tool,
+                    "turn": _traj_turn,
+                    "request": turn,
+                    "step": _step_idx,
                 }
                 _tool_ok = True
+                _tool_t0 = _time.monotonic()
                 try:
                     if tc["name"] == UPDATE_PLAN_TOOL_NAME:
                         # 内置计划工具：不走 MCP、不走审批。写台账 + 发结构化事件
@@ -766,6 +830,10 @@ async def run_agent_loop(
                     "name": tc["name"],
                     "result": result,
                     "internal": internal_tool,
+                    "turn": _traj_turn,
+                    "request": turn,
+                    "step": _step_idx,
+                    "duration_ms": int(round((_time.monotonic() - _tool_t0) * 1000)),
                 }
                 session.append_tool_result(tc["id"], result, tc["name"])
                 # 自动记账：每次工具调用（含 update_plan、失败）都记一条
@@ -855,11 +923,12 @@ async def run_agent_loop(
                     "total": _total_tokens,
                     "estimated": _usage_estimated,
                 }
-            session.append_assistant(text_acc, loaded_skills, reasoning_acc, usage=_usage_record)
+            _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
+            session.append_assistant(text_acc, loaded_skills, reasoning_acc, usage=_usage_record, elapsed_ms=_elapsed_ms)
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
-            logger.info("[done] session=%s tokens=%s", session.id, _total_tokens)
+            logger.info("[done] session=%s tokens=%s elapsed_ms=%s", session.id, _total_tokens, _elapsed_ms)
             yield {
                 "type": "done",
                 "session_id": session.id,
@@ -867,5 +936,6 @@ async def run_agent_loop(
                 "tokens_input": _usage_totals["input"],
                 "tokens_output": _usage_totals["output"],
                 "tokens_estimated": _usage_estimated,
+                "elapsed_ms": _elapsed_ms,
             }
             return
