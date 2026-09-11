@@ -226,7 +226,17 @@ async def webui_redirect():
     return RedirectResponse(url="/ui/")
 
 
-app.mount("/ui", StaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
+class NoStoreStaticFiles(StaticFiles):
+    """WebUI 静态资源：禁用客户端缓存，避免 Qt/浏览器按启发式新鲜度服用旧版前端。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+
+app.mount("/ui", NoStoreStaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
 
 
@@ -1035,6 +1045,7 @@ async def _run_background_loop(
     session.append_trajectory(_traj_user)
     await bg.queue.put(dict(_traj_user))
 
+    _done_sent = False
     try:
         stored_attachments = []
         if attachments:
@@ -1103,6 +1114,8 @@ async def _run_background_loop(
                     save_session(session)
                     update_index(session)
 
+            if event["type"] == "done":
+                _done_sent = True
             await bg.queue.put(event)
     except asyncio.CancelledError:
         bg.cancelled = True
@@ -1114,7 +1127,10 @@ async def _run_background_loop(
         logger.exception("background agent loop failed")
         await bg.queue.put(classify_error(e))
     finally:
-        await bg.queue.put({"type": "done"})
+        # agent_loop 正常收尾时已入队带统计字段的 done；再补一个空 done 会被
+        # SSE 的 drain 阶段发给前端，导致已渲染的用量/用时按钮被清空。
+        if not _done_sent:
+            await bg.queue.put({"type": "done"})
         bg.done_event.set()
 
 

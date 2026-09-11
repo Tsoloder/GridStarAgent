@@ -192,7 +192,7 @@ def test_webui_history_render_matches_live_stream():
     assert "(message.tool_calls || []).forEach" in render
     assert "finishAssistant(" not in render
     assert "finishAssistant(turn)" in close
-    assert "renderTokenUsage(turn" in close
+    assert "setBubbleUsage(turn" in close
     # 实时流里一轮对话只有一个气泡，而持久化会按迭代拆成多条 assistant/tool 消息，
     # 历史渲染必须按轮次合并，否则重开会话后变成"一条消息一个工具调用"
     assert "function renderHistory(messages)" in close
@@ -228,8 +228,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=19" in index
-    assert "app.js?v=24" in index
+    assert "style.css?v=28" in index
+    assert "app.js?v=35" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

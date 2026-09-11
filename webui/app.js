@@ -350,11 +350,49 @@ function createMessage(role, content = "", label = "", attachments = null) {
       + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
       + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
       + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button>'
-      + '<span class="bubble-meta"><span class="bubble-duration"></span><span class="bubble-time"></span></span>';
+      + '<span class="bubble-meta"><span class="bubble-usage-wrap">'
+      + '<button class="bubble-usage" type="button" title="本轮用量明细" hidden>'
+      + '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<ellipse cx="8" cy="3.6" rx="5.4" ry="2"/><path d="M2.6 3.6v8.8c0 1.1 2.4 2 5.4 2s5.4-.9 5.4-2V3.6"/><path d="M2.6 8c0 1.1 2.4 2 5.4 2s5.4-.9 5.4-2"/></svg>'
+      + '<span class="bubble-usage-label"></span></button>'
+      + '<div class="bubble-usage-pop" hidden>'
+      + '<div class="pop-title"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<ellipse cx="8" cy="3.6" rx="5.4" ry="2"/><path d="M2.6 3.6v8.8c0 1.1 2.4 2 5.4 2s5.4-.9 5.4-2V3.6"/><path d="M2.6 8c0 1.1 2.4 2 5.4 2s5.4-.9 5.4-2"/></svg>本轮用量<b class="pop-total"></b></div>'
+      + '<div class="pop-row" data-row="model"><span>提供方 / 模型</span><b></b></div>'
+      + '<div class="pop-row" data-row="cache_hit"><span>缓存命中</span><b></b></div>'
+      + '<div class="pop-row" data-row="uncached_input"><span>未缓存输入</span><b></b></div>'
+      + '<div class="pop-row" data-row="cache_read"><span>缓存读取</span><b></b></div>'
+      + '<div class="pop-row" data-row="output"><span>输出</span><b></b></div>'
+      + '</div></span><span class="bubble-timing-wrap">'
+      + '<button class="bubble-timing" type="button" title="本轮用时明细" hidden>'
+      + '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<circle cx="8" cy="8" r="6.2"/><path d="M8 4.6V8l2.4 1.6"/></svg>'
+      + '<span class="bubble-timing-label"></span></button>'
+      + '<div class="bubble-timing-pop" hidden>'
+      + '<div class="pop-title"><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<circle cx="8" cy="8" r="6.2"/><path d="M8 4.6V8l2.4 1.6"/></svg>本轮用时和速度</div>'
+      + '<div class="pop-row" data-row="total"><span>本轮总用时</span><b></b></div>'
+      + '<div class="pop-row" data-row="think"><span>思考用时</span><b></b></div>'
+      + '<div class="pop-row" data-row="tps"><span>输出速度 (TPS)</span><b></b></div>'
+      + '<div class="pop-row" data-row="ttft"><span>首 token 用时 (TTFT)</span><b></b></div>'
+      + '</div></span><span class="bubble-time"></span></span>';
     bubble.append(footer);
     msg.footer = footer;
-    msg.durationEl = footer.querySelector(".bubble-duration");
+    msg.timingBtn = footer.querySelector(".bubble-timing");
+    msg.timingPop = footer.querySelector(".bubble-timing-pop");
+    msg.usageBtn = footer.querySelector(".bubble-usage");
+    msg.usagePop = footer.querySelector(".bubble-usage-pop");
     msg.timeEl = footer.querySelector(".bubble-time");
+    msg.timingBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleBubblePop(msg.timingPop, msg.usagePop);
+    });
+    msg.timingPop.addEventListener("click", (e) => e.stopPropagation());
+    msg.usageBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleBubblePop(msg.usagePop, msg.timingPop);
+    });
+    msg.usagePop.addEventListener("click", (e) => e.stopPropagation());
     // 实时消息默认填当前时间；历史渲染会用消息自带 ts 覆盖（老会话无 ts 则清空）
     msg.timeEl.textContent = formatClock(new Date());
     footer.querySelector(".bubble-copy").addEventListener("click", () => {
@@ -371,24 +409,83 @@ function createMessage(role, content = "", label = "", attachments = null) {
 function setBubbleTime(msg, value) {
   if (msg && msg.timeEl) msg.timeEl.textContent = formatClock(value);
 }
-function setBubbleDuration(msg, ms) {
-  if (msg && msg.durationEl) msg.durationEl.textContent = formatDuration(ms);
+// 点击气泡外任意位置收起用量/用时明细弹层
+document.addEventListener("click", () => {
+  const open = document.querySelectorAll(".bubble-timing-pop:not([hidden]),.bubble-usage-pop:not([hidden])");
+  for (let i = 0; i < open.length; i++) open[i].hidden = true;
+});
+// 弹层左边缘对齐按钮、显示在按钮上方；两个弹层互斥展开。
+// 消息区 overflow-x:hidden，靠右放不下时整体左移，避免面板被裁掉。
+function toggleBubblePop(pop, other) {
+  if (other) other.hidden = true;
+  pop.hidden = !pop.hidden;
+  pop.style.marginLeft = "";
+  if (pop.hidden) return;
+  const box = el.messages.getBoundingClientRect(), rect = pop.getBoundingClientRect();
+  const overflow = rect.right - (box.right - 6);
+  if (overflow <= 0) return;
+  const room = Math.max(0, rect.left - box.left - 6);
+  pop.style.marginLeft = -Math.ceil(Math.min(overflow, room)) + "px";
+}
+// 中文时长格式，用于用时按钮与明细弹层（如 820毫秒 / 1.4秒 / 2分5秒）
+function formatDurationCn(ms) {
+  if (ms == null || isNaN(ms) || ms < 0) return "";
+  if (ms < 1000) return Math.round(ms) + "毫秒";
+  if (ms < 60000) return (ms / 1000).toFixed(1) + "秒";
+  const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
+  return m + "分" + s + "秒";
+}
+function setBubbleTiming(msg, info) {
+  if (!msg || !msg.timingBtn) return;
+  const t = info || {};
+  if (t.elapsed == null) { msg.timingBtn.hidden = true; return; }
+  msg.timingBtn.hidden = false;
+  msg.timingBtn.querySelector(".bubble-timing-label").textContent = "用时 " + formatDurationCn(t.elapsed);
+  const rows = {
+    total: formatDurationCn(t.elapsed),
+    think: formatDurationCn(t.think),
+    tps: t.tps == null ? "" : t.tps + " tok/s",
+    ttft: formatDurationCn(t.ttft),
+  };
+  Object.keys(rows).forEach(key => {
+    const row = msg.timingPop.querySelector('[data-row="' + key + '"]');
+    if (!row) return;
+    row.hidden = !rows[key];
+    row.querySelector("b").textContent = rows[key];
+  });
 }
 function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
-function renderTokenUsage(message, event) {
-  if (!message) return;
-  const total = event.tokens || 0, input = event.tokens_input || 0, output = event.tokens_output || 0;
-  if (!total && !input && !output) return;
-  let usage = message.node.querySelector(".token-usage");
-  if (!usage) {
-    usage = document.createElement("div");
-    usage.className = "token-usage";
-    // 保持在底部操作栏上方
-    if (message.footer) message.bubble.insertBefore(usage, message.footer);
-    else message.bubble.append(usage);
-  }
-  // 供应商没回传 usage 时后端会给出本地估算值，用 ≈ 区分实测与估算。
-  usage.textContent = `${event.tokens_estimated ? "≈ " : ""}tokens ${total} · input ${input} · output ${output}`;
+// 千分位整数，用于用量明细
+function formatInt(n) {
+  if (n == null || isNaN(n)) return "";
+  return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+// 用量收进底部栏的「用量」按钮：按钮显示总 token，点击弹层看输入/缓存等明细
+function setBubbleUsage(message, usage) {
+  if (!message || !message.usageBtn) return;
+  const u = usage || {};
+  const total = u.total || 0, input = u.input || 0, output = u.output || 0;
+  if (!total && !input && !output) { message.usageBtn.hidden = true; return; }
+  message.usageBtn.hidden = false;
+  // 供应商没回传 usage 时后端给本地估算值，用 ≈ 区分实测与估算
+  const label = (u.estimated ? "≈ " : "") + formatInt(total) + " tokens";
+  message.usageBtn.querySelector(".bubble-usage-label").textContent = label;
+  message.usagePop.querySelector(".pop-total").textContent = label;
+  const cacheRead = u.cache_read || 0;
+  const rows = {
+    model: u.model || "",
+    cache_hit: cacheRead && input ? formatInt(cacheRead / input * 100) + "%" : "",
+    uncached_input: formatInt(Math.max(input - cacheRead, 0)),
+    cache_read: cacheRead ? formatInt(cacheRead) : "",
+    // 输出行对齐 DeepSeek 面板：有推理 token 时追加「（其中推理 N tok）」
+    output: formatInt(output) + (u.reasoning ? " tok（其中推理 " + formatInt(u.reasoning) + " tok）" : ""),
+  };
+  Object.keys(rows).forEach(key => {
+    const row = message.usagePop.querySelector('[data-row="' + key + '"]');
+    if (!row) return;
+    row.hidden = !rows[key];
+    row.querySelector("b").textContent = rows[key];
+  });
 }
 function finishAssistant(message) {
   if (!message || message.finished) return;
@@ -636,6 +733,9 @@ function renderHistoryMessage(message, turn) {
     // 本轮可能由多条 assistant 消息合并，取最后一条的 ts/elapsed_ms（即完成时刻与总耗时）
     if (message.ts) item.ts = message.ts;
     if (message.elapsed_ms != null) item.elapsed_ms = message.elapsed_ms;
+    if (message.think_ms != null) item.think_ms = message.think_ms;
+    if (message.ttft_ms != null) item.ttft_ms = message.ttft_ms;
+    if (message.tps != null) item.tps = message.tps;
     return item;
   }
   if (message.role === "tool") {
@@ -655,10 +755,10 @@ function finishHistoryTurn(turn) {
   if (!turn) return null;
   finishAssistant(turn);
   const usage = turn.usage;
-  if (usage) renderTokenUsage(turn, {tokens: usage.total, tokens_input: usage.input, tokens_output: usage.output, tokens_estimated: !!usage.estimated});
+  if (usage) setBubbleUsage(turn, {total: usage.total, input: usage.input, output: usage.output, estimated: !!usage.estimated, cache_read: usage.cache_read, reasoning: usage.reasoning, model: usage.model});
   // 历史气泡：时间取本轮最后一条消息的 ts（老会话无 ts 则清空默认值），用时取落盘 elapsed_ms
   setBubbleTime(turn, turn.ts || "");
-  if (turn.elapsed_ms != null) setBubbleDuration(turn, turn.elapsed_ms);
+  setBubbleTiming(turn, {elapsed: turn.elapsed_ms, think: turn.think_ms, ttft: turn.ttft_ms, tps: turn.tps});
   return null;
 }
 // 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
@@ -810,9 +910,9 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
       else if (type === "tool_approval_required") renderApproval(event,assistant.node);
       else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
       else if (type === "notice") showToast(event.message || "附件处理提示");
-      else if (type === "token_usage") renderTokenUsage(assistant, event);
+      else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
       else if (type === "error") throw streamFailure(event);
-      else if (type === "done") { finishAssistant(assistant); renderTokenUsage(assistant, event); setBubbleDuration(assistant, event.elapsed_ms); setBubbleTime(assistant, new Date()); }
+      else if (type === "done") { finishAssistant(assistant); setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); }
     });
     finishAssistant(assistant); await refreshSessions();
   } catch (error) {

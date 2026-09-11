@@ -59,9 +59,14 @@ class OpenAIChatAdapter(Adapter):
                     raise stream_failure(data)
                 usage = data.get("usage")
                 if usage:
+                    # 缓存与推理明细在 *_tokens_details 里，供前端用量面板展示
+                    prompt_details = usage.get("prompt_tokens_details") or {}
+                    completion_details = usage.get("completion_tokens_details") or {}
                     yield builder.usage(input_tokens=usage.get("prompt_tokens"),
                                         output_tokens=usage.get("completion_tokens"),
-                                        total_tokens=usage.get("total_tokens"))
+                                        total_tokens=usage.get("total_tokens"),
+                                        cache_read_tokens=prompt_details.get("cached_tokens"),
+                                        reasoning_tokens=completion_details.get("reasoning_tokens"))
                 for choice in data.get("choices", []):
                     delta = choice.get("delta", {})
                     reasoning = delta.get(model.compat.get("reasoning_field", "reasoning_content"))

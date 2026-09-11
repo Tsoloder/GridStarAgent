@@ -87,7 +87,11 @@ async def _stream_runtime(runtime, model_key, messages, system_prompt, tools):
         elif event.type == "usage":
             yield {"type": "usage", "input": event.input_tokens or 0,
                    "output": event.output_tokens or 0,
-                   "total": event.total_tokens or 0}
+                   "total": event.total_tokens or 0,
+                   # 测试替身可能不带缓存/推理字段，用 getattr 兜底
+                   "cache_read": getattr(event, "cache_read_tokens", None) or 0,
+                   "cache_write": getattr(event, "cache_write_tokens", None) or 0,
+                   "reasoning": getattr(event, "reasoning_tokens", None) or 0}
         elif event.type == "done":
             yield {"type": "done", "stop_reason": event.stop_reason}
         elif event.type == "error":
@@ -268,6 +272,10 @@ async def run_agent_loop(
     session.append_user(user_message, selected_ids, attachments, display_content)
     # 本轮总耗时起点（含多轮工具调用），done 时回传并落盘供气泡展示
     _turn_t0 = _time.monotonic()
+    # 模型侧计时：LLM 请求墙钟累计（思考用时）、生成段累计（算 TPS）、首 token 延迟
+    _think_ms_total = 0
+    _gen_ms_total = 0
+    _turn_ttft_ms = None
     loaded_skills = set(selected_ids) | continued_skills
     selected_bodies = []
     for skill_id in selected_ids:
@@ -352,7 +360,8 @@ async def run_agent_loop(
     _pending_reminders = []
     _invalid_tool_reselection_used = False
     # 累计本次消息全流程（多轮工具调用）的 token 用量
-    _usage_totals = {"input": 0, "output": 0, "total": 0}
+    _usage_totals = {"input": 0, "output": 0, "total": 0,
+                     "cache_read": 0, "cache_write": 0, "reasoning": 0}
     # 供应商未回传 usage 时的本地估算（逐轮累计）
     _estimated_totals = {"input": 0, "output": 0}
 
@@ -372,7 +381,8 @@ async def run_agent_loop(
         model_messages = []
         for message in compressed_messages:
             clean = {key: value for key, value in message.items()
-                     if key not in {"active_skills", "attachments", "display_content", "usage", "ts", "elapsed_ms"}}
+                     if key not in {"active_skills", "attachments", "display_content", "usage",
+                                    "ts", "elapsed_ms", "think_ms", "ttft_ms", "tps"}}
             docs = message.get("attachments", [])
             if docs and message.get("role") == "user":
                 sections = []
@@ -446,11 +456,16 @@ async def run_agent_loop(
         _first_token_at = None
 
         def _traj_request_end(status):
+            nonlocal _think_ms_total, _gen_ms_total
             _total_ms = int(round((_time.monotonic() - _req_t0) * 1000))
             _ttft_ms = (int(round((_first_token_at - _req_t0) * 1000))
                         if _first_token_at is not None else None)
             _gen_ms = (int(round((_time.monotonic() - _first_token_at) * 1000))
                        if _first_token_at is not None else None)
+            # 累计到本轮：思考用时 = 各次 LLM 请求墙钟之和；生成段用于算整轮 TPS
+            _think_ms_total += _total_ms
+            if _gen_ms is not None:
+                _gen_ms_total += _gen_ms
             _out_tok = int(usage.get("output", 0) or 0)
             _tok_per_s = round(_out_tok * 1000.0 / _gen_ms, 1) if (_gen_ms and _gen_ms > 0) else None
             return {
@@ -499,6 +514,8 @@ async def run_agent_loop(
                     text_acc += event["delta"]
                     if _first_token_at is None:
                         _first_token_at = _time.monotonic()
+                        if _turn_ttft_ms is None:
+                            _turn_ttft_ms = int(round((_first_token_at - _turn_t0) * 1000))
                     # 自动模式先缓冲整段文本，校验阶段计划后再发送，避免无效 options 闪现。
                     if not is_structured_continuation and interaction_mode != "auto":
                         yield event
@@ -506,6 +523,8 @@ async def run_agent_loop(
                     reasoning_acc += event.get("delta", "")
                     if _first_token_at is None:
                         _first_token_at = _time.monotonic()
+                        if _turn_ttft_ms is None:
+                            _turn_ttft_ms = int(round((_first_token_at - _turn_t0) * 1000))
                     yield event
                 elif event["type"] == "tool_call":
                     tool_calls.append(event)
@@ -514,6 +533,9 @@ async def run_agent_loop(
                     _usage_totals["input"] += event.get("input", 0)
                     _usage_totals["output"] += event.get("output", 0)
                     _usage_totals["total"] += event.get("total", 0)
+                    _usage_totals["cache_read"] += event.get("cache_read", 0)
+                    _usage_totals["cache_write"] += event.get("cache_write", 0)
+                    _usage_totals["reasoning"] += event.get("reasoning", 0)
                 elif event["type"] == "done":               # v4: 接收 stop_reason
                     _stop_reason = event.get("stop_reason", "stop")
                 elif event["type"] == "error":
@@ -922,13 +944,23 @@ async def run_agent_loop(
                     "output": _usage_totals["output"],
                     "total": _total_tokens,
                     "estimated": _usage_estimated,
+                    "cache_read": _usage_totals["cache_read"],
+                    "cache_write": _usage_totals["cache_write"],
+                    "reasoning": _usage_totals["reasoning"],
+                    "model": call_model_id,
                 }
             _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
-            session.append_assistant(text_acc, loaded_skills, reasoning_acc, usage=_usage_record, elapsed_ms=_elapsed_ms)
+            _tps = round(_usage_totals["output"] * 1000.0 / _gen_ms_total, 1) if _gen_ms_total > 0 else None
+            session.append_assistant(
+                text_acc, loaded_skills, reasoning_acc, usage=_usage_record,
+                elapsed_ms=_elapsed_ms, think_ms=_think_ms_total,
+                ttft_ms=_turn_ttft_ms, tps=_tps,
+            )
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
-            logger.info("[done] session=%s tokens=%s elapsed_ms=%s", session.id, _total_tokens, _elapsed_ms)
+            logger.info("[done] session=%s tokens=%s elapsed_ms=%s think_ms=%s ttft_ms=%s tps=%s",
+                        session.id, _total_tokens, _elapsed_ms, _think_ms_total, _turn_ttft_ms, _tps)
             yield {
                 "type": "done",
                 "session_id": session.id,
@@ -936,6 +968,13 @@ async def run_agent_loop(
                 "tokens_input": _usage_totals["input"],
                 "tokens_output": _usage_totals["output"],
                 "tokens_estimated": _usage_estimated,
+                "cache_read_tokens": _usage_totals["cache_read"],
+                "cache_write_tokens": _usage_totals["cache_write"],
+                "reasoning_tokens": _usage_totals["reasoning"],
+                "model": call_model_id,
                 "elapsed_ms": _elapsed_ms,
+                "think_ms": _think_ms_total,
+                "ttft_ms": _turn_ttft_ms,
+                "tps": _tps,
             }
             return

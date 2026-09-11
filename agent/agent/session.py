@@ -189,7 +189,8 @@ class Session:
         # 追加写：只写这一条消息到 JSONL
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
-    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None, elapsed_ms=None):
+    def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None,
+                         elapsed_ms=None, think_ms=None, ttft_ms=None, tps=None):
         message = {"role": "assistant", "content": content, "ts": _now_ts()}
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
@@ -206,6 +207,15 @@ class Session:
         if elapsed_ms is not None:
             # 本轮（含多轮工具调用）总耗时，供历史会话气泡展示
             message["elapsed_ms"] = int(elapsed_ms)
+        if think_ms is not None:
+            # 模型思考用时（各次 LLM 请求墙钟之和）
+            message["think_ms"] = int(think_ms)
+        if ttft_ms is not None:
+            # 首 token 延迟（本轮起点到首个输出 token）
+            message["ttft_ms"] = int(ttft_ms)
+        if tps is not None:
+            # 整轮输出速度 tok/s
+            message["tps"] = float(tps)
         self.messages.append(message)
         self.updated_at = datetime.now().isoformat()
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)

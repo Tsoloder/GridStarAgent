@@ -271,7 +271,8 @@ def test_background_fallback_keeps_error_classification(monkeypatch):
 
     monkeypatch.setattr(server, "run_agent_loop", exploding_loop)
     monkeypatch.setattr(server, "load_session",
-                        lambda _: SimpleNamespace(model_id="test/test-model", messages=[]))
+                        lambda _: SimpleNamespace(model_id="test/test-model", messages=[],
+                                                  append_trajectory=lambda *a, **k: None))
     monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
 
     async def main():
@@ -282,9 +283,52 @@ def test_background_fallback_keeps_error_classification(monkeypatch):
         return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
 
     queued = asyncio.run(main())
-    failure = queued[0]
+    # 队首是轨迹 user 事件，错误事件在其后
+    failure = next(e for e in queued if e["type"] == "error")
 
     assert failure["type"] == "error" and failure["retryable"] is True
     assert failure["category"] == "network"
     assert "retry_after" not in failure
     assert queued[-1] == {"type": "done"}  # 兜底之后仍然补终态事件
+
+
+def test_background_loop_does_not_append_second_done(monkeypatch):
+    """agent_loop 已发带统计的 done 时，finally 不能再补空 done。
+
+    空 done 会被 SSE 的 drain 阶段发给前端，把已渲染的用量/用时按钮清空。
+    """
+    import asyncio
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    done_event = {
+        "type": "done", "session_id": session_id, "tokens": 120,
+        "tokens_input": 100, "tokens_output": 20, "tokens_estimated": False,
+        "cache_read_tokens": 0, "reasoning_tokens": 8, "model": "test/test-model",
+        "elapsed_ms": 1500, "think_ms": 300, "ttft_ms": 400, "tps": 13.3,
+    }
+
+    def finishing_loop(*args, **kwargs):
+        async def gen():
+            yield {"type": "text_chunk", "delta": "ok"}
+            yield dict(done_event)
+        return gen()
+
+    monkeypatch.setattr(server, "run_agent_loop", finishing_loop)
+    monkeypatch.setattr(server, "load_session",
+                        lambda _: SimpleNamespace(model_id="test/test-model", messages=[],
+                                                  append_trajectory=lambda *a, **k: None))
+    monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
+    monkeypatch.setattr(server, "save_session", lambda *a, **k: None)
+    monkeypatch.setattr(server, "update_index", lambda *a, **k: None)
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        await server._run_background_loop(
+            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+        )
+        return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
+
+    queued = asyncio.run(main())
+    assert [e for e in queued if e["type"] == "done"] == [done_event]
