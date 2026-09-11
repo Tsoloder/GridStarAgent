@@ -86,11 +86,17 @@ class MockLLMClient:
 
 
 class MockMcpBridge:
-    """模拟 McpBridge，按 fixture 预设返回工具结果。"""
+    """模拟 McpBridge，按 fixture 预设返回工具结果。
 
-    def __init__(self, results: dict, tool_schemas: dict = None):
+    tool_groups 为空时模拟"旧服务端没有分组信息"，agent_loop 应全量暴露工具。
+    """
+
+    def __init__(self, results: dict, tool_schemas: dict = None,
+                 tool_groups: list = None, default_group_ids: list = None):
         self._results = results
         self._tool_schemas = tool_schemas or {}
+        self._tool_groups = tool_groups or []
+        self._default_group_ids = default_group_ids or []
         self._tools = []
         for name in results:
             tool = MagicMock()
@@ -104,6 +110,18 @@ class MockMcpBridge:
 
     def available_tools(self) -> list:
         return self._tools
+
+    def tool_groups(self) -> list:
+        return self._tool_groups
+
+    def default_group_ids(self) -> list:
+        return self._default_group_ids
+
+    def group_for_tool(self, name: str):
+        for group in self._tool_groups:
+            if name in group.get("tools", []):
+                return group.get("id")
+        return None
 
     def tool_schema(self, name: str) -> dict:
         return self._tool_schemas.get(name, {})
@@ -206,8 +224,8 @@ def mock_llm_client():
 
 @pytest.fixture
 def mock_mcp():
-    def create(results, tool_schemas=None):
-        return MockMcpBridge(results, tool_schemas)
+    def create(results, tool_schemas=None, tool_groups=None, default_group_ids=None):
+        return MockMcpBridge(results, tool_schemas, tool_groups, default_group_ids)
     return create
 
 

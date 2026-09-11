@@ -1,6 +1,7 @@
 """回归测试：验证 agent_loop 产出的事件序列与 fixture 预期匹配。"""
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -378,3 +379,228 @@ async def test_transport_error_escapes_as_retryable():
 
     assert events[-1]["type"] == "error"
     assert events[-1]["retryable"] is True  # 网络抖动不该被说成永久失败
+
+
+# --------------------------------------------------------------------------
+# 工具分组按需暴露（GetToolGroups + enable_tool_group + 直呼自动解锁）
+# --------------------------------------------------------------------------
+
+_REPLY = '已完成。\n```json\n{"options": [{"label": "继续", "value": "go"}]}\n```'
+
+_GROUPS = [
+    {"id": "query", "description": "只读查询", "tools": ["GetPointCount"]},
+    {"id": "project", "description": "工程文件管理", "tools": ["OpenSpdFile"]},
+    {"id": "generation", "description": "网格生成", "tools": ["UGSur"]},
+]
+
+_MCP_RESULTS = {
+    # GetToolGroups 不属于任何分组，必须始终暴露（发现入口）
+    "GetToolGroups": '{"groups": [], "default_enabled": ["query", "project"]}',
+    "GetPointCount": "point_count=42",
+    "OpenSpdFile": "opened",
+    "UGSur": "sur mesh generated",
+}
+
+
+def _text(delta):
+    return SimpleNamespace(type="text_delta", delta=delta)
+
+
+def _tool(call_id, name, args):
+    return SimpleNamespace(type="tool_call_end", call_id=call_id, name=name,
+                           arguments=args, parse_error=None)
+
+
+def _usage():
+    return SimpleNamespace(type="usage", input_tokens=10, output_tokens=5,
+                           total_tokens=15)
+
+
+def _done():
+    return SimpleNamespace(type="done", stop_reason="stop")
+
+
+class _ScriptedRuntime:
+    """按脚本逐轮产出事件，并记录每轮实际暴露给模型的工具名单。"""
+
+    def __init__(self, script):
+        self._script = list(script)
+        self.exposed_tools = []
+        self.system_prompts = []
+        self.messages = []
+
+    def context_window(self, model_key):
+        return 32000
+
+    async def stream(self, model_key, messages, tools=(), system_prompt=""):
+        self.exposed_tools.append([getattr(t, "name", "") for t in tools])
+        self.system_prompts.append(system_prompt)
+        self.messages.append(messages)
+        index = len(self.exposed_tools) - 1
+        for event in (self._script[index] if index < len(self._script) else []):
+            yield event
+
+
+def _grouped_mcp(mock_mcp):
+    return mock_mcp(_MCP_RESULTS, tool_groups=_GROUPS,
+                    default_group_ids=["query", "project"])
+
+
+async def _run_grouped(mcp, runtime, tmp_path, monkeypatch, message="生成面网格"):
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    import agent_loop
+
+    return [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), message, "base", _make_config(), mcp,
+        MockContextManager(), MockSkillRegistry(), model_runtime=runtime,
+    )]
+
+
+@pytest.mark.asyncio
+async def test_tool_groups_default_exposure(tmp_path, monkeypatch, mock_mcp):
+    """默认只暴露 query/project 两组 + 发现入口，其他分组的工具不进 schema。"""
+    runtime = _ScriptedRuntime([[_text(_REPLY), _usage(), _done()]])
+    events = await _run_grouped(_grouped_mcp(mock_mcp), runtime, tmp_path, monkeypatch)
+
+    exposed = runtime.exposed_tools[0]
+    assert "GetToolGroups" in exposed          # 不属于任何分组，始终暴露
+    assert "enable_tool_group" in exposed      # 内部启用工具
+    assert "GetPointCount" in exposed          # query（默认组）
+    assert "OpenSpdFile" in exposed            # project（默认组）
+    assert "UGSur" not in exposed              # generation 未启用
+    assert "read_skill" in exposed             # 技能内部工具不受分组影响
+    # system prompt 里给出固定的工具发现说明（内容不随已启用分组变化，保护前缀缓存）
+    assert "<tool_discovery>" in runtime.system_prompts[0]
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_enable_tool_group_exposes_group_next_turn(tmp_path, monkeypatch, mock_mcp):
+    """enable_tool_group 是内置工具，启用后下一轮起该分组工具可直接调用。"""
+    runtime = _ScriptedRuntime([
+        [_tool("c1", "enable_tool_group", {"group_id": "generation"}), _usage(), _done()],
+        [_tool("c2", "UGSur", {}), _usage(), _done()],
+        [_text(_REPLY), _usage(), _done()],
+    ])
+    events = await _run_grouped(_grouped_mcp(mock_mcp), runtime, tmp_path, monkeypatch)
+
+    call = next(e for e in events if e["type"] == "tool_call")
+    assert call["name"] == "enable_tool_group"
+    assert call.get("internal") is True
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "已启用工具分组 generation" in result["result"]
+    assert "UGSur" in result["result"]
+
+    # 第一轮不含 UGSur，启用后的每一轮都含（本次消息内持续有效）
+    assert "UGSur" not in runtime.exposed_tools[0]
+    assert "UGSur" in runtime.exposed_tools[1]
+    assert "UGSur" in runtime.exposed_tools[2]
+    # 启用后直呼成功执行，没有被判为无效工具名
+    ugsur = next(e for e in events if e["type"] == "tool_result" and e["name"] == "UGSur")
+    assert ugsur["result"] == "sur mesh generated"
+    assert not any(e["type"] == "error" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_enable_unknown_tool_group_points_to_catalog(tmp_path, monkeypatch, mock_mcp):
+    """未知 group_id 不报错，返回可选分组并提示先查 GetToolGroups。"""
+    runtime = _ScriptedRuntime([
+        [_tool("c1", "enable_tool_group", {"group_id": "nope"}), _usage(), _done()],
+        [_text(_REPLY), _usage(), _done()],
+    ])
+    events = await _run_grouped(_grouped_mcp(mock_mcp), runtime, tmp_path, monkeypatch)
+
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert "未知分组 id" in result["result"]
+    assert "GetToolGroups" in result["result"]
+    assert "generation" in result["result"]
+    # 未启用的分组仍然不暴露
+    assert "UGSur" not in runtime.exposed_tools[-1]
+
+
+@pytest.mark.asyncio
+async def test_direct_call_of_hidden_tool_auto_unlocks_group(tmp_path, monkeypatch, mock_mcp):
+    """模型不查目录直接直呼未暴露工具：自动启用其分组并放行执行。"""
+    runtime = _ScriptedRuntime([
+        [_tool("c1", "UGSur", {}), _usage(), _done()],
+        [_text(_REPLY), _usage(), _done()],
+    ])
+    events = await _run_grouped(_grouped_mcp(mock_mcp), runtime, tmp_path, monkeypatch)
+
+    result = next(e for e in events if e["type"] == "tool_result")
+    assert result["name"] == "UGSur"
+    assert result["result"] == "sur mesh generated"
+    assert not any(e["type"] == "error" for e in events)
+    # 没有触发"无效工具名"重选提醒
+    assert "invalid_tool_name_reminder" not in str(runtime.messages[-1])
+    # 解锁的分组在后续请求里保持暴露
+    assert "UGSur" in runtime.exposed_tools[1]
+
+
+@pytest.mark.asyncio
+async def test_no_group_info_falls_back_to_full_exposure(tmp_path, monkeypatch, mock_mcp):
+    """旧服务端没有分组信息时全量暴露，且不注入 enable_tool_group / 说明块。"""
+    runtime = _ScriptedRuntime([[_text(_REPLY), _usage(), _done()]])
+    events = await _run_grouped(mock_mcp(dict(_MCP_RESULTS)), runtime, tmp_path, monkeypatch)
+
+    exposed = runtime.exposed_tools[0]
+    assert "UGSur" in exposed
+    assert "GetPointCount" in exposed
+    assert "enable_tool_group" not in exposed
+    assert "<tool_discovery>" not in runtime.system_prompts[0]
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_bridge_caches_tool_groups_from_server():
+    """bridge 缓存服务端分组目录，并剔除目录里实际未注册的名字。"""
+    import json as _json
+    from mcp_bridge import McpBridge
+
+    bridge = McpBridge("python server.py")
+    tools = [SimpleNamespace(name=n)
+             for n in ("GetToolGroups", "GetPointCount", "UGSur")]
+
+    async def fake_call(name, args):
+        assert name == "GetToolGroups"
+        return _json.dumps({
+            "groups": [
+                {"id": "query", "description": "只读查询",
+                 "tools": ["GetPointCount", "GhostTool"]},
+                {"id": "generation", "description": "网格生成", "tools": ["UGSur"]},
+            ],
+            "default_enabled": ["query", "nope"],
+        })
+
+    bridge._call_tool_once = fake_call
+    await bridge._load_tool_groups(tools)
+
+    assert [g["id"] for g in bridge.tool_groups()] == ["query", "generation"]
+    assert bridge.tool_groups()[0]["tools"] == ["GetPointCount"]  # GhostTool 未注册
+    assert bridge.default_group_ids() == ["query"]                # nope 不存在
+    assert bridge.group_for_tool("UGSur") == "generation"
+    assert bridge.group_for_tool("GetToolGroups") is None
+
+
+@pytest.mark.asyncio
+async def test_bridge_without_group_info_stays_empty():
+    """旧服务端没有 GetToolGroups 或拉取失败时，分组信息为空（调用方全量暴露）。"""
+    from mcp_bridge import McpBridge
+
+    bridge = McpBridge("python server.py")
+
+    async def boom(name, args):
+        raise RuntimeError("server has no GetToolGroups")
+
+    bridge._call_tool_once = boom
+    await bridge._load_tool_groups([SimpleNamespace(name="UGSur")])
+    assert bridge.tool_groups() == []
+    assert bridge.default_group_ids() == []
+
+    await bridge._load_tool_groups([SimpleNamespace(name="GetToolGroups"),
+                                    SimpleNamespace(name="UGSur")])
+    assert bridge.tool_groups() == []
+    assert bridge.group_for_tool("UGSur") is None
+

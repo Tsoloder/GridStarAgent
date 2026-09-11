@@ -195,8 +195,54 @@ UPDATE_PLAN_TOOL = RuntimeTool(
     },
 )
 
+# 工具分组按需暴露：服务端无分组信息（旧版本）时使用的兜底默认分组
+_FALLBACK_DEFAULT_GROUP_IDS = ("query", "project")
+
+ENABLE_TOOL_GROUP_NAME = "enable_tool_group"
+
+ENABLE_TOOL_GROUP_TOOL = RuntimeTool(
+    name=ENABLE_TOOL_GROUP_NAME,
+    description=(
+        "启用一个 GridStar 工具分组，使该分组内的工具在后续请求中可直接调用。"
+        "默认只暴露 query（只读查询）与 project（工程文件管理）两组的工具；"
+        "需要 CAD 处理、网格编辑、网格生成、边界条件、质量检查等能力时，"
+        "先调用 GetToolGroups 查看分组目录，再用本工具按 group_id 启用对应分组，"
+        "启用后即可直接调用该分组内的工具。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "group_id": {
+                "type": "string",
+                "description": "分组 id，取自 GetToolGroups 返回的 groups[].id",
+            },
+        },
+        "required": ["group_id"],
+    },
+)
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
-_NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill", UPDATE_PLAN_TOOL_NAME}
+_NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
+                   UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME}
+
+
+def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
+                          loaded_skills, skill_registry) -> list:
+    """按技能白名单与已启用的工具分组过滤本轮要暴露给模型的工具。
+
+    exposed_group_ids 为 None 表示服务端没有分组信息（旧版本），此时全量暴露；
+    不属于任何分组的工具（如 GetToolGroups 本身）始终暴露。
+    """
+    exposed = []
+    for tool in all_tools:
+        if not _tool_allowed_by_loaded_skills(tool.name, loaded_skills, skill_registry):
+            continue
+        if exposed_group_ids is not None:
+            group_id = group_index.get(tool.name)
+            if group_id is not None and group_id not in exposed_group_ids:
+                continue
+        exposed.append(tool)
+    return exposed
 
 
 def _only_readonly_calls(tool_calls) -> bool:
@@ -330,6 +376,19 @@ async def run_agent_loop(
         system_parts.append(
             memory_catalog + "\n仅把这些已确认参数作为默认建议；当前用户明确给出的参数优先。"
         )
+    # 工具发现机制说明：内容固定（不随已启用分组变化），避免破坏 system 前缀缓存
+    if hasattr(mcp, "tool_groups") and mcp.tool_groups():
+        system_parts.append(
+            "<tool_discovery>\n"
+            "GridStar 工具按分组按需暴露，默认只启用 query（只读查询）与 project（工程文件管理）。\n"
+            "需要其他能力（CAD 处理、网格编辑、网格生成、边界条件、质量检查、高级批处理）时：\n"
+            "1. 调用 GetToolGroups 获取分组目录（每组含 id / 用途说明 / 工具名列表）；\n"
+            "2. 调用 enable_tool_group 传入 group_id 启用当前阶段需要的分组；\n"
+            "3. 启用后直接调用该分组内的工具。\n"
+            "只启用当前阶段真正需要的分组，不要一次性启用全部分组。\n"
+            "若直接调用了未启用分组里的工具名，系统会自动启用该分组并放行执行，无需重试。\n"
+            "</tool_discovery>"
+        )
     _fmt_parts = [
         "<output_format_reminder>\n",
         "重要：每次回复末尾必须包含结构化 JSON 块（用 ```json 代码块包裹），禁止用 Markdown 表格或列表替代。\n",
@@ -372,6 +431,9 @@ async def run_agent_loop(
     _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
+    # 已启用的工具分组：本次用户消息内跨请求累积；换消息后重置，
+    # 由"直呼自动解锁"兜底，避免模型重复启用。
+    enabled_tool_groups = set()
     # 累计本次消息全流程（多轮工具调用）的 token 用量
     _usage_totals = {"input": 0, "output": 0, "total": 0,
                      "cache_read": 0, "cache_write": 0, "reasoning": 0}
@@ -512,11 +574,36 @@ async def run_agent_loop(
                "model": call_model_id, "start": _req_start_iso}
 
         try:
-            external_tools = [
-                tool for tool in mcp.available_tools()
-                if _tool_allowed_by_loaded_skills(tool.name, loaded_skills, skill_registry)
-            ]
+            # 工具分组按需暴露：每轮重算分组索引，只把默认分组 + 已启用分组的
+            # 工具 schema 发给模型，避免 100+ 工具 schema 每轮全额重传。
+            all_external_tools = mcp.available_tools()
+            tool_groups = mcp.tool_groups() if hasattr(mcp, "tool_groups") else []
+            group_index = {}
+            group_tools = {}
+            for group in tool_groups or []:
+                group_id = group.get("id") if isinstance(group, dict) else None
+                if not group_id:
+                    continue
+                names = [n for n in group.get("tools", []) if isinstance(n, str)]
+                group_tools[group_id] = names
+                for tool_name in names:
+                    group_index[tool_name] = group_id
+            group_filter_active = bool(group_index)
+            if group_filter_active:
+                default_group_ids = set(
+                    mcp.default_group_ids() if hasattr(mcp, "default_group_ids") else ()
+                ) or set(_FALLBACK_DEFAULT_GROUP_IDS)
+                exposed_group_ids = default_group_ids | enabled_tool_groups
+            else:
+                # 旧服务端没有分组信息：退回全量暴露
+                exposed_group_ids = None
+            external_tools = _filter_exposed_tools(
+                all_external_tools, group_index, exposed_group_ids,
+                loaded_skills, skill_registry,
+            )
             runtime_tools = skill_registry.internal_tools() + [UPDATE_PLAN_TOOL]
+            if group_filter_active:
+                runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
             if model_runtime is None:
                 raise RuntimeError("ModelRuntime is not available")
             async for event in _stream_runtime(
@@ -606,6 +693,32 @@ async def run_agent_loop(
             "tokens_estimated": not bool(_usage_totals["total"] or _usage_totals["input"] or _usage_totals["output"]),
         }
 
+        # 直呼自动解锁：模型可能不查分组目录、直接按名字调用未暴露的工具
+        # （例如照着技能文档调 UGSur）。只要该工具确实存在于服务端目录且未被
+        # 技能策略禁用，就自动启用其所属分组并放行执行，而不是判为无效工具名。
+        if group_filter_active and tool_calls:
+            _exposed_names = {tool.name for tool in external_tools}
+            _unlocked = []
+            for tc in tool_calls:
+                name = tc.get("name")
+                if name in _exposed_names or name not in group_index:
+                    continue
+                if not _tool_allowed_by_loaded_skills(name, loaded_skills, skill_registry):
+                    continue
+                group_id = group_index[name]
+                if group_id in exposed_group_ids:
+                    continue
+                exposed_group_ids.add(group_id)
+                enabled_tool_groups.add(group_id)
+                _unlocked.append((group_id, name))
+            if _unlocked:
+                external_tools = _filter_exposed_tools(
+                    all_external_tools, group_index, exposed_group_ids,
+                    loaded_skills, skill_registry,
+                )
+                for group_id, name in _unlocked:
+                    logger.info("[tool group] 直呼自动解锁 group=%s tool=%s", group_id, name)
+
         valid_tool_names = {tool.name for tool in external_tools + runtime_tools}
         invalid_tool_names = [
             str(tc.get("name", "")) for tc in tool_calls
@@ -613,7 +726,11 @@ async def run_agent_loop(
         ]
         if invalid_tool_names:
             invalid_name = invalid_tool_names[0]
-            suggestions = _tool_name_suggestions(invalid_name, valid_tool_names)
+            # 候选取自服务端全部工具（含未暴露分组），模型改对后由直呼自动解锁放行
+            _catalog_names = valid_tool_names | {
+                getattr(tool, "name", "") for tool in all_external_tools
+            }
+            suggestions = _tool_name_suggestions(invalid_name, _catalog_names)
             suggestion_text = "、".join(suggestions) if suggestions else "无"
             if _invalid_tool_reselection_used:
                 logger.warning("[invalid tool] persistent invalid name=%s", invalid_name)
@@ -752,7 +869,7 @@ async def run_agent_loop(
             session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
-                                               UPDATE_PLAN_TOOL_NAME}
+                                               UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME}
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -807,6 +924,25 @@ async def run_agent_loop(
                             tc["args"].get("files", {}),
                             bool(tc["args"].get("overwrite", False)),
                         )
+                    elif tc["name"] == ENABLE_TOOL_GROUP_NAME:
+                        # 内置分组启用工具：不走 MCP、不走审批，只改本轮暴露范围
+                        group_id = str(tc["args"].get("group_id", "")).strip().lower()
+                        if not group_filter_active:
+                            result = "当前服务端未提供工具分组信息，全部工具已直接可用，无需启用。"
+                        elif group_id in group_tools:
+                            enabled_tool_groups.add(group_id)
+                            result = "已启用工具分组 %s，共 %d 个工具，可直接调用：%s" % (
+                                group_id, len(group_tools[group_id]),
+                                "、".join(group_tools[group_id]),
+                            )
+                            logger.info("[tool group] 启用分组 %s（%d 个工具）",
+                                        group_id, len(group_tools[group_id]))
+                        else:
+                            result = (
+                                "未知分组 id：%s。请先调用 GetToolGroups 获取分组目录，"
+                                "可选分组：%s。" % (group_id or "(空)",
+                                                   "、".join(sorted(group_tools)))
+                            )
                     else:
                         if not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
                             result = "Tool blocked by active Skill policy: %s" % tc["name"]

@@ -114,8 +114,10 @@ class ContextManager:
     _PRESERVE_TOOL_NAMES = {"read_skill", "read_skill_resource"}
 
     # 单条 tool result 的最大字节数,超过此值才触发 head+tail 截断。
-    # 参考 openhanako compaction-guard-ext L1 (32KB ≈ 8K token)。
-    _MAX_TOOL_RESULT_BYTES = 32 * 1024
+    # 与 LARGE_RESULT_CHARS 形成两级:超大结果执行当场就落盘只留路径,
+    # 中等长度(8KB ~ 30000 字符)的旧结果在变陈旧后截断为头尾各 40%,
+    # 避免网格查询结果在历史里被每轮全额重传。
+    _MAX_TOOL_RESULT_BYTES = 8 * 1024
 
     @staticmethod
     def _truncate_head_tail(text: str, max_bytes: int = None) -> str:
