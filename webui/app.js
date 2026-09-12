@@ -110,6 +110,18 @@ async function request(path, options = {}) {
 }
 function modelKey(item) { return item.key || (String(item.model_id || item.id || "").includes("/") ? String(item.model_id || item.id) : `${item.provider}/${item.model_id || item.id}`); }
 function modelName(item) { return item.name || item.display_name || item.model_id || item.id || modelKey(item); }
+// 用量明细的「提供方 / 模型」：后端回传的是 provider ID（如 custom），这里换成用户配置的供应商名称
+function usageModelLabel(key) {
+  const raw = String(key || "").trim();
+  if (!raw) return "";
+  const slash = raw.indexOf("/");
+  const providerId = slash > 0 ? raw.slice(0, slash) : "";
+  const modelId = slash > 0 ? raw.slice(slash + 1) : raw;
+  if (!providerId) return modelId;
+  const hit = state.models.find(item => item.provider === providerId);
+  const providerName = (hit && hit.provider_name) || providerId;
+  return `${providerName} / ${modelId}`;
+}
 function visibleModels() { return state.models.filter(item => item.enabled !== false && item.provider_enabled !== false); }
 function renderModelList() {
   const selected = el.model.value; el.modelListbox.innerHTML = "";
@@ -473,7 +485,7 @@ function setBubbleUsage(message, usage) {
   message.usagePop.querySelector(".pop-total").textContent = label;
   const cacheRead = u.cache_read || 0;
   const rows = {
-    model: u.model || "",
+    model: usageModelLabel(u.model),
     cache_hit: cacheRead && input ? formatInt(cacheRead / input * 100) + "%" : "",
     uncached_input: formatInt(Math.max(input - cacheRead, 0)),
     cache_read: cacheRead ? formatInt(cacheRead) : "",
