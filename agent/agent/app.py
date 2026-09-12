@@ -615,6 +615,10 @@ async def chat_stream(body: dict):
                         bg.cancelled = False
                         bg.started_at = None
                         bg.last_message = turn_marker
+                        bg.last_display = display_content or message
+                        bg.history = []
+                        bg.seq = 0
+                        bg.turn_msg_count = None
                     else:
                         # SSE 重连 — 回放最后一条 assistant 消息
                         session = load_session(session_id)
@@ -627,8 +631,12 @@ async def chat_stream(body: dict):
                         yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
                         return
                 else:
-                    # task 为 None（首次请求），记录消息
+                    # task 为 None（首次请求）或已被取消 — 记录消息并重置事件存档
                     bg.last_message = turn_marker
+                    bg.last_display = display_content or message
+                    bg.history = []
+                    bg.seq = 0
+                    bg.turn_msg_count = None
 
                 # 启动新的后台 task
                 async with _session_async_lock(session_id):
@@ -641,19 +649,44 @@ async def chat_stream(body: dict):
                         )
                     )
 
+            # 重连回放：先把断开前已产生的事件整体补发给本订阅者，
+            # last_sent 记录已发送的最大 _seq，下方实时消费据此去重
+            last_sent = 0
+            for event in list(bg.history):
+                seq = event.get("_seq", 0)
+                if seq <= last_sent:
+                    continue
+                last_sent = seq
+                payload = _sse_payload(event)
+                yield f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                if payload["type"] == "done":
+                    return
+
             # 消费 queue 事件直到完成
             while not bg.done_event.is_set() or not bg.queue.empty():
                 try:
                     event = await asyncio.wait_for(bg.queue.get(), timeout=0.5)
-                    yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-                    if event["type"] == "done":
+                    seq = event.get("_seq", 0)
+                    if seq and seq <= last_sent:
+                        continue  # 回放阶段已发过，跳过
+                    if seq:
+                        last_sent = seq
+                    payload = _sse_payload(event)
+                    yield f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                    if payload["type"] == "done":
                         break
                 except asyncio.TimeoutError:
                     continue
 
             # drain 剩余事件
             async for event in _drain_queue(bg):
-                yield f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+                seq = event.get("_seq", 0)
+                if seq and seq <= last_sent:
+                    continue
+                if seq:
+                    last_sent = seq
+                payload = _sse_payload(event)
+                yield f"event: {payload['type']}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         except asyncio.CancelledError:
             # 只断开 SSE 连接，不 cancel 后台 task
@@ -773,7 +806,18 @@ async def workflow_stream(body: dict):
 
 @app.get("/sessions")
 async def get_sessions(query: str = "", archived: bool = False):
-    return {"sessions": list_sessions(query=query, archived=archived)}
+    sessions = list_sessions(query=query, archived=archived)
+    # active: 后台 agent_loop 仍在运行的会话（刷新页面后前端据此在列表标出"进行中"）
+    # waiting: 有工具审批挂起的会话（刷新页面后前端据此在列表标出"待确认"）
+    for item in sessions:
+        sid = item.get("id", "")
+        bg = _background_sessions.get(sid)
+        item["active"] = bool(
+            bg and bg.task is not None and not bg.task.done()
+            and not bg.done_event.is_set()
+        )
+        item["waiting"] = any(key.startswith(sid + ":") for key in _pending_approvals)
+    return {"sessions": sessions}
 
 
 @app.post("/sessions")
@@ -892,6 +936,50 @@ async def get_trajectory(session_id: str):
     return {"events": events}
 
 
+@app.get("/sessions/{session_id}/background")
+async def get_background_status(session_id: str):
+    """查询会话的后台任务状态。
+
+    前端切换会话/刷新页面后据此判断是否需要重连 SSE：
+    - active: agent_loop 是否仍在后台运行
+    - last_message: 本轮消息标识（重连 POST 原样带回，避免被误判为新消息）
+    - display_content: 本轮用户消息展示文本，供前端重建用户气泡
+    - turn_msg_count: 本轮开始前的历史消息条数，供前端裁剪服务端历史
+    """
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    bg = _background_sessions.get(session_id)
+    active = bool(
+        bg and bg.task is not None and not bg.task.done()
+        and not bg.done_event.is_set()
+    )
+    return {
+        "active": active,
+        "last_message": bg.last_message if bg else None,
+        "display_content": bg.last_display if bg else None,
+        "turn_msg_count": bg.turn_msg_count if bg else None,
+    }
+
+
+@app.post("/sessions/{session_id}/cancel")
+async def cancel_background(session_id: str):
+    """前端点「停止」时调用：真正取消后台 agent 任务，避免继续消耗 token。
+
+    仅断开 SSE 不会停掉 BackgroundSession 的 asyncio.Task，必须显式 cancel。
+    """
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    bg = _background_sessions.get(session_id)
+    cancelled = bool(bg and bg.task is not None and not bg.task.done())
+    if cancelled:
+        bg.task.cancel()
+    return {"cancelled": cancelled}
+
+
 @app.put("/sessions/{session_id}/rename")
 async def rename_session(session_id: str, body: dict = None):
     body = body or {}
@@ -991,6 +1079,12 @@ class BackgroundSession:
         self.started_at = None
         self.cancelled = False
         self.last_message = None  # 记录上次处理的消息，用于区分 SSE 重连与新消息
+        self.last_display = None  # 本轮用户消息的展示文本，重连时供前端重建气泡
+        self.turn_msg_count = None  # 本轮开始前的历史消息条数，重连时供前端裁剪历史
+        # 本轮全部事件的存档（带 _seq 序号）：SSE 断开重连时整体回放，
+        # 消费端用 _seq 与已发送进度去重，保证不丢不重
+        self.history = []
+        self.seq = 0
 
 
 _background_sessions = {}
@@ -1004,6 +1098,24 @@ def _get_or_create_background(session_id: str) -> BackgroundSession:
         bg = BackgroundSession(session_id)
         _background_sessions[session_id] = bg
     return bg
+
+
+async def _bg_put(bg: BackgroundSession, event: dict):
+    """事件编号、存档 history 再入队。
+
+    重连时 history 整体回放，_seq 供消费端去重；轨迹落盘用原始事件，
+    这里拷贝一份再打号，trajectory.jsonl 不会带上 _seq。
+    """
+    bg.seq += 1
+    stamped = dict(event)
+    stamped["_seq"] = bg.seq
+    bg.history.append(stamped)
+    await bg.queue.put(stamped)
+
+
+def _sse_payload(event: dict) -> dict:
+    """发给前端前剥离内部去重序号 _seq。"""
+    return {k: v for k, v in event.items() if k != "_seq"}
 
 
 async def _run_background_loop(
@@ -1023,7 +1135,7 @@ async def _run_background_loop(
     """
     session = load_session(session_id)
     if session is None:
-        await bg.queue.put({
+        await _bg_put(bg, {
             "type": "error",
             "message": "session not found",
             "retryable": False,
@@ -1031,6 +1143,9 @@ async def _run_background_loop(
         bg.done_event.set()
         return
 
+    # 本轮用户消息尚未落盘，此刻的消息数即本轮之前的历史条数，
+    # 重连时前端据此裁掉服务端历史里本轮已持久化的部分，避免气泡重复
+    bg.turn_msg_count = len(session.messages)
     bg.started_at = datetime.now().isoformat()
     ledger = TaskLedger(session_id)
 
@@ -1043,7 +1158,7 @@ async def _run_background_loop(
         "display_content": display_content or message,
     }
     session.append_trajectory(_traj_user)
-    await bg.queue.put(dict(_traj_user))
+    await _bg_put(bg, _traj_user)
 
     _done_sent = False
     try:
@@ -1054,7 +1169,7 @@ async def _run_background_loop(
             )
             for notice in failures:
                 logger.warning("[attachment] session=%s %s", session_id, notice)
-                await bg.queue.put({"type": "notice", "message": notice})
+                await _bg_put(bg, {"type": "notice", "message": notice})
             stored_attachments = [
                 {
                     "kind": "text", "name": item["name"],
@@ -1070,7 +1185,7 @@ async def _run_background_loop(
                 for item in images
             ]
             if not message and not stored_attachments:
-                await bg.queue.put({
+                await _bg_put(bg, {
                     "type": "error",
                     "message": "附件读取失败，请更换文件后重试",
                     "retryable": False,
@@ -1116,7 +1231,7 @@ async def _run_background_loop(
 
             if event["type"] == "done":
                 _done_sent = True
-            await bg.queue.put(event)
+            await _bg_put(bg, event)
     except asyncio.CancelledError:
         bg.cancelled = True
         with locked_session(session_id):
@@ -1125,12 +1240,12 @@ async def _run_background_loop(
         logger.info(f"background task cancelled: {session_id}")
     except Exception as e:
         logger.exception("background agent loop failed")
-        await bg.queue.put(classify_error(e))
+        await _bg_put(bg, classify_error(e))
     finally:
         # agent_loop 正常收尾时已入队带统计字段的 done；再补一个空 done 会被
         # SSE 的 drain 阶段发给前端，导致已渲染的用量/用时按钮被清空。
         if not _done_sent:
-            await bg.queue.put({"type": "done"})
+            await _bg_put(bg, {"type": "done"})
         bg.done_event.set()
 
 

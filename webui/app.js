@@ -12,7 +12,12 @@ function createAbortController() {
 }
 const state = {
   sessions: [], session: null, models: [], skills: [], mode: "manual",
-  controller: null, busy: false, assistant: null, workflow: null, configLoaded: false,
+  workflow: null, configLoaded: false,
+  // 流式状态按会话隔离（支持多会话真并发）：
+  // controllers: id → AbortController；streams: id → {hidden:切走后 DOM 已摘下暂存, workflow:工作流流}；
+  // status: id → 徽标状态 running|done|stopped|error（done 常驻，该会话下次发消息时刷新）；
+  // stashed: 切走会话时摘下暂存的消息 DOM，切回后原样挂回继续实时更新
+  controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
   modelListOpen: false, modelOptionIndex: -1, modelSearch: "",
   attachments: [], uploading: 0,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
@@ -166,8 +171,11 @@ function setConnection(status, label) {
   el.connection.className = `connection ${status}`;
   $("b", el.connection).textContent = label;
 }
-function setBusy(busy) {
-  state.busy = busy;
+function currentId() { return state.session ? state.session.meta.id : null; }
+// 当前会话是否有进行中的流：发送按钮的"停止/发送"形态只跟随当前会话
+function isBusy() { const id = currentId(); return Boolean(id && state.controllers.has(id)); }
+function syncComposer() {
+  const busy = isBusy();
   el.send.classList.toggle("stop", busy);
   el.send.textContent = busy ? "■" : "↑";
   el.send.title = busy ? "停止接收" : "发送";
@@ -176,10 +184,26 @@ function setBusy(busy) {
   el.busyLabel.textContent = busy ? "Agent 正在处理…" : "Enter 发送 · Shift+Enter 换行";
   updateSendState();
 }
+// 点「停止」：断开 SSE 之外还要取消后端任务，否则 agent 会继续跑、继续消耗 token
+function stopSession(id) {
+  const controller = state.controllers.get(id);
+  if (controller) controller.abort();
+  request(`/sessions/${encodeURIComponent(id)}/cancel`, {method:"POST",body:"{}"}).catch(() => {});
+}
+// 会话列表徽标：前端实时状态优先；刷新页面后靠服务端 active 字段兜底
+const STATUS_TEXT = {running:"进行中", done:"已完成", stopped:"已停止", error:"异常", waiting:"待确认"};
+function setStatus(id, status) {
+  if (!id) return;
+  state.status.set(id, status);
+  renderSessions();
+}
+function sessionStatus(session) {
+  return state.status.get(session.id) || (session.waiting ? "waiting" : session.active ? "running" : "");
+}
 
 function updateSendState() {
   const hasPayload = Boolean(el.input.value.trim()) || state.attachments.length > 0;
-  el.send.disabled = !state.busy && (!hasPayload || !state.configLoaded || state.uploading > 0);
+  el.send.disabled = !isBusy() && (!hasPayload || !state.configLoaded || state.uploading > 0);
 }
 
 // --- 附件：拖拽/选择文件 → POST /upload → 芯片列表 → 随消息一起发给大模型 ---
@@ -466,7 +490,11 @@ function setBubbleTiming(msg, info) {
     row.querySelector("b").textContent = rows[key];
   });
 }
-function scrollMessages() { el.messages.scrollTop = el.messages.scrollHeight; }
+let scrollLocked = false;
+function scrollMessages() { if (scrollLocked) return; el.messages.scrollTop = el.messages.scrollHeight; }
+// 会话的流式回复已被切走（DOM 摘下暂存）：内容照常写入暂存节点，但滚动等全局副作用要锁住
+function hiddenFor(id) { const stream = state.streams.get(id); return Boolean(stream && stream.hidden); }
+function backgroundSafe(id, render) { if (!hiddenFor(id)) return render(); scrollLocked = true; try { return render(); } finally { scrollLocked = false; } }
 // 千分位整数，用于用量明细
 function formatInt(n) {
   if (n == null || isNaN(n)) return "";
@@ -505,6 +533,8 @@ function finishAssistant(message) {
   const parsed = structuredBlocks(message.text);
   message.body.innerHTML = basicMarkdown(parsed.visible);
   parsed.found.forEach(data => renderStructured(data, message.node));
+  // 本轮以选项卡片或工具参数面板收尾 → 会话进入「待确认」，等用户点击
+  message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams || (Array.isArray(data.options) && data.options.length)));
   if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".tool-group,.approval-card")) message.node.remove();
   scrollMessages();
 }
@@ -655,7 +685,7 @@ function coerceSchemaValue(raw, type) {
   if (type === "object" || type === "array") { try { return JSON.parse(text); } catch (_) { return text; } }
   return raw;
 }
-function renderApproval(event, parent) {
+function renderApproval(event, parent, sessionId) {
   const card = document.createElement("section"); card.className = "approval-card";
   card.innerHTML = `<div class="card-head"><strong>审批工具 · ${escapeHtml(event.name)}</strong><span class="status">等待操作</span></div>`;
   const args = event.args && typeof event.args === "object" && !Array.isArray(event.args) ? event.args : {};
@@ -697,8 +727,11 @@ function renderApproval(event, parent) {
       } catch (_) { showToast("工具参数不是有效 JSON"); setDisabled(false); return; }
     }
     try {
-      await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/tool-approvals/${encodeURIComponent(event.call_id)}`, {method:"POST",body:JSON.stringify({approved,args})});
+      const sid = sessionId || (state.session && state.session.meta.id);
+      await request(`/sessions/${encodeURIComponent(sid)}/tool-approvals/${encodeURIComponent(event.call_id)}`, {method:"POST",body:JSON.stringify({approved,args})});
       const status = $(".status", card); status.textContent = approved ? "已批准" : "已拒绝"; status.className = `status ${approved ? "succeeded" : "cancelled"}`;
+      // 审批已解决，若该会话的流还在跑，徽标从「待确认」恢复「进行中」
+      if (sid && state.controllers.has(sid)) setStatus(sid, "running");
     } catch (error) { showToast(error.message); setDisabled(false); }
   };
   $(".approve", card).onclick = () => resolve(true); $(".deny", card).onclick = () => resolve(false); parent.append(card); scrollMessages();
@@ -774,6 +807,7 @@ function finishHistoryTurn(turn) {
   return null;
 }
 // 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
+// 返回最后一轮是否停在未应答的选项/参数卡片上（用于恢复「待确认」徽标）
 function renderHistory(messages) {
   let turn = null;
   (messages || []).forEach(message => {
@@ -781,22 +815,55 @@ function renderHistory(messages) {
     turn = finishHistoryTurn(turn); renderHistoryMessage(message, null);
   });
   finishHistoryTurn(turn);
+  return Boolean(turn && turn.awaitingInput);
 }
 function showWelcome() { el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>'; el.welcome = $("#welcome"); }
+// 切离正在流式输出的会话：摘下当前消息 DOM 暂存，回复继续在后台跑，切回时原样挂回
+function stashView(id) {
+  const fragment = document.createDocumentFragment();
+  while (el.messages.firstChild) fragment.append(el.messages.firstChild);
+  state.stashed.set(id, fragment);
+}
+function restoreView(id) {
+  const fragment = state.stashed.get(id);
+  if (!fragment) return false;
+  state.stashed.delete(id); el.messages.append(fragment);
+  const stream = state.streams.get(id);
+  if (stream) stream.hidden = false;
+  return true;
+}
+// 流在后台结束时产生的收尾气泡（已停止/失败）要挂回暂存 DOM，别落在用户正在看的会话里
+function adoptIntoStash(id, message) {
+  if (!message || !hiddenFor(id)) return;
+  const fragment = state.stashed.get(id);
+  if (fragment) fragment.append(message.node);
+}
 async function loadSession(id) {
-  if (state.busy && state.controller) state.controller.abort();
+  // 切离正在流式输出的会话：聊天流摘下 DOM 暂存继续在后台跑；工作流直接写可见 DOM，只能中止
+  const prev = currentId();
+  if (prev && prev !== id) {
+    const stream = state.streams.get(prev);
+    if (stream && !stream.hidden && !stream.workflow) { stashView(prev); stream.hidden = true; }
+    else if (stream && stream.workflow) { const controller = state.controllers.get(prev); if (controller) controller.abort(); }
+  }
   try {
     state.session = await request(`/sessions/${encodeURIComponent(id)}`);
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
     el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null;
-    if (!state.session.messages.length) showWelcome();
-    else renderHistory(state.session.messages);
+    // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
+    if (!restoreView(id)) {
+      if (!state.session.messages.length) showWelcome();
+      // 历史最后一轮停在选项/参数卡片且没有活跃流 → 恢复「待确认」徽标
+      else if (renderHistory(state.session.messages) && !state.controllers.has(id)) setStatus(id, "waiting");
+    }
     if (state.session.plan) renderPhase(state.session.plan);
     state.traj.events = []; state.traj.keys = {}; state.traj.count = {};
     state.traj.records = []; state.traj.selected = null; state.traj.range = null; state.traj.collapsed = {};
     if (state.viewTab === "traj") loadTrajectory();
-    closeSessions(); clearAttachments(); updateSendState(); scrollMessages();
+    closeSessions(); clearAttachments(); syncComposer(); scrollMessages();
+    // 后台任务可能还在跑（刷新页面/切走时流已断开）：异步探测并重连，恢复实时输出与停止按钮
+    maybeReconnect(id);
   } catch (error) { showToast(error.message); }
 }
 function renderSessions() {
@@ -805,7 +872,10 @@ function renderSessions() {
   if (!sessions.length) { el.sessionList.innerHTML = '<div class="empty-state"><p>没有会话</p></div>'; return; }
   sessions.forEach(session => {
     const row = document.createElement("div"); row.className = "session-row";
-    row.innerHTML = `<button class="session-select" type="button"><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(String(session.updated_at || session.created_at || "").slice(0,16).replace("T"," "))}</small></button><div class="session-actions"><button class="rename" type="button" title="重命名">✎</button><button class="clear" type="button" title="清空">⌫</button><button class="danger delete" type="button" title="删除">×</button></div>`;
+    // 状态徽标：进行中/已完成/已停止/异常（已完成常驻，直到该会话再次发消息）
+    const status = sessionStatus(session);
+    const badge = status ? `<i class="session-badge ${status}">${STATUS_TEXT[status]}</i>` : "";
+    row.innerHTML = `<button class="session-select" type="button"><span class="session-text"><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(String(session.updated_at || session.created_at || "").slice(0,16).replace("T"," "))}</small></span>${badge}</button><div class="session-actions"><button class="rename" type="button" title="重命名">✎</button><button class="clear" type="button" title="清空">⌫</button><button class="danger delete" type="button" title="删除">×</button></div>`;
     $(".session-select", row).onclick = () => loadSession(session.id);
     $(".rename", row).onclick = () => renameSession(session);
     $(".clear", row).onclick = () => clearSession(session);
@@ -830,7 +900,7 @@ async function clearSession(session) {
 }
 async function deleteSession(session) {
   if (!(await showDialog({title:"删除会话", message:`将永久删除“${session.title}”，此操作不可撤销。`, confirmText:"删除", danger:true}))) return;
-  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; } await refreshSessions(); closeSessions(); updateSendState(); } catch (error) { showToast(error.message); }
+  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); const controller = state.controllers.get(session.id); if (controller) controller.abort(); state.controllers.delete(session.id); state.streams.delete(session.id); state.stashed.delete(session.id); state.status.delete(session.id); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; } await refreshSessions(); closeSessions(); syncComposer(); } catch (error) { showToast(error.message); }
 }
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
@@ -866,13 +936,14 @@ function renderFailure(error, retry) {
     button.type = "button"; button.className = "action-button"; button.style.marginTop = "10px";
     button.textContent = "重发这条消息";
     button.addEventListener("click", () => {
-      if (state.busy) { showToast("当前还有请求在处理中"); return; }
+      if (isBusy()) { showToast("当前会话还有请求在处理中"); return; }
       button.disabled = true;
       sendMessage(retry.message, retry.display).finally(() => { button.disabled = false; });
     });
     notice.bubble.append(button);
   }
   if (!error.stream) setConnection("offline", "连接异常");
+  return notice;
 }
 async function consumeSse(response, onEvent, controller) {
   if (!response.ok) { let message = `请求失败 (${response.status})`; try { const data = await response.json(); message = data.error || message; } catch (_) {} throw new Error(message); }
@@ -890,8 +961,25 @@ async function consumeSse(response, onEvent, controller) {
     if (done) break;
   }
 }
+// SSE 事件分发：sendMessage 与 reconnectStream 共用，id 为所属会话（可能已被切走），assistant 为本轮回复气泡
+function handleStreamEvent(id, type, event, assistant) {
+  const hidden = hiddenFor(id);
+  if (!hidden && TRAJ_LIVE_TYPES.indexOf(type) >= 0) { trajIngest(event); scheduleTrajRender(); }
+  if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
+  else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
+  else if (type === "plan_updated") { if (!hidden) renderPhase(event.plan); }
+  else if (type === "tool_call") renderToolCall(event,assistant.node);
+  else if (type === "tool_result") renderToolResult(event,assistant.node);
+  else if (type === "tool_approval_required") { renderApproval(event, assistant.node, id); setStatus(id, "waiting"); }
+  else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
+  else if (type === "notice") showToast(event.message || "附件处理提示");
+  else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
+  else if (type === "error") throw streamFailure(event);
+  else if (type === "done") { finishAssistant(assistant); const stream = state.streams.get(id); if (stream && assistant.awaitingInput) stream.awaiting = true; setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); }
+}
 async function sendMessage(rawMessage = null, displayContent = null, retryAttachments = null) {
-  if (state.busy) return;
+  const busyId = currentId();
+  if (busyId && state.controllers.has(busyId)) return;
   const message = rawMessage != null ? rawMessage : el.input.value.trim();
   // 附件随消息一起发给大模型：重发沿用原附件，新消息取芯片条里已上传完成的项
   const sentAttachments = retryAttachments != null ? retryAttachments
@@ -899,49 +987,129 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   if (!message && !sentAttachments.length) return;
   if (retryAttachments == null && state.uploading > 0) { showToast("附件还在上传中，请稍候再发送"); return; }
   if (!state.session) { await createSession(); if (!state.session) return; }
+  // 会话 id 立即锁定：后续任何 await 期间用户切走会话，消息也必须发进原会话
+  const sessionId = state.session.meta.id;
   const shown = displayContent != null ? displayContent : message;
   if (retryAttachments == null) clearAttachments();
   createMessage("user", shown, "", sentAttachments); el.input.value = ""; updateSendState();
   if ((state.session.meta.title || "").trim() === "New Session" && !state.session.messages.length) {
     const title = message.replace(/\s+/g, " ").trim().slice(0, 10);
-    if (title) { try { await request(`/sessions/${encodeURIComponent(state.session.meta.id)}/rename`, {method:"PUT",body:JSON.stringify({title})}); state.session.meta.title = title; el.currentTitle.textContent = title; const entry = state.sessions.find(item => item.id === state.session.meta.id); if (entry) entry.title = title; renderSessions(); } catch (_) {} }
+    // 重命名不阻塞发送（fire-and-forget），避免 await 期间 state.session 已指向别的会话
+    if (title) request(`/sessions/${encodeURIComponent(sessionId)}/rename`, {method:"PUT",body:JSON.stringify({title})}).then(() => {
+      const entry = state.sessions.find(item => item.id === sessionId); if (entry) entry.title = title;
+      if (state.session && state.session.meta.id === sessionId) { state.session.meta.title = title; el.currentTitle.textContent = title; }
+      renderSessions();
+    }).catch(() => {});
   }
   const skill = selectedSkill();
-  const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : ""); state.assistant = assistant;
-  const controller = createAbortController(); state.controller = controller; setBusy(true);
+  const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : "");
+  const controller = createAbortController();
+  state.controllers.set(sessionId, controller);
+  state.streams.set(sessionId, {hidden: false});
+  setStatus(sessionId, "running");
+  syncComposer();
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
-    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
-    await consumeSse(response, async (type, event) => {
-      if (TRAJ_LIVE_TYPES.indexOf(type) >= 0) { trajIngest(event); scheduleTrajRender(); }
-      if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
-      else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
-      else if (type === "plan_updated") renderPhase(event.plan);
-      else if (type === "tool_call") renderToolCall(event,assistant.node);
-      else if (type === "tool_result") renderToolResult(event,assistant.node);
-      else if (type === "tool_approval_required") renderApproval(event,assistant.node);
-      else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
-      else if (type === "notice") showToast(event.message || "附件处理提示");
-      else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
-      else if (type === "error") throw streamFailure(event);
-      else if (type === "done") { finishAssistant(assistant); setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); }
-    });
-    finishAssistant(assistant); await refreshSessions();
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
+    await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)));
+    backgroundSafe(sessionId, () => finishAssistant(assistant));
+    // 回合以选项/参数卡片收尾 → 「待确认」，否则「已完成」
+    const ended = state.streams.get(sessionId);
+    setStatus(sessionId, ended && ended.awaiting ? "waiting" : "done");
+    await refreshSessions();
   } catch (error) {
-    finishAssistant(assistant);
-    if (error.name === "AbortError") createMessage("assistant", "已停止接收当前响应。", "STOPPED");
-    else renderFailure(error, {message, display: shown, attachments: sentAttachments});
-  } finally { if (state.controller === controller) state.controller = null; setBusy(false); }
+    backgroundSafe(sessionId, () => finishAssistant(assistant));
+    const notice = backgroundSafe(sessionId, () => error.name === "AbortError"
+      ? createMessage("assistant", "已停止接收当前响应。", "STOPPED")
+      : renderFailure(error, {message, display: shown, attachments: sentAttachments}));
+    adoptIntoStash(sessionId, notice);
+    // 停止/失败写进会话徽标；停止过的会话不再自动重连，否则切回时又会粘回后台流
+    setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error");
+  } finally {
+    if (state.controllers.get(sessionId) === controller) state.controllers.delete(sessionId);
+    state.streams.delete(sessionId);
+    scrollLocked = false;
+    syncComposer();
+  }
+}
+// 重连后台仍在运行的回复流：后端会把断开前的全部事件回放一遍，
+// 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
+async function reconnectStream(sessionId, info) {
+  const assistant = createMessage("assistant", "", "");
+  const controller = createAbortController();
+  state.controllers.set(sessionId, controller);
+  state.streams.set(sessionId, {hidden: false});
+  setStatus(sessionId, "running");
+  syncComposer();
+  let completed = false, endedHidden = false;
+  try {
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message:info.last_message,interaction_mode:state.mode,model_id:(state.session && state.session.meta.model_id) || el.model.value || "",selected_skills:[]})});
+    await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)), controller);
+    backgroundSafe(sessionId, () => finishAssistant(assistant));
+    completed = true;
+    const ended = state.streams.get(sessionId);
+    setStatus(sessionId, ended && ended.awaiting ? "waiting" : "done");
+  } catch (error) {
+    backgroundSafe(sessionId, () => finishAssistant(assistant));
+    const notice = backgroundSafe(sessionId, () => error.name === "AbortError"
+      ? createMessage("assistant", "已停止接收当前响应。", "STOPPED")
+      : renderFailure(error, null));
+    adoptIntoStash(sessionId, notice);
+    setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error");
+  } finally {
+    endedHidden = hiddenFor(sessionId);
+    if (state.controllers.get(sessionId) === controller) state.controllers.delete(sessionId);
+    state.streams.delete(sessionId);
+    scrollLocked = false;
+    syncComposer();
+  }
+  // 正常收完后用服务端历史重渲染兜底（任务恰好已结束时后端只回放最终文本，
+  // 工具卡片/用量以落盘数据为准）；用户已切走或流被中断时不动当前视图
+  if (completed && !endedHidden && state.session && state.session.meta.id === sessionId) {
+    try { await refreshSessions(); await loadSession(sessionId); } catch (_) {}
+  }
+}
+// 切回/刷新后：后台任务还在跑但前端没有活跃流时，重建本轮气泡并重连
+async function maybeReconnect(id) {
+  // 该会话已有活跃流，或用户明确停止过（徽标 stopped）时不重连
+  if (state.controllers.has(id) || state.streams.has(id) || state.status.get(id) === "stopped") return;
+  let info;
+  try { info = await request(`/sessions/${encodeURIComponent(id)}/background`); } catch (_) { return; }
+  if (!info || !info.active || !info.last_message) return;
+  // 等待状态接口期间用户可能又切走或发了新消息，重连前重新校验
+  if (state.controllers.has(id) || state.streams.has(id) || !state.session || state.session.meta.id !== id) return;
+  // 裁掉服务端历史里本轮已落盘的部分（用户消息在回合开始即持久化），再重建用户气泡
+  const messages = state.session.messages || [];
+  const cut = info.turn_msg_count == null ? messages.length : Math.min(info.turn_msg_count, messages.length);
+  const kept = messages.slice(0, cut);
+  el.messages.innerHTML = "";
+  if (kept.length) renderHistory(kept);
+  createMessage("user", info.display_content || info.last_message || "");
+  scrollMessages();
+  await reconnectStream(id, info);
 }
 async function runWorkflow(steps) {
-  if (state.busy || !state.session) return;
-  const controller = createAbortController(); state.controller = controller; state.workflow = null; setBusy(true);
+  const sessionId = currentId();
+  if (!state.session || state.controllers.has(sessionId)) return;
+  const controller = createAbortController();
+  state.controllers.set(sessionId, controller);
+  state.streams.set(sessionId, {hidden: false, workflow: true});
+  state.workflow = null;
+  setStatus(sessionId, "running");
+  syncComposer();
   try {
-    const response = await fetch("/workflows/run", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:state.session.meta.id,steps,selected_skills:el.skill.value?[{id:el.skill.value,params:{}}]:[]})});
-    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") renderApproval(event,state.workflow.message.node); else if (type === "error") throw streamFailure(event, "工作流失败"); }, controller);
+    const response = await fetch("/workflows/run", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,steps,selected_skills:el.skill.value?[{id:el.skill.value,params:{}}]:[]})});
+    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") { renderApproval(event, state.workflow.message.node, sessionId); setStatus(sessionId, "waiting"); } else if (type === "error") throw streamFailure(event, "工作流失败"); }, controller);
     await refreshSessions();
-  } catch (error) { if (error.name !== "AbortError") showToast(failureText(error).replace(/\n/g, " · ")); }
-  finally { if (state.controller === controller) state.controller = null; setBusy(false); }
+    setStatus(sessionId, "done");
+  } catch (error) {
+    if (error.name !== "AbortError") showToast(failureText(error).replace(/\n/g, " · "));
+    setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error");
+  } finally {
+    if (state.controllers.get(sessionId) === controller) state.controllers.delete(sessionId);
+    state.streams.delete(sessionId);
+    syncComposer();
+  }
 }
 
 const PROVIDER_PRESETS = {
@@ -1078,9 +1246,9 @@ if (el.refreshSkills) el.refreshSkills.onclick = () => loadSkills();
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
-el.send.onclick = () => { if (state.busy && state.controller) state.controller.abort(); else sendMessage(); };
+el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
 el.input.oninput = updateSendState;
-el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!state.busy && !el.send.disabled) sendMessage(); } };
+el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 // --- 附件交互：选择按钮、文件 input、芯片移除、全局拖拽 ---
 if (el.attachBtn) el.attachBtn.onclick = () => { if (el.fileInput) el.fileInput.click(); };
 if (el.fileInput) el.fileInput.onchange = () => { addFiles(el.fileInput.files); el.fileInput.value = ""; };

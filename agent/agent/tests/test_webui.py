@@ -217,6 +217,72 @@ def test_webui_surfaces_upstream_error_classification():
     assert 'sendMessage(retry.message, retry.display)' in script
 
 
+def test_webui_reconnects_background_stream_after_switching_sessions():
+    """切走再切回（或刷新页面）时，后台仍在跑的回复必须能接回实时输出。"""
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    # 服务端：本轮事件带序号存档，重连时整体回放并按序号去重，_seq 不外泄
+    assert "async def _bg_put(bg: BackgroundSession, event: dict)" in backend
+    assert 'stamped["_seq"] = bg.seq' in backend
+    assert "def _sse_payload(event: dict) -> dict" in backend
+    assert '@app.get("/sessions/{session_id}/background")' in backend
+
+    # 前端：loadSession 末尾探测后台状态，活跃则重建本轮气泡并重连
+    assert "function handleStreamEvent(id, type, event, assistant)" in script
+    assert "async function reconnectStream(sessionId, info)" in script
+    assert "async function maybeReconnect(id)" in script
+    assert "maybeReconnect(id);" in script
+    assert 'request(`/sessions/${encodeURIComponent(id)}/background`)' in script
+    reconnect = script[script.index("async function reconnectStream"):]
+    # 重连要恢复"停止"按钮状态（按当前会话计算），并原样带回本轮消息标识，避免被当成新消息再跑一轮
+    assert "message:info.last_message" in reconnect
+    assert "state.controllers.set(sessionId, controller)" in reconnect
+    assert "syncComposer();" in reconnect
+    # 用户主动停止过的会话不自动重连，否则切回时又粘回后台流
+    assert 'setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error")' in script
+    assert 'state.status.get(id) === "stopped"' in script
+
+
+def test_webui_per_session_stream_state_and_badges():
+    """每个会话有独立的流状态与列表徽标，发送按钮只跟随当前所在会话。"""
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+
+    # 全局单槽 busy/controller/stream 已移除，流状态按会话隔离成 Map
+    assert "state.busy" not in script
+    assert "setBusy(" not in script
+    assert "controllers: new Map(), streams: new Map(), status: new Map()" in script
+    # 发送按钮的"停止/发送"形态只根据当前会话计算
+    assert "function isBusy() { const id = currentId(); return Boolean(id && state.controllers.has(id)); }" in script
+    assert "function syncComposer()" in script
+    # 点停止：断开 SSE 之外还要真正取消后端任务，否则会继续消耗 token
+    assert "function stopSession(id)" in script
+    assert "encodeURIComponent(id)}/cancel" in script
+    assert '@app.post("/sessions/{session_id}/cancel")' in backend
+    assert "bg.task.cancel()" in backend
+    # 会话列表五态徽标；刷新页面后靠服务端 active/waiting 字段兜底标出"进行中/待确认"
+    assert 'const STATUS_TEXT = {running:"进行中", done:"已完成", stopped:"已停止", error:"异常", waiting:"待确认"}' in script
+    assert '<i class="session-badge ${status}">' in script
+    assert 'session.active ? "running"' in script
+    assert 'item["active"]' in backend
+    for cls in (".session-badge.running", ".session-badge.done", ".session-badge.stopped", ".session-badge.error", ".session-badge.waiting"):
+        assert cls in stylesheet
+    assert "@keyframes badgePulse" in stylesheet
+    # 待确认：选项卡片/工具参数面板收尾或审批卡片挂起时进入 waiting
+    assert 'session.waiting ? "waiting"' in script
+    assert "message.awaitingInput" in script
+    assert "stream.awaiting = true" in script
+    assert 'setStatus(id, "waiting")' in script
+    assert "renderApproval(event, assistant.node, id)" in script
+    assert 'item["waiting"]' in backend
+    # 缓存版本随本次前端改动升级
+    assert "app.js?v=38" in index
+    assert "style.css?v=30" in index
+
+
 def test_webui_voice_input_contract():
     index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
@@ -228,8 +294,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=28" in index
-    assert "app.js?v=35" in index
+    assert "style.css?v=30" in index
+    assert "app.js?v=38" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

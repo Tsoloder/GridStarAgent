@@ -12,7 +12,7 @@ TOOL_GROUPS_TOOL = "GetToolGroups"
 
 
 def _is_query_tool(name: str) -> bool:
-    return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has)", name, re.I))
+    return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has|Examine)", name, re.I))
 
 
 class McpOperationStatusUnknown(RuntimeError):

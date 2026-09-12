@@ -17,3 +17,15 @@ _qt_*/.qmake.stash
 
 # IDE / 工具临时产物
 .superpowers/
+_qt_float_demo/float_demo.pro
+_qt_float_demo/main.cpp
+_qt_float_demo/shot_float_after_resize.png
+_qt_float_demo/shot_float_final.png
+_qt_float_demo/shot_float_start.png
+_qt_float_demo/shot_main_after_resize.png
+_qt_float_demo/shot_main_final.png
+_qt_float_demo/shot_main_start.png
+_qt_verify/main.cpp
+_qt_verify/shot_release.png
+_qt_verify/shot.png
+_qt_verify/verify.pro

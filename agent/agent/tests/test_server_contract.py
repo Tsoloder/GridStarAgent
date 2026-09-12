@@ -6,6 +6,11 @@ import app as server
 from config import API_KEY_MASK, config_from_dict, config_revision
 
 
+def _strip_seq(event):
+    """去掉后台事件里重连回放用的内部序号 _seq，便于按业务字段断言。"""
+    return {k: v for k, v in event.items() if k != "_seq"}
+
+
 def config_data():
     return {
         "version": 1,
@@ -289,7 +294,8 @@ def test_background_fallback_keeps_error_classification(monkeypatch):
     assert failure["type"] == "error" and failure["retryable"] is True
     assert failure["category"] == "network"
     assert "retry_after" not in failure
-    assert queued[-1] == {"type": "done"}  # 兜底之后仍然补终态事件
+    # _seq 是重连回放用的内部序号，发给前端前会剥离，断言时同样忽略
+    assert _strip_seq(queued[-1]) == {"type": "done"}  # 兜底之后仍然补终态事件
 
 
 def test_background_loop_does_not_append_second_done(monkeypatch):
@@ -331,4 +337,142 @@ def test_background_loop_does_not_append_second_done(monkeypatch):
         return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
 
     queued = asyncio.run(main())
-    assert [e for e in queued if e["type"] == "done"] == [done_event]
+    assert [_strip_seq(e) for e in queued if e["type"] == "done"] == [done_event]
+
+
+def test_background_status_reports_running_turn(monkeypatch):
+    """前端切回会话靠这个接口判断后台是否还在跑、该接回哪一轮。"""
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    client = TestClient(server.app)
+
+    assert client.get("/sessions/%s/background" % session_id).json() == {
+        "active": False, "last_message": None,
+        "display_content": None, "turn_msg_count": None,
+    }
+
+    bg = server.BackgroundSession(session_id)
+    bg.task = SimpleNamespace(done=lambda: False)  # 后台任务仍在运行
+    bg.last_message = "hi"
+    bg.last_display = "hi"
+    bg.turn_msg_count = 3
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    assert client.get("/sessions/%s/background" % session_id).json() == {
+        "active": True, "last_message": "hi",
+        "display_content": "hi", "turn_msg_count": 3,
+    }
+
+    bg.done_event.set()  # 本轮收尾后不再算活跃，前端不会重连
+    assert client.get("/sessions/%s/background" % session_id).json()["active"] is False
+
+
+def test_chat_stream_replays_history_on_reconnect(monkeypatch):
+    """SSE 断开重连：断开前的事件按序补发，内部序号 _seq 不外泄。"""
+    import asyncio
+    import json
+    import uuid
+    from types import SimpleNamespace
+
+    install_config(monkeypatch)
+    monkeypatch.setattr(server, "_mcp", object())
+    monkeypatch.setattr(server, "skill_registry",
+                        SimpleNamespace(reload=lambda: None,
+                                        set_roots=lambda *a, **k: None))
+
+    session_id = str(uuid.uuid4())
+    bg = server.BackgroundSession(session_id)
+    bg.task = SimpleNamespace(done=lambda: False)  # 任务在跑，重连不该再起一轮
+    bg.last_message = "hi"
+
+    async def seed():
+        await server._bg_put(bg, {"type": "user", "turn": 1, "content": "hi"})
+        await server._bg_put(bg, {"type": "text_chunk", "delta": "你好"})
+        await server._bg_put(bg, {"type": "done", "tokens": 5})
+
+    asyncio.run(seed())
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    response = TestClient(server.app).post(
+        "/chat/stream", json={"session_id": session_id, "message": "hi"}
+    )
+    assert response.status_code == 200
+    assert "_seq" not in response.text
+
+    frames = []
+    for frame in response.text.split("\n\n"):
+        if not frame.strip():
+            continue
+        name, data = None, None
+        for line in frame.split("\n"):
+            if line.startswith("event:"):
+                name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line[len("data:"):].strip())
+        frames.append((name, data))
+    assert frames == [
+        ("user", {"type": "user", "turn": 1, "content": "hi"}),
+        ("text_chunk", {"type": "text_chunk", "delta": "你好"}),
+        ("done", {"type": "done", "tokens": 5}),
+    ]
+
+
+def test_cancel_background_stops_running_task(monkeypatch):
+    """前端「停止」按钮：除了 abort SSE，还要取消后台 agent_loop，避免继续消耗 token。"""
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    client = TestClient(server.app)
+
+    # 没有后台任务时幂等返回 cancelled=False
+    assert client.post("/sessions/%s/cancel" % session_id).json() == {"cancelled": False}
+
+    cancelled = []
+    bg = server.BackgroundSession(session_id)
+    bg.task = SimpleNamespace(
+        done=lambda: False, cancel=lambda: cancelled.append(session_id)
+    )
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    assert client.post("/sessions/%s/cancel" % session_id).json() == {"cancelled": True}
+    assert cancelled == [session_id]
+
+    # 任务已结束时不再重复取消
+    bg.task = SimpleNamespace(done=lambda: True, cancel=lambda: cancelled.append("late"))
+    assert client.post("/sessions/%s/cancel" % session_id).json() == {"cancelled": False}
+    assert cancelled == [session_id]
+
+
+def test_get_sessions_marks_active_background(monkeypatch):
+    """会话列表注入 active/waiting 字段：刷新页面后前端仍能在列表里标出「进行中/待确认」。"""
+    import uuid
+    from types import SimpleNamespace
+
+    active_id = str(uuid.uuid4())
+    idle_id = str(uuid.uuid4())
+    monkeypatch.setattr(server, "list_sessions", lambda query="", archived=False: [
+        {"id": active_id, "title": "跑着的"},
+        {"id": idle_id, "title": "空闲的"},
+    ])
+
+    bg = server.BackgroundSession(active_id)
+    bg.task = SimpleNamespace(done=lambda: False)
+    monkeypatch.setitem(server._background_sessions, active_id, bg)
+    # 挂起的工具审批 → waiting 字段（键格式 "session_id:call_id"）
+    monkeypatch.setitem(server._pending_approvals, active_id + ":call-1", None)
+
+    client = TestClient(server.app)
+    sessions = client.get("/sessions").json()["sessions"]
+    assert [item["active"] for item in sessions] == [True, False]
+    assert [item["waiting"] for item in sessions] == [True, False]
+
+    bg.done_event.set()  # 本轮收尾后不再算活跃，前端刷新后不会误标
+    sessions = client.get("/sessions").json()["sessions"]
+    assert sessions[0]["active"] is False
+    # 审批解决后 waiting 复位（_request_tool_approval 的 finally 会 pop 键）
+    del server._pending_approvals[active_id + ":call-1"]
+    sessions = client.get("/sessions").json()["sessions"]
+    assert sessions[0]["waiting"] is False

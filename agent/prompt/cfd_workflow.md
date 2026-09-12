@@ -24,7 +24,7 @@
    - **连续流程中的 `tool_params` 豁免**：当用户在 manual 模式下请求 AI 执行一个由 Skill 文档定义的多步骤业务流程（如后缘面处理、自动分部件等），且流程中各步骤参数依赖前一步动态返回值时，**中间步骤不再输出 `tool_params` 文本块**，直接发起工具调用，由后端审批面板完成参数确认。仅在以下场景输出 `tool_params` 或 `options`：
      - 流程开始前有用户可调参数时，输出 `tool_params` 确认初始参数；
      - 流程结束后通过 `options` 列出下一步选项。
-3. 查询类工具（`Get`/`Query`/`List`/`Find`/`Check`/`Read`/`Is`/`Has` 开头，如 `GetGenerateSurMeshDefaultParam`、`GetModelParameters`、`GetAllObjectByType`）不修改数据，不需要用户确认，直接调用执行。工具名必须以当前实时 MCP 工具列表为准；本文与 Skill 文档中出现的示例名若不在实时列表中，一律不得调用。
+3. 查询类工具（`Get`/`Query`/`List`/`Find`/`Check`/`Read`/`Is`/`Has`/`Examine` 开头，如 `GetGenerateSurMeshDefaultParam`、`GetModelParameters`、`GetAllObjectByType`、`ExamineBlock`）不修改数据，不需要用户确认，直接调用执行。工具名必须以当前实时 MCP 工具列表为准；本文与 Skill 文档中出现的示例名若不在实时列表中，一律不得调用。
 4. **`auto` 模式严格禁止输出 `tool_params`**。auto 模式下所有工具（包括操作类工具）按"用户明确值 → 已确认记忆值 → 实时查询结果 → Schema 默认值"的优先级直接调用 MCP 工具执行，前端不展示参数编辑表。
 5. auto 模式仍缺少无法推导的必填信息时，使用 `options` 或简短问题收集信息，不得猜测，也不得用 `tool_params` 代替。
 6. 删除、覆盖、导出、保存、批量破坏性修改等高影响操作：
@@ -79,7 +79,7 @@
 
 以下规则同时适用于 `manual` 模式和 `auto` 模式：
 
-1. **查询类工具（Get/Query/List/Find/Check/Read/Is/Has 开头）**一次支持返回多个查询类工具 ，后端支持批量执行。
+1. **查询类工具（Get/Query/List/Find/Check/Read/Is/Has/Examine 开头）**一次支持返回多个查询类工具 ，后端支持批量执行。
 2. **操作类工具（会修改 GridStar 数据的）** 一次只能返回一个，必须等上一步执行完成并展示结果后，才能返回下一个。**禁止**一次返回多个操作类工具。
 3. **每次工具调用后必须先展示输出**。工具执行返回结果后，AI 必须先展示工具返回内容（数据、状态、错误信息等），然后才能进入下一步决策。**禁止**在同一个回复中连续发起多个工具调用而不展示中间结果。
 4. **manual 模式的额外约束**：区分两件不同的事——

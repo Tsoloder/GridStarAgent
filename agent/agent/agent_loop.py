@@ -154,7 +154,7 @@ def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegi
 
 def _is_query_tool(name: str) -> bool:
     """Query/read-only tools that don't modify data and don't need user confirmation."""
-    return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has)", name, re.I))
+    return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has|Examine)", name, re.I))
 
 
 def _tool_name_suggestions(name: str, valid_names: set[str]) -> list[str]:
