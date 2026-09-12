@@ -106,7 +106,7 @@ double c_t  = data->GetWingTipChord();
 
 ## 5. 部件网格参数表
 
-部件网格参数表（含目标尺寸、最小尺寸、曲率自适应角度）参见 SKILL.md "知识库参数体系" 章节。使用 `GenerateSurMeshBySpitAssemblyGroupProperty` 时，各分部件组的目标尺寸和最小尺寸应参照该表。
+部件网格参数表（含目标尺寸、最小尺寸、曲率自适应角度）参见 `references/parameter-reference.md`。使用 `GenerateSurMeshBySpitAssemblyGroupProperty` 时，各分部件组的目标尺寸和最小尺寸应参照该表。
 
 ## 6. 工具调用顺序
 
