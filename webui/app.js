@@ -1918,3 +1918,40 @@ document.addEventListener("click", event => {
 }, true);
 
 bootstrap();
+
+/* --- 皮肤切换 --- */
+const THEME_KEY = "gs-theme";
+const THEME_NAMES = { dark: "深色", silver: "银白", blue: "蔚蓝" };
+const themeTrigger = $("#theme-trigger");
+const themeListbox = $("#theme-listbox");
+
+function applyTheme(name) {
+  if (!THEME_NAMES[name]) name = "dark";
+  document.documentElement.dataset.theme = name;
+  const label = $("#theme-label");
+  if (label) label.textContent = THEME_NAMES[name];
+  document.querySelectorAll(".theme-option").forEach(btn => {
+    const on = btn.dataset.themeOpt === name;
+    btn.classList.toggle("active", on);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+  });
+}
+
+function setThemeListOpen(open) {
+  themeListbox.classList.toggle("hidden", !open);
+  themeTrigger.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+themeTrigger.addEventListener("click", () => setThemeListOpen(themeListbox.classList.contains("hidden")));
+themeListbox.addEventListener("click", event => {
+  const opt = event.target.closest(".theme-option");
+  if (!opt) return;
+  const name = opt.dataset.themeOpt;
+  applyTheme(name);
+  try { localStorage.setItem(THEME_KEY, name); } catch (err) {}
+  setThemeListOpen(false);
+});
+document.addEventListener("click", event => {
+  if (!themeListbox.classList.contains("hidden") && !event.target.closest("#theme-switch")) setThemeListOpen(false);
+});
+applyTheme(document.documentElement.dataset.theme || "dark");

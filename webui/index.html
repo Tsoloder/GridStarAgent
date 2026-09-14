@@ -4,13 +4,22 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
-  <link rel="stylesheet" href="style.css?v=30">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
+  <link rel="stylesheet" href="style.css?v=31">
 </head>
 <body>
   <main class="app-shell">
     <header class="topbar">
       <div class="brand"><span class="brand-mark">GS</span><span>GRIDSTAR AI</span></div>
       <button id="connection" class="connection checking" type="button" title="重新检查连接"><span></span><b>连接中</b></button>
+      <div class="theme-switch" id="theme-switch">
+        <button id="theme-trigger" class="theme-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" title="切换皮肤"><span class="theme-swatch" aria-hidden="true"></span><span id="theme-label" class="theme-name">深色</span><span aria-hidden="true">⌄</span></button>
+        <div id="theme-listbox" class="theme-listbox hidden" role="listbox" aria-label="皮肤列表">
+          <button type="button" data-theme-opt="dark" class="theme-option" role="option"><i class="sw sw-dark" aria-hidden="true"></i>深色</button>
+          <button type="button" data-theme-opt="silver" class="theme-option" role="option"><i class="sw sw-silver" aria-hidden="true"></i>银白</button>
+          <button type="button" data-theme-opt="blue" class="theme-option" role="option"><i class="sw sw-blue" aria-hidden="true"></i>蔚蓝</button>
+        </div>
+      </div>
     </header>
 
     <section class="sessionbar">
@@ -129,6 +138,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=41" defer></script>
+  <script src="app.js?v=42" defer></script>
 </body>
 </html>
