@@ -491,7 +491,23 @@ function setBubbleTiming(msg, info) {
   });
 }
 let scrollLocked = false;
-function scrollMessages() { if (scrollLocked) return; el.messages.scrollTop = el.messages.scrollHeight; }
+// 贴底才跟随：流式回复时用户上滚查看工具参数/历史，不能被下一个分片拽回底部（表现为滚轮失灵）。
+// 重新滚回底部附近即恢复自动跟随；force 用于发送新消息、切换会话等必须落底的场景。
+const BOTTOM_SLACK = 24;
+let followBottom = true;
+function atBottom() { const box = el.messages; return box.scrollHeight - box.scrollTop - box.clientHeight <= BOTTOM_SLACK; }
+function scrollMessages(force) {
+  if (scrollLocked) return;
+  if (force) followBottom = true; else if (!followBottom) return;
+  el.messages.scrollTop = el.messages.scrollHeight;
+}
+// 滚动条拖动、滚轮、触摸、键盘翻页都会触发 scroll：离开底部即交出滚动控制权
+el.messages.addEventListener("scroll", () => { followBottom = atBottom(); }, {passive: true});
+// 点击展开工具调用/思考过程卡片会把内容顶高，此时用户已不在底部，下一帧重判后停止跟随，避免刚展开就被拽走
+el.messages.addEventListener("click", event => {
+  if (!event.target.closest("summary")) return;
+  requestAnimationFrame(() => { followBottom = atBottom(); });
+});
 // 会话的流式回复已被切走（DOM 摘下暂存）：内容照常写入暂存节点，但滚动等全局副作用要锁住
 function hiddenFor(id) { const stream = state.streams.get(id); return Boolean(stream && stream.hidden); }
 function backgroundSafe(id, render) { if (!hiddenFor(id)) return render(); scrollLocked = true; try { return render(); } finally { scrollLocked = false; } }
@@ -861,7 +877,7 @@ async function loadSession(id) {
     state.traj.events = []; state.traj.keys = {}; state.traj.count = {};
     state.traj.records = []; state.traj.selected = null; state.traj.range = null; state.traj.collapsed = {};
     if (state.viewTab === "traj") loadTrajectory();
-    closeSessions(); clearAttachments(); syncComposer(); scrollMessages();
+    closeSessions(); clearAttachments(); syncComposer(); scrollMessages(true);
     // 后台任务可能还在跑（刷新页面/切走时流已断开）：异步探测并重连，恢复实时输出与停止按钮
     maybeReconnect(id);
   } catch (error) { showToast(error.message); }
@@ -991,6 +1007,8 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   const sessionId = state.session.meta.id;
   const shown = displayContent != null ? displayContent : message;
   if (retryAttachments == null) clearAttachments();
+  // 新一轮提问必须落底并恢复自动跟随，即使用户上一轮上滚停留在历史里
+  followBottom = true;
   createMessage("user", shown, "", sentAttachments); el.input.value = ""; updateSendState();
   if ((state.session.meta.title || "").trim() === "New Session" && !state.session.messages.length) {
     const title = message.replace(/\s+/g, " ").trim().slice(0, 10);
@@ -1085,7 +1103,7 @@ async function maybeReconnect(id) {
   el.messages.innerHTML = "";
   if (kept.length) renderHistory(kept);
   createMessage("user", info.display_content || info.last_message || "");
-  scrollMessages();
+  scrollMessages(true);
   await reconnectStream(id, info);
 }
 async function runWorkflow(steps) {
