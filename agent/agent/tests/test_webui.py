@@ -230,7 +230,7 @@ def test_webui_reconnects_background_stream_after_switching_sessions():
 
     # 前端：loadSession 末尾探测后台状态，活跃则重建本轮气泡并重连
     assert "function handleStreamEvent(id, type, event, assistant)" in script
-    assert "async function reconnectStream(sessionId, info)" in script
+    assert "async function reconnectStream(sessionId, info, turnTs)" in script
     assert "async function maybeReconnect(id)" in script
     assert "maybeReconnect(id);" in script
     assert 'request(`/sessions/${encodeURIComponent(id)}/background`)' in script
@@ -279,8 +279,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=41" in index
-    assert "style.css?v=30" in index
+    assert "app.js?v=44" in index
+    assert "style.css?v=32" in index
 
 
 def test_webui_voice_input_contract():
@@ -294,8 +294,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=30" in index
-    assert "app.js?v=41" in index
+    assert "style.css?v=32" in index
+    assert "app.js?v=44" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

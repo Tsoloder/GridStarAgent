@@ -24,7 +24,7 @@ const state = {
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
   viewTab: "chat",
-  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, showTimeline:true},
+  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, showTimeline:true},
 };
 const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
@@ -421,6 +421,8 @@ function createMessage(role, content = "", label = "", attachments = null) {
     msg.timeEl = footer.querySelector(".bubble-time");
     msg.timingBtn.addEventListener("click", (e) => {
       e.stopPropagation();
+      // 运行中实时计时阶段还没有定稿明细，不弹层
+      if (msg.liveTimer) return;
       toggleBubblePop(msg.timingPop, msg.usagePop);
     });
     msg.timingPop.addEventListener("click", (e) => e.stopPropagation());
@@ -490,6 +492,22 @@ function setBubbleTiming(msg, info) {
     row.querySelector("b").textContent = rows[key];
   });
 }
+// 运行中实时「已用时」：done 到达前用时按钮每秒跳动，从本轮开始的墙钟时间起算；
+// done 后由 setBubbleTiming 定格为最终用时+明细，计时器在 finishAssistant 里统一清除
+function startLiveTiming(msg, startTs) {
+  if (!msg || !msg.timingBtn) return;
+  stopLiveTiming(msg);
+  let t0 = startTs ? new Date(startTs).getTime() : NaN;
+  if (isNaN(t0)) t0 = Date.now();
+  const label = msg.timingBtn.querySelector(".bubble-timing-label");
+  const tick = () => { label.textContent = "已用时 " + formatDurationCn(Math.max(0, Date.now() - t0)); };
+  msg.timingBtn.hidden = false;
+  tick();
+  msg.liveTimer = setInterval(tick, 1000);
+}
+function stopLiveTiming(msg) {
+  if (msg && msg.liveTimer) { clearInterval(msg.liveTimer); msg.liveTimer = null; }
+}
 let scrollLocked = false;
 // 贴底才跟随：流式回复时用户上滚查看工具参数/历史，不能被下一个分片拽回底部（表现为滚轮失灵）。
 // 重新滚回底部附近即恢复自动跟随；force 用于发送新消息、切换会话等必须落底的场景。
@@ -546,6 +564,8 @@ function setBubbleUsage(message, usage) {
 function finishAssistant(message) {
   if (!message || message.finished) return;
   message.finished = true;
+  // 流结束（done/停止/出错）统一停掉实时「已用时」计时器
+  stopLiveTiming(message);
   const parsed = structuredBlocks(message.text);
   message.body.innerHTML = basicMarkdown(parsed.visible);
   parsed.found.forEach(data => renderStructured(data, message.node));
@@ -1021,6 +1041,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   }
   const skill = selectedSkill();
   const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : "");
+  startLiveTiming(assistant, null);
   const controller = createAbortController();
   state.controllers.set(sessionId, controller);
   state.streams.set(sessionId, {hidden: false});
@@ -1052,8 +1073,11 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
 }
 // 重连后台仍在运行的回复流：后端会把断开前的全部事件回放一遍，
 // 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
-async function reconnectStream(sessionId, info) {
+async function reconnectStream(sessionId, info, turnTs) {
   const assistant = createMessage("assistant", "", "");
+  // 重连气泡时间/计时起点用本轮原始发送时间（落盘 ts），不是刷新时刻
+  if (turnTs) setBubbleTime(assistant, turnTs);
+  startLiveTiming(assistant, turnTs || null);
   const controller = createAbortController();
   state.controllers.set(sessionId, controller);
   state.streams.set(sessionId, {hidden: false});
@@ -1102,9 +1126,13 @@ async function maybeReconnect(id) {
   const kept = messages.slice(0, cut);
   el.messages.innerHTML = "";
   if (kept.length) renderHistory(kept);
-  createMessage("user", info.display_content || info.last_message || "");
+  // messages[cut] 即本轮用户消息（turn_msg_count 在其落盘前记录），取原始 ts 显示
+  const turnMsg = messages[cut];
+  const turnTs = turnMsg && turnMsg.role === "user" && turnMsg.ts ? turnMsg.ts : null;
+  const userMsg = createMessage("user", info.display_content || info.last_message || "");
+  if (turnTs) setBubbleTime(userMsg, turnTs);
   scrollMessages(true);
-  await reconnectStream(id, info);
+  await reconnectStream(id, info, turnTs);
 }
 async function runWorkflow(steps) {
   const sessionId = currentId();
@@ -1684,20 +1712,24 @@ function renderTrajTimeline() {
   const st = state.traj;
   const spans = [];
   st.records.forEach(rec => {
+    const ms = trajRecordMs(rec);
+    const durTxt = ms == null ? "" : " · " + trajFormatMs(ms);
     if (rec.source === "user") {
       const t = trajTimeMs(rec);
-      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user"});
+      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user", id: rec.id, title: (rec.label || "用户消息") + " · " + (rec.ts || "")});
     } else if (rec.kind === "request" && rec.timing && rec.timing.start) {
       const t = Date.parse(rec.timing.start);
       if (isNaN(t)) return;
       const total = rec.timing.total_ms != null ? rec.timing.total_ms : 0;
-      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model"});
-      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft"});
+      const title = rec.label + durTxt;
+      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model", id: rec.id, title: title});
+      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft", id: rec.id, title: title + " · 首 token " + trajFormatMs(rec.timing.ttft_ms)});
     } else if (rec.source === "tool" && rec.durationMs != null) {
       const endT = trajTimeMs(rec);
-      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool"});
+      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool", id: rec.id, title: (rec.name || "工具") + durTxt});
     }
   });
+  st.spans = spans;
   const lanes = [[], [], []];
   let tMin = Infinity, tMax = -Infinity;
   spans.forEach(sp => { lanes[sp.lane].push(sp); if (sp.start < tMin) tMin = sp.start; if (sp.end > tMax) tMax = sp.end; });
@@ -1710,7 +1742,8 @@ function renderTrajTimeline() {
     const items = list.map(sp => {
       const left = ((sp.start - tMin) / (tMax - tMin)) * 100;
       const width = Math.max(((sp.end - sp.start) / (tMax - tMin)) * 100, 0.35);
-      return `<i class="traj-span ${sp.cls}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%"></i>`;
+      const sel = sp.id === st.selected ? " selected" : "";
+      return `<i class="traj-span ${sp.cls}${sel}" data-id="${sp.id}" title="${escapeHtml(sp.title)}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%"></i>`;
     }).join("");
     return `<div class="traj-lane"><span class="traj-lane-label">${names[idx]}</span><div class="traj-lane-track">${items}</div></div>`;
   }).join("");
@@ -1812,12 +1845,34 @@ function switchViewTab(tab) {
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
   else { if (el.phasePanel.innerHTML.trim()) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
 }
-// 时间轴拖拽选区间
+// 时间轴命中检测：优先取包含该时刻的最窄跨度，否则取时间上最近的跨度（deepseek-harness 式点击定位）
+function trajSpanHit(t) {
+  const spans = state.traj.spans || [];
+  if (t == null || !spans.length) return null;
+  let best = null, bestDist = Infinity, bestWidth = Infinity;
+  spans.forEach(sp => {
+    const dist = t < sp.start ? sp.start - t : (t > sp.end ? t - sp.end : 0);
+    const width = sp.end - sp.start;
+    if (dist < bestDist || (dist === bestDist && width < bestWidth)) { best = sp; bestDist = dist; bestWidth = width; }
+  });
+  return best ? best.id : null;
+}
+// 选中账本记录：打开详情面板并把账本行滚动到可视区
+function selectTrajRecord(id) {
+  const st = state.traj;
+  st.selected = id;
+  renderTrajectory();
+  const row = el.trajLedger.querySelector('.traj-row[data-id="' + id + '"]');
+  if (row) row.scrollIntoView({block: "nearest"});
+}
+// 时间轴拖拽选区间；单击（未拖动）定位到该时刻的账本记录并展示详情
 (function bindTrajTimelineDrag() {
   let drag = null;
   const timeAt = clientX => {
     const scale = state.traj.scale;
-    const rect = el.trajTimeline.getBoundingClientRect();
+    // span 按 .traj-lane-track 宽度百分比定位，坐标换算须用轨道矩形（含泳道标签偏移与内边距会失准）
+    const track = el.trajTimeline.querySelector(".traj-lane-track");
+    const rect = (track || el.trajTimeline).getBoundingClientRect();
     if (!scale || !rect.width) return null;
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return scale.min + ratio * (scale.max - scale.min);
@@ -1839,7 +1894,12 @@ function switchViewTab(tab) {
   });
   document.addEventListener("mouseup", event => {
     if (!drag) return;
-    if (!drag.moved) { state.traj.range = null; scheduleTrajRender(); }
+    if (!drag.moved) {
+      state.traj.range = null;
+      const id = trajSpanHit(timeAt(event.clientX));
+      if (id) selectTrajRecord(id);
+      else scheduleTrajRender();
+    }
     drag = null;
   });
   el.trajTimeline.addEventListener("dblclick", () => { state.traj.range = null; scheduleTrajRender(); });
@@ -1903,14 +1963,15 @@ el.trajInspector.addEventListener("click", event => {
   const tabBtn = event.target.closest("[data-insp-tab]");
   if (tabBtn) { state.traj.inspectorTab = tabBtn.getAttribute("data-insp-tab"); renderTrajInspector(); }
 });
-// 点击详情面板与账本行之外的区域收起 inspector；
+// 点击详情面板、账本行与时间轴之外的区域收起 inspector；
 // 用捕获阶段判定，避免各处理器重建 innerHTML 后 event.target 脱离文档导致 contains 误判
 document.addEventListener("click", event => {
   const st = state.traj;
   if (state.viewTab !== "traj" || st.selected == null) return;
   const target = event.target;
   if (!target || !target.closest) return;
-  if (el.trajInspector.contains(target) || target.closest(".traj-row") || target.closest(".traj-group")) return;
+  if (el.trajInspector.contains(target) || el.trajTimeline.contains(target)
+    || target.closest(".traj-row") || target.closest(".traj-group") || target.closest(".traj-span")) return;
   st.selected = null;
   const sel = el.trajLedger.querySelector(".traj-row.selected");
   if (sel) sel.classList.remove("selected");
