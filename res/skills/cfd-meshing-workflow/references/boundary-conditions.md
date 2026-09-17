@@ -34,7 +34,7 @@ manual 模式使用 `tool_params` 展示完整分组列表（组名、ID、颜�
 
 ### 步骤 3：获取分部件分组对应的网格面
 
-对每个分部件分组，调用 `GetSpliteAssemlyDomains(groupName)` 获取该分组下超面对应的网格面 ID 集合。
+对每个分部件分组，调用 `GetSpliteAssemlyDomainsBatch(group_names=["分组名"])` 获取该分组下超面对应的网格面 ID 集合。
 
 返回格式为 `{"domains":[4,31,55]}`。若返回 `"false"` 或 domains 为空，跳过该分组并记录警告。
 

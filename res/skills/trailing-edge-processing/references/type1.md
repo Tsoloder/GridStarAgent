@@ -2,7 +2,11 @@
 
 类型一后缘面与翼梢面相邻，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。
 
-> ⚠️ **必须按步骤 1→8 顺序执行，禁止跳过任何步骤。**
+> ⚠️ **处理方式选择**
+>
+> **必须先使用批量处理入口**（`ProcessTrailingEdgeType1`），它一次性完成步骤 1→8 的全部流程。
+>
+> 若批量处理返回 `status=failed`，则**回退到分步流程**，按下方步骤 1→8 顺序执行。
 
 > ⚠️ **全局注意事项**
 >
@@ -19,36 +23,71 @@
 
 ---
 
-## 步骤
+## 批量处理入口
 
-1. **合并边**：调用 `MergeEdgesByDomain`（当前后缘面 ID），得到 `longids`（L1、L2）和 `shortids`（S1、S2）。
-   - 若返回为空或缺少 `longids`/`shortids` → 失败停止。
+```python
+# 类型判定已得到 domainId 和 wingTipId
+ProcessTrailingEdgeType1(
+    domainId=te_domain_id,          # 来自 ClassifyTrailingEdgeDomains 的 domain_id
+    wingTipId=wing_tip_id,          # 来自 ClassifyTrailingEdgeDomains 的 wing_tip_id
+    halfSpan=586.10,                # 半展长（可调整）
+    localChord=144.74,              # 当地弦长（可调整）
+    bodySpacing=0.01489,            # 翼梢端间距（可调整）
+    rootSpacing=0.0718,             # 翼根端间距（可调整）
+    params="1.2,10,1.2,10"          # 分布参数（可调整）
+)
+```
 
-2. **验证交线位置**：后缘面与翼梢面的公共线（交线）必须在短边中。
-   - 调用 `GetConnectorsByDomain`（后缘面 ID）和 `GetConnectorsByDomain`（翼梢面 ID），取交集。
-   - 交线必须等于 S1 或 S2，否则 → 失败停止。
+返回 `{"status":"success","message":"type1 done"}` 表示成功；
+返回 `{"status":"failed","message":"..."}` 时回退到下方分步流程。
 
-3. **短边设点数 + 平均分布**（S1、S2 各一遍），点数固定为 5：
-   - 先调用 `GetPointCount`（当前短边 ID）获取当前点数。
-   - 若点数 != 5：
-     - `SetConnectorPointCount`（当前短边 ID, 5）
-     - `SetConnectorAverageDistribution`（当前短边 ID）
-   - 若点数 == 5：跳过操作。
-   - **S2 同理**（仍使用 S2 的原始 ID）。
+---
 
-4. **判定 L1、L2 的方向**：
-   - 调用 `DetermineDirectionForType1`（后缘面 ID、翼梢面 ID、L1 ID、L2 ID），得到 `l1_tip_end` 和 `l2_tip_end`。
-   - `l1_tip_end` = `"start"` → L1 的 start 端靠近翼梢（headspace=`bodySpacing`, tailspace=`rootSpacing`）
-   - `l1_tip_end` = `"end"` → L1 的 end 端靠近翼梢（headspace=`rootSpacing`, tailspace=`bodySpacing`）
-   - L2 同理。
+## 分步流程
 
-5. **长边 L1 平滑分布**：
-   - `SetConnectorSmoothDistribution`（L1, headspace, tailspace, params, rootSpacing）
+> 仅在批量处理入口失败时执行以下步骤。
 
-6. **长边 L2 设点数 + 平滑分布**：
-   - `CopyConnectorPointCount`（L1, L2）
-   - `SetConnectorSmoothDistribution`（L2, headspace, tailspace, params, rootSpacing）
+### 步骤 1：合并边
 
-7. `DeleteDomain`（当前后缘面 ID, isDeleteConnector=0）
+调用 `MergeEdgesByDomain`（当前后缘面 ID），得到 `longids`（L1、L2）和 `shortids`（S1、S2）。
+- 若返回为空或缺少 `longids`/`shortids` → 失败停止。
 
-8. `AssembleConnectorsToDomain`（L1, L2, S1, S2，逗号分隔，使用原始 ID，因操作后 ID 不变）
+### 步骤 2：验证交线位置
+
+后缘面与翼梢面的公共线（交线）必须在短边中。
+- 调用 `GetConnectorsByDomains`（`domain_ids` = `[后缘面ID, 翼梢面ID]`）→ 返回结果中取两个面 connector_ids 的交集。
+- 交线必须等于 S1 或 S2，否则 → 失败停止。
+
+### 步骤 3：短边设点数 + 平均分布
+
+S1、S2 各一遍，点数固定为 5：
+- 先调用 `GetPointCount`（当前短边 ID）获取当前点数。
+- 若点数 != 5：
+  - `SetConnectorPointCount`（当前短边 ID, 5）
+  - `SetConnectorAverageDistribution`（当前短边 ID）
+- 若点数 == 5：跳过操作。
+- **S2 同理**（仍使用 S2 的原始 ID）。
+
+### 步骤 4：判定 L1、L2 的方向
+
+调用 `DetermineDirectionForType1`（后缘面 ID、翼梢面 ID、L1 ID、L2 ID），得到 `l1_tip_end` 和 `l2_tip_end`。
+- `l1_tip_end` = `"start"` → L1 的 start 端靠近翼梢（headspace=`bodySpacing`, tailspace=`rootSpacing`）
+- `l1_tip_end` = `"end"` → L1 的 end 端靠近翼梢（headspace=`rootSpacing`, tailspace=`bodySpacing`）
+- L2 同理。
+
+### 步骤 5：长边 L1 平滑分布
+
+`SetConnectorSmoothDistribution`（L1, headspace, tailspace, params, rootSpacing）
+
+### 步骤 6：长边 L2 设点数 + 平滑分布
+
+- `CopyConnectorPointCount`（L1, L2）
+- `SetConnectorSmoothDistribution`（L2, headspace, tailspace, params, rootSpacing）
+
+### 步骤 7：删除原面
+
+`DeleteDomain`（当前后缘面 ID, isDeleteConnector=0）
+
+### 步骤 8：装配
+
+`AssembleConnectorsToDomain`（L1, L2, S1, S2，逗号分隔，使用原始 ID，因操作后 ID 不变）

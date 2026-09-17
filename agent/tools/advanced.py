@@ -161,3 +161,115 @@ def IdentifyLeadingEdge(
         "wingTipDomainIds": wingTipDomainIds
     })
 
+
+def ProcessTrailingEdgeType1(domainId: int, wingTipId: int,
+                             halfSpan: float, localChord: float,
+                             bodySpacing: float, rootSpacing: float,
+                             params: str):
+    """类型一（翼梢相邻）后缘面批量处理。
+
+    封装 type1.md 步骤 1→8 的完整流程：合并边 → 验证交线 → 短边设点数+平均分布
+    → 方向判定 → 长边平滑分布 → 删除原面 → 装配。
+
+    使用场景：通过 ClassifyTrailingEdgeDomains 获取后缘面类型为 1 后，
+    直接调用本工具一步完成全部处理。失败时返回 status=failed，
+    应回退到分步调用各原子工具（按 type1.md 流程）。
+
+    Args:
+        domainId: 后缘网格面 ID（来自 ClassifyTrailingEdgeDomains 的 domain_id）。
+        wingTipId: 翼梢网格面 ID（来自 ClassifyTrailingEdgeDomains 的 wing_tip_id）。
+        halfSpan: 半展长，默认 586.10。
+        localChord: 当地弦长，默认 144.74。
+        bodySpacing: 翼梢端间距，默认 0.5861（0.1% × 半展长）。
+        rootSpacing: 翼根端间距，默认 2.8948（2% × 当地弦长）。
+        params: 分布参数，格式 "headRate,headLayer,tailRate,tailLayer"，默认 "1.2,10,1.2,10"。
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success","message":"type1 done","ids":"L1,L2,S1,S2"}
+        失败时：
+        {"status":"failed","message":"失败原因"}
+    """
+    return send_post_request("ProcessTrailingEdgeType1", {
+        "domainId": domainId,
+        "wingTipId": wingTipId,
+        "halfSpan": halfSpan,
+        "localChord": localChord,
+        "bodySpacing": bodySpacing,
+        "rootSpacing": rootSpacing,
+        "params": params
+    })
+
+
+def ProcessTrailingEdgeType2(teDomainId: int,
+                             connectorA: int, connectorB: int, connectorC: int,
+                             connectorD: int, connectorE: int, connectorF: int,
+                             aStart: int, aEnd: int, bStart: int, bEnd: int,
+                             cStart: int, cEnd: int, dStart: int, dEnd: int,
+                             eStart: int, eEnd: int, fStart: int, fEnd: int,
+                             assemblyOrder: str,
+                             halfSpan: float, localChord: float,
+                             bodySpacing: float, rootSpacing: float,
+                             params: str):
+    """类型二（吊舱-机身相邻）后缘面批量处理。
+
+    封装 type2.md 步骤 2→8 的完整流程：A/B/C 设点数+平均分布 → 读取 A 间距
+    → E/D 平滑分布 → F 设点数+拷贝+反转判定 → 删除原面 → 装配。
+
+    使用场景：先通过 IdentifyType2Roles 获取 6 条角色线的 ID 和端点信息，
+    然后调用本工具一步完成全部处理。失败时返回 status=failed，
+    应回退到分步调用各原子工具（按 type2.md 流程）。
+
+    Args:
+        teDomainId: 后缘网格面 ID。
+        connectorA~F: 6 条角色线 ID（来自 IdentifyType2Roles 返回的 A~F）。
+        aStart~fEnd: 各角色线的首尾点 ID（来自 IdentifyType2Roles）。
+        assemblyOrder: 装配顺序，如 "A,E,C,F,B,D"（来自 IdentifyType2Roles）。
+        halfSpan: 半展长，默认 586.10。
+        localChord: 当地弦长，默认 144.74。
+        bodySpacing: 机身边间距，默认 0.5861（0.1% × 半展长）。
+        rootSpacing: 共点侧间距，默认 2.8948（2% × 当地弦长）。
+        params: 分布参数，格式 "headRate,headLayer,tailRate,tailLayer"，默认 "1.2,10,1.2,10"。
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success","message":"type2 done","ids":"A,E,C,F,B,D"}
+        失败时：
+        {"status":"failed","message":"失败原因"}
+    """
+    return send_post_request("ProcessTrailingEdgeType2", {
+        "teDomainId": teDomainId,
+        "connectorA": connectorA, "connectorB": connectorB, "connectorC": connectorC,
+        "connectorD": connectorD, "connectorE": connectorE, "connectorF": connectorF,
+        "aStart": aStart, "aEnd": aEnd, "bStart": bStart, "bEnd": bEnd,
+        "cStart": cStart, "cEnd": cEnd, "dStart": dStart, "dEnd": dEnd,
+        "eStart": eStart, "eEnd": eEnd, "fStart": fStart, "fEnd": fEnd,
+        "assemblyOrder": assemblyOrder,
+        "halfSpan": halfSpan, "localChord": localChord,
+        "bodySpacing": bodySpacing, "rootSpacing": rootSpacing,
+        "params": params
+    })
+
+def ProcessAllTrailingEdges(halfSpan: float, localChord: float,
+                            bodySpacing: float, rootSpacing: float,
+                            params: str):
+    """全自动处理所有后缘面：自动获取分组 → 判定类型 → 批量处理。
+    
+    一次性处理 wingTrailingEdge 分组中的所有网格面，无需预先调用
+    ClassifyTrailingEdgeDomains / IdentifyType2Roles。
+    失败时自动报告每个后缘面的处理结果，LLM 回退到分步流程。
+    
+    Args:
+        halfSpan: 半展长，默认 586.10。
+        localChord: 当地弦长，默认 144.74。
+        bodySpacing: 翼梢端/机身边间距，默认 0.5861。
+        rootSpacing: 翼根端/共点侧间距，默认 2.8948。
+        params: 分布参数，格式 "headRate,headLayer,tailRate,tailLayer"，默认 "1.2,10,1.2,10"。
+    """
+    return send_post_request("ProcessAllTrailingEdges", {
+        "halfSpan": halfSpan,
+        "localChord": localChord,
+        "bodySpacing": bodySpacing,
+        "rootSpacing": rootSpacing,
+        "params": params
+    })

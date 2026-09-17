@@ -16,38 +16,57 @@ allowed-tools: []
 ## 开始任务前
 
 1. 从实时 MCP 工具列表识别可用工具和 Schema。
-2. 确认以下分组已存在：`wingTrailingEdge`、`wingTip`、`engine`、`fuselage`。
+2. 确认以下分组已存在：`wingTrailingEdge`、`wingTip`、`enginePylonTrailingEdge`、`fuselage`。
 3. 读取 `references/type1.md` 和 `references/type2.md`，了解两种类型的完整步骤。
 
 ## 前置条件
 
-1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在 `wingTrailingEdge`、`wingTip`、`engine`、`fuselage` 分组。
+1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在 `wingTrailingEdge`、`wingTip`、`enginePylonTrailingEdge`、`fuselage` 分组。
 2. 通过 `GetModelParameters`，返回值中的参数均为有效值。
 3. 通过 `GetAllObjectByType`(6)，返回值中有网格面。
 4. 上述任一条件不满足时停止。
 
 ## 默认参数
 
-- 半展长：586.10
-- 当地弦长：144.74
+- 半展长：14.89
+- 当地弦长：3.59
 
 ## 间距设置
 
+> ⚠️ 以下默认值基于 `GetModelParameters` 返回的实际模型参数计算。若实际模型参数不同，请按公式重新计算：
+> - `bodySpacing` = 0.1% × 半展长
+> - `rootSpacing` = 2% × 当地弦长
+
 | 位置 | 间距 |
 | --- | --- |
-| 类型一靠近翼梢端、类型二靠近机身边 | `bodySpacing` = 0.5861（0.1% × 586.10） |
-| 有共点的网格线侧（翼根侧）、中间值（mindValue） | `rootSpacing` = 2.8948（2% × 144.74） |
+| 类型一靠近翼梢端、类型二靠近机身边 | `bodySpacing` = 0.01489（0.1% × 14.89） |
+| 有共点的网格线侧（翼根侧）、中间值（mindValue） | `rootSpacing` = 0.0718（2% × 3.59） |
 | 分布参数 params | `"1.2,10,1.2,10"`（增长率默认 1.2） |
 
 ## 执行步骤
 
-### 第0步：类型判定
+### 第0步：优先尝试全自动批量处理
 
-1. 调用 `ClassifyTrailingEdgeDomains`，得到：
-   - 所有分组 ID 列表（`te_domains`、`wing_tip_domains`、`engine_domains`、`fuselage_domains`）
-   - 每个后缘面的 `classifications`：`domain_id`、`type`（1 或 2）、`wing_tip_id`（仅 type=1）
-2. 将后缘面按类型分为两组：类型一列表（type=1）和类型二列表（type=2）。
-3. **先逐个处理所有类型一的后缘面**，全部完成后，**再逐个处理所有类型二的后缘面**。
+1. 调用 `GetModelParameters` 获取 `wing_half_span`（半展长）和 `mac`（当地弦长）
+2. 按公式计算间距参数：
+   - `bodySpacing` = 0.1% × 半展长
+   - `rootSpacing` = 2% × 当地弦长
+3. 调用 `ProcessAllTrailingEdges(halfSpan, localChord, bodySpacing, rootSpacing, params)`
+4. 检查返回的 `results` 数组：
+   - 如果所有条目均为 `status=success` → **处理完成**，输出汇总报告
+   - 如果有 `status=failed` 或 `status=skipped` 的条目 → **回退到下方第1步的分步流程**，仅对失败/跳过的后缘面逐个处理
+5. **批量处理失败不回退到另一个批量处理**。回退后按原流程先处理所有类型一，再处理所有类型二。
+
+### 第1步（回退）：类型判定
+
+> ⚠️ 仅当批量处理（第0步）有失败/跳过结果时执行以下步骤。
+
+1. 调用 `GetModelParameters` 获取半展长和当地弦长，按公式计算 `bodySpacing` 和 `rootSpacing`
+2. 调用 `ProcessAllTrailingEdges(halfSpan, localChord, bodySpacing, rootSpacing, params)`
+3. 检查返回结果：
+   - 如果全部返回 `status=success` → **完成**，输出处理报告
+   - 如果有 `status=failed` 或 `status=skipped` → **回退到下方第1步的分步流程**，对失败/跳过的后缘面单独处理
+4. **批量处理失败不回退到另一个批量处理**，而是逐面分步处理
 
 ### 处理类型一
 
@@ -57,7 +76,7 @@ allowed-tools: []
 
 处理完所有类型一后，**在处理类型二之前**：
 
-> ⚠️ **关键提醒：先调用 `read_skill_resource("trailing-edge-processing", "references/type2.md")` 重新加载类型二的参考文件。** 类型二有 6 条边，与类型一完全不同，**严禁使用 `MergeEdgesByDomain`**，也**严禁使用 `IdentifyType2Roles`**（该工具有问题），角色判定通过分组网格线求交集 + 端点 ID 对比完成（见 type2.md 步骤 1）。
+> ⚠️ **关键提醒：先调用 `read_skill_resource("trailing-edge-processing", "references/type2.md")` 重新加载类型二的参考文件。** 类型二有 6 条边，与类型一完全不同，**严禁使用 `MergeEdgesByDomain`**。角色判定使用 `IdentifyType2Roles` 获取角色线 ID 和端点信息，失败时回退到分组网格线求交集 + 端点 ID 对比（见 type2.md 步骤 1 方式二）。调用 `ProcessTrailingEdgeType2` 前必须先调用 `IdentifyType2Roles` 获取参数。
 
 ### 处理类型二
 

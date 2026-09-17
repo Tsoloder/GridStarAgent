@@ -69,17 +69,32 @@
 3. 如果需要已有的网格面加密或者稀疏，则再次调用工具`UGSur`生成表面网格即可。
 4. 如果已通过 AI 自动部件分割（`ProcessWithServer`）或手动分组完成了分部件处理，且 MAC 值已知，建议改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。
 
-## 5. 后缘面处理
+## 5. 各向异性处理
+
+各向异性处理属于独立 Skill `wing-anisotropy-processing`，流程见该 Skill 的 SKILL.md。
+
+## 6. 后缘面处理
 
 后缘面处理属于独立 Skill `trailing-edge-processing`，流程见 `references/trailing-edge-processing.md`。
 
-## 6. 体网格与空间网格
+**阶段位置**：在后缘面处理之后、体网格块创建之前执行。
+
+**前置条件**：
+1. 表面网格已生成
+2. 分部件处理已完成（翼面分组 `wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge` 等已存在）
+3. 后缘面处理已完成
+
+**核心工具**：`WingAnisoProcessWingAnisotropy` — 一键执行完整 7 步流程。
+
+**完成标准**：`WingAnisoProcessWingAnisotropy` 返回 `status: "success"`，见 `wing-anisotropy-processing` 的 SKILL.md。
+
+## 7. 体网格与空间网格
 
 **阶段闸门（强制）**：表面网格生成成功后，必须完成体网格块创建（`UGBlockCreate`），然后才能进入空间网格生成（`UGUGSp`）。任何时候都不得在表面网格生成后直接调用 `UGUGSp`。
 
 此步骤为强制，不可跳过。manual 模式使用 `tool_params` 确认体创建参数；auto 模式查询默认参数后直接执行 `UGBlockCreate`。体网格块成功后，manual 模式使用 `options` 询问是否继续生成空间网格；auto 模式根据用户原始目标判断。然后按以下步骤执行。
 
-### 6.1 场景判断
+### 7.1 场景判断
 
 根据用户模型情况判断属于哪种场景：
 
@@ -92,16 +107,16 @@
 
 半模场景需先调用 `UGHalfModelLine(cnIDs, symmetry)` 设置半模边界线。
 
-### 6.2 外场生成规则
+### 7.2 外场生成规则
 
 - 亚音速（0-1 马赫）：模型特征长度的 20 倍，外场形状一般给球形。
 - 超音速（>1 马赫）：大于 1.5 倍特征长度，外场形状一般给弓形。
 - 特征长度通过 `GetModelParameters` MCP 工具获取（返回 JSON 中的 `characteristic_length` 字段）。
 
-### 6.3 体创建
+### 7.3 体创建
 
 1. 查询体创建所需参数：调用 `GetCreateBlockDefaultParam()`，记返回的默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）与 `meshSize`。
-2. 按 §6.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
+2. 按 §7.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
    - 缩放系数 = 实际 `geoParam` 尺寸值 / 默认 `geoParam` 尺寸值
    - `meshSizeOrDimension` = 默认 `meshSize` × 缩放系数
    - 示例：默认 `geoParam`=121.107、`meshSize`=14.23，外场按 20 倍特征长度放大为 853.6 时，系数=853.6/121.107≈7.05，`meshSizeOrDimension`=14.23×7.05≈100.3。
@@ -110,7 +125,7 @@
    - `meshType`=0 表示给定尺寸时，`meshSizeOrDimension` 传缩放后的值；=1 表示期望点数时不受此规则影响。
 4. 体网格块成功后，manual 模式使用 `options` 询问是否生成空间网格；auto 模式根据用户原始目标判断。
 
-### 6.4 空间网格生成
+### 7.4 空间网格生成
 
 如果需要空间网格：
 
@@ -126,7 +141,7 @@
 2. 调用 `UGUGSp` 生成空间网格。
 3. 手动模式使用 `tool_params` 确认，自动模式使用查询或 Schema 默认参数直接执行。
 
-## 7. 保存工程与导出
+## 8. 保存工程与导出
 
 1. 保存工程：文件名默认取模型名字，路径默认取模型所在路径。
 2. 网格导出：格式默认 CGNS，文件名默认取模型名字，路径默认取模型所在路径；用户另有指定时以用户为准。

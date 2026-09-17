@@ -87,20 +87,20 @@ def GenerateLongAndNarrowFaceGrid(ids: str):
     return send_post_request("GenerateLongAndNarrowFaceGrid", {"ids":ids})
 
 
-def GenerateANisoDomainGrid(anisoGroupsJson: str):
-    """生成各向异性网格，支持多个各向异性组同时设置。
+def WingAnisoProcessWingAnisotropy():
+    """机翼各向异性处理主入口 — 依次执行全部 7 步子流程并汇总结果。
 
-    Args:
-        anisoGroupsJson: JSON 字符串，包含多个各向异性组的信息。
-            外层为 JSON 数组，每个元素包含：
-            - objects: 对象列表，每个对象含 domainID（网格面ID）和 connectorIDs（网格线ID数组）
-            - firstHigh: 首层高度
-            - growthRate: 增长率
-            - controlLayer: 控制层数
-            示例：[{"objects":[{"domainID":5,"connectorIDs":[6,7,8]}],"firstHigh":0.001,"growthRate":1.2,"controlLayer":40}]
+    包含：尺寸数据获取 → 翼段检测 → 交线识别 → 第一组平滑分布 → 前缘线平滑分布 → 各向异性线组创建 → 各向异性域生成。
+    前置条件：表面网格已生成，分部件分组已完成（wingUpperSurface/wingLowerSurface/wingTip/wingTrailingEdge/fuselage/engine 等分组已存在）。
 
     Returns:
-        工具调用结果,"true"代表成功,"false"代表失败.
+        JSON 字符串，格式：
+        {"status":"success|failed","mac":<double>,"wing_segments":<int>,
+         "group1_connector_ids":[...],"leading_edge_ids":[...],
+         "trailing_edge_excluded_ids":[...],
+         "group1_distribution":"success|failed",
+         "leading_edge_distribution":"success|failed",
+         "message":"..."}
     """
-    return send_post_request("GenerateANisoDomainGrid", {"anisoGroupsJson": anisoGroupsJson})
+    return send_post_request("WingAnisoProcessWingAnisotropy", {})
 

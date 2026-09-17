@@ -53,7 +53,7 @@ allowed-tools: []
 
 **后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查**
 
-1. **后缘面处理**：用 `GetSpliteAssemlyDomains` 获取 `wingTrailingEdge`、`wingTip`、`engine`、`fuselage` 分组的网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
+1. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
 2. **体网格块创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时先按外场规则体创建生成外场。
 3. **空间网格生成**：按流程 A 表第 10 行执行。
 4. **边界条件设置**：按流程 A 表第 11 行执行。

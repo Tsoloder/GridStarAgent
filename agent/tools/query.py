@@ -3,21 +3,20 @@
 from client import send_post_request
 
 
-def GetStartAndEndPointByConnector(id: int):
-    """根据 ID 获取网格线的起点和尾点坐标.
+def GetStartAndEndPointByConnectors(connector_ids: list[int]):
+    """批量获取网格线的起点和尾点坐标.
 
-    此接口用于连续操作使用,获取的返回值可直接作为形参传入后续调用的功能中,如旋转功能等.
+    传入多个网格线 ID，返回每个网格线的起终点坐标.
 
     Args:
-        id: 需要获取信息的网格线 ID.
+        connector_ids: 网格线 ID 列表，例如 [1, 2, 3].
 
     Returns:
-        网格线的起始点和尾点坐标,其形式为:
-        {"connectors":[{"id":"1","start_point":{"pointID":"12","coordinates":[1,2,3,5,6,4]},
-        "end_point":{"pointID":"21","coordinates":[1,2,3,5,6,4]}}]}.
-        其中"coordinates"的前三个数字为起点坐标,后三个数字为尾点坐标.
+        返回 JSON 格式的查询结果,例如：
+        {"connectors":[{"id":1,"start_point":{"pointID":"12","coordinates":[1,2,3,5,6,4]},
+        "end_point":{"pointID":"21","coordinates":[1,2,3,5,6,4]}}, ...]}
     """
-    return send_post_request("GetStartAndEndPointByConnector", {"id":id})
+    return send_post_request("GetStartAndEndPointByConnectors", {"connector_ids":connector_ids})
 
 
 def GetCurrentSelectedIDs(type: int):
@@ -39,6 +38,22 @@ def GetCurrentSelectedIDs(type: int):
     return send_post_request("GetCurrentSelectedIDs", {"type":type})
 
 
+def GetCurrentSelectedIDsByTypes(types: list[int]):
+    """根据多个对象类型获取当前选中的对象 ID.
+
+    传入多个类型，返回每个类型对应的选中对象 ID 集合.
+
+    Args:
+        types: 对象类型列表，例如 [5, 6] 表示同时获取网格线和网格面的选中对象.
+            1: 数模线  2: 数模面  3: 超边  4: 超面  5: 网格线  6: 网格面  7: 网格块
+
+    Returns:
+        返回 JSON 格式的查询结果,例如：
+        {"results":[{"type":5,"ids":[5,6,7]},{"type":6,"ids":[8,9,10]}]}
+    """
+    return send_post_request("GetCurrentSelectedIDsByTypes", {"types":types})
+
+
 def GetAllObjectByType(type: int):
     """根据类型获取所有的的对象ID.
 
@@ -56,6 +71,22 @@ def GetAllObjectByType(type: int):
         返回 ID 的集合,例如{"info":[5,6,7]},如果为空则表示没有此类型的对象.
     """
     return send_post_request("GetAllObjectByType", {"type":type})
+
+
+def GetAllObjectByTypes(types: list[int]):
+    """根据多个类型获取所有的对象 ID.
+
+    传入多个类型，返回每个类型对应的所有对象 ID 集合.
+
+    Args:
+        types: 对象类型列表，例如 [5, 6] 表示同时获取所有网格线和网格面的 ID.
+            1: 数模线  2: 数模面  3: 超边  4: 超面  5: 网格线  6: 网格面  7: 网格块
+
+    Returns:
+        返回 JSON 格式的查询结果,例如：
+        {"results":[{"type":5,"ids":[1,2,3]},{"type":6,"ids":[4,5,6]}]}
+    """
+    return send_post_request("GetAllObjectByTypes", {"types":types})
 
 
 def GetScreenNormal():
@@ -129,48 +160,49 @@ def GetCreateBlockDefaultParam():
     return send_post_request("GetCreateBlockDefaultParam", {})
 
 
-def GetSpliteAssemlyDomains(groupName: str):
-    """获取指定分部件分组的网格面。
+def GetSpliteAssemlyDomainsBatch(group_names: list[str]):
+    """批量获取指定分部件分组的网格面。
 
-    使用场景：目前主要用于后缘面的处理,主要原因是分部件相关的信息存在超面对象上,网格面对象是不知道分部件相关的信息的,所以通过此工具获取分部件组中超面对应的网格面。
+    传入多个分部件分组名称，返回每个分组名对应的网格面 ID 集合。
 
     Args:
-        groupName: 分部件分组的名称。
+        group_names: 分部件分组名称列表，例如 ["jiyiqianyuan", "jitou"]。
 
     Returns:
         返回 JSON 格式的查询结果,例如：
-        {"domains":[4,31,55]}
-        失败时返回 "false"。
+        {"groups":[{"groupName":"jiyiqianyuan","domain_ids":[4,31,55]},{"groupName":"jitou","domain_ids":[6,7,8]}]}
     """
-    return send_post_request("GetSpliteAssemlyDomains", {"groupName":groupName})
+    return send_post_request("GetSpliteAssemlyDomainsBatch", {"group_names":group_names})
 
 
-def GetConnectorsByDomain(id: int):
-    """获取指定网格面下属的网格线集合
+def GetConnectorsByDomains(domain_ids: list[int]):
+    """批量获取网格面下属的网格线集合.
+
+    传入多个网格面 ID，返回每个面及其下属的网格线 ID 集合.
 
     Args:
-        id: 网格面的ID。
+        domain_ids: 网格面 ID 列表，例如 [1, 2, 3].
 
     Returns:
-        返回 JSON 格式的查询结果,例如：
-        {"ids":[4,31,55,22]}
-        失败时返回 "false"。
+        返回 JSON 格式的查询结果，例如：
+        {"domains":[{"domain_id":1,"connector_ids":[4,31,55]},{"domain_id":2,"connector_ids":[5,6,7]}]}
     """
-    return send_post_request("GetConnectorsByDomain", {"id":id})
+    return send_post_request("GetConnectorsByDomains", {"domain_ids":domain_ids})
 
 
-def GetConnectorStartAndEndUnitLenth(id: int):
-    """获取网格线的首端间距和尾端间距
+def GetConnectorsStartAndEndUnitLenth(connector_ids: list[int]):
+    """批量获取网格线的首端间距和尾端间距.
+
+    传入多个网格线 ID，返回每个网格线的首尾段间距.
 
     Args:
-        id: 网格线的ID。
+        connector_ids: 网格线 ID 列表，例如 [1, 2, 3].
 
     Returns:
-        返回 JSON 格式的查询结果,"start"代表网格线的首端间距,"end"代表网格线的尾端间距,例如：
-        {"start":12.2,"end":55.4}
-        失败时返回 "false"。
+        返回 JSON 格式的查询结果，例如：
+        {"connectors":[{"id":1,"start":12.2,"end":55.4},{"id":2,"start":8.1,"end":33.2}]}
     """
-    return send_post_request("GetConnectorStartAndEndUnitLenth", {"id":id})
+    return send_post_request("GetConnectorsStartAndEndUnitLenth", {"connector_ids":connector_ids})
 
 
 def GetPointCount(id: int):

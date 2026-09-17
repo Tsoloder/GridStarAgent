@@ -9,7 +9,8 @@
 - 只在用户明确请求或当前流程确实需要时调用工具。
 - 单步操作（参数与影响范围均明确）：无需加载领域 Skill，直接按实时 Schema 执行。
 - 多步骤领域流程（如 CAD 导入→水密性→分部件→表面网格→后缘→体网格→空间网格→边界条件→质量检查→导出）：必须先调用 read_skill 加载对应领域 Skill 再执行。
-- Skill 路由冲突时优先级：用户显式选的 Skill > 语义更专一的 Skill（如 anisotropic-mesh-processing）> cfd-meshing-workflow。
+- 多步骤领域流程开始前，若当前 CAD 模型类型尚未确定，必须先用 `cad-model-router` 识别模型类型。模型类型未确定时，不得进入任何模型专属流程，也不得套用任何模型专属参数。
+- Skill 路由冲突时优先级：用户显式选的 Skill > `cad-model-router`（模型识别与技能体系派发，最先执行）> 语义更专一的 Skill（如 anisotropic-mesh-processing）> cfd-meshing-workflow。
 - 若命中的 Skill 无法加载：不得猜测业务流程，退回"只执行单步明确操作"。
 
 ---
