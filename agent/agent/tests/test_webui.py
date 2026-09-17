@@ -279,7 +279,7 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=45" in index
+    assert "app.js?v=46" in index
     assert "style.css?v=34" in index
 
 
@@ -295,7 +295,7 @@ def test_webui_voice_input_contract():
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
     assert "style.css?v=34" in index
-    assert "app.js?v=45" in index
+    assert "app.js?v=46" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

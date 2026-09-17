@@ -410,7 +410,7 @@ function createMessage(role, content = "", label = "", attachments = null) {
       + '<div class="pop-row" data-row="total"><span>本轮总用时</span><b></b></div>'
       + '<div class="pop-row" data-row="think"><span>思考用时</span><b></b></div>'
       + '<div class="pop-row" data-row="tps"><span>输出速度 (TPS)</span><b></b></div>'
-      + '<div class="pop-row" data-row="ttft"><span>首 token 用时 (TTFT)</span><b></b></div>'
+      + '<div class="pop-row" data-row="ttft"><span>首 token 用时 (TTFT，累计)</span><b></b></div>'
       + '</div></span><span class="bubble-time"></span></span>';
     bubble.append(footer);
     msg.footer = footer;

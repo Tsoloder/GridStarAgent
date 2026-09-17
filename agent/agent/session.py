@@ -218,7 +218,7 @@ class Session:
             # 模型思考用时（各次 LLM 请求墙钟之和）
             message["think_ms"] = int(think_ms)
         if ttft_ms is not None:
-            # 首 token 延迟（本轮起点到首个输出 token）
+            # 首 token 延迟累计（本轮各次 LLM 请求首 token 延迟之和）
             message["ttft_ms"] = int(ttft_ms)
         if tps is not None:
             # 整轮输出速度 tok/s

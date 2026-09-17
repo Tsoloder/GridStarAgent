@@ -331,10 +331,10 @@ async def run_agent_loop(
     session.append_user(user_message, selected_ids, attachments, display_content)
     # 本轮总耗时起点（含多轮工具调用），done 时回传并落盘供气泡展示
     _turn_t0 = _time.monotonic()
-    # 模型侧计时：LLM 请求墙钟累计（思考用时）、生成段累计（算 TPS）、首 token 延迟
+    # 模型侧计时：LLM 请求墙钟累计（思考用时）、生成段累计（算 TPS）、首 token 延迟累计
     _think_ms_total = 0
     _gen_ms_total = 0
-    _turn_ttft_ms = None
+    _ttft_ms_total = 0
     loaded_skills = set(selected_ids) | continued_skills
     selected_bodies = []
     for skill_id in selected_ids:
@@ -531,16 +531,18 @@ async def run_agent_loop(
         _first_token_at = None
 
         def _traj_request_end(status):
-            nonlocal _think_ms_total, _gen_ms_total
+            nonlocal _think_ms_total, _gen_ms_total, _ttft_ms_total
             _total_ms = int(round((_time.monotonic() - _req_t0) * 1000))
             _ttft_ms = (int(round((_first_token_at - _req_t0) * 1000))
                         if _first_token_at is not None else None)
             _gen_ms = (int(round((_time.monotonic() - _first_token_at) * 1000))
                        if _first_token_at is not None else None)
-            # 累计到本轮：思考用时 = 各次 LLM 请求墙钟之和；生成段用于算整轮 TPS
+            # 累计到本轮：思考用时 = 各次 LLM 请求墙钟之和；生成段用于算整轮 TPS；TTFT = 各请求首 token 延迟之和
             _think_ms_total += _total_ms
             if _gen_ms is not None:
                 _gen_ms_total += _gen_ms
+            if _ttft_ms is not None:
+                _ttft_ms_total += _ttft_ms
             _out_tok = int(usage.get("output", 0) or 0)
             _tok_per_s = round(_out_tok * 1000.0 / _gen_ms, 1) if (_gen_ms and _gen_ms > 0) else None
             return {
@@ -614,8 +616,6 @@ async def run_agent_loop(
                     text_acc += event["delta"]
                     if _first_token_at is None:
                         _first_token_at = _time.monotonic()
-                        if _turn_ttft_ms is None:
-                            _turn_ttft_ms = int(round((_first_token_at - _turn_t0) * 1000))
                     # 自动模式先缓冲整段文本，校验阶段计划后再发送，避免无效 options 闪现。
                     if not is_structured_continuation and interaction_mode != "auto":
                         yield event
@@ -623,8 +623,6 @@ async def run_agent_loop(
                     reasoning_acc += event.get("delta", "")
                     if _first_token_at is None:
                         _first_token_at = _time.monotonic()
-                        if _turn_ttft_ms is None:
-                            _turn_ttft_ms = int(round((_first_token_at - _turn_t0) * 1000))
                     yield event
                 elif event["type"] == "tool_call":
                     tool_calls.append(event)
@@ -1101,17 +1099,18 @@ async def run_agent_loop(
                     "model": call_model_id,
                 }
             _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
+            _ttft_ms = _ttft_ms_total or None
             _tps = round(_usage_totals["output"] * 1000.0 / _gen_ms_total, 1) if _gen_ms_total > 0 else None
             session.append_assistant(
                 text_acc, loaded_skills, reasoning_acc, usage=_usage_record,
                 elapsed_ms=_elapsed_ms, think_ms=_think_ms_total,
-                ttft_ms=_turn_ttft_ms, tps=_tps,
+                ttft_ms=_ttft_ms, tps=_tps,
             )
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
             logger.info("[done] session=%s tokens=%s elapsed_ms=%s think_ms=%s ttft_ms=%s tps=%s",
-                        session.id, _total_tokens, _elapsed_ms, _think_ms_total, _turn_ttft_ms, _tps)
+                        session.id, _total_tokens, _elapsed_ms, _think_ms_total, _ttft_ms, _tps)
             yield {
                 "type": "done",
                 "session_id": session.id,
@@ -1125,7 +1124,7 @@ async def run_agent_loop(
                 "model": call_model_id,
                 "elapsed_ms": _elapsed_ms,
                 "think_ms": _think_ms_total,
-                "ttft_ms": _turn_ttft_ms,
+                "ttft_ms": _ttft_ms,
                 "tps": _tps,
             }
             return
