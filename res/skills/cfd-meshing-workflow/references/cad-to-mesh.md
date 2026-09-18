@@ -3,11 +3,13 @@
 阶段计划通过内置工具 `update_plan` 维护，通用参数格式与调用规则参见系统提示词第 5.1 节（**不再输出 `phase_plan` 文本块**）。本流程的默认阶段计划如下：
 
 - `id`: `cad-mesh-main`
-- 默认阶段：CAD 导入、水密性处理、分部件处理、表面网格生成、体网格块创建、空间网格生成
-- 可选阶段未采用时标记为 `skipped`
+- 默认阶段：CAD 导入、水密性处理、自动部件分割、表面网格生成、各向异性处理、后缘面处理、体网格块创建、空间网格生成
+- 表面网格生成后的固定顺序：各向异性处理 → 后缘面处理 → 体网格块创建 → 空间网格生成，不得跳过后缘面处理或体网格块创建直接生成空间网格
+- 各向异性处理与后缘面处理依赖自动部件分割产生的机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）；分组存在时必须执行，分组缺失时才标记为 `skipped` 并在 `note` 中说明原因
+- 其他可选阶段未采用时标记为 `skipped`
 
 
-水密性与分部件既可单独选择，也可串联执行。用户要求完整处理或同时提到二者时，采用"水密性处理 → 分部件处理 → 表面网格"的组合路径。
+水密性与分部件既可单独选择，也可串联执行。用户要求完整处理或同时提到二者时，采用"水密性处理 → 自动部件分割 → 表面网格"的组合路径。
 
 ## 1. 导入 CAD
 
@@ -16,7 +18,7 @@
 3. 根据 Schema 获取角度、目标尺寸、最小尺寸、单位和追加方式等参数。
 4. 手动模式使用基础 `tool_params` 协议确认参数；自动模式使用已知值或默认值直接执行。
 5. 等待工具返回；只有明确成功后才进入下一阶段。
-6. 导入成功后，标记 `import` 阶段为 `completed`、下一阶段为 `active`，并提供当前可用路径：水密性处理、分部件处理（手动分组或 AI 自动部件分割）、水密性后分部件处理、直接提取边界线。阶段计划的输出方式遵循 cfd_workflow.md 第 5.1 节的模式规则。用户选择 AI 自动部件分割时，读取 `references/part-segmentation.md`。
+6. 导入成功后，标记 `import` 阶段为 `completed`、下一阶段为 `active`，并提供当前可用路径：水密性处理、自动部件分割（水密性处理后的必经路径）、水密性后自动部件分割、直接提取边界线。阶段计划的输出方式遵循 cfd_workflow.md 第 5.1 节的模式规则。进入自动部件分割时，读取 `references/part-segmentation.md`。
 7. 手动模式使用 `options` 等待用户选择路径；用户尚未选择时，不得直接调用 `UGSur` 或其他表面网格生成工具。
 8. 自动模式根据用户原始目标选择最完整的匹配路径；目标不明确时仍使用 `options` 询问，不得擅自扩大处理范围。
 9. 只有路径已经明确且完成相应前置处理后，才能进入表面网格生成阶段。
@@ -35,13 +37,15 @@
 7. 水密性处理成功后，调用 `GetGenerateSurMeshDefaultParam` 或实时 MCP 中对应的默认参数工具。
 8. 从返回值提取 `targetSize`、`minSize`、`adaptAngle`，结合对象范围和生成方案形成 `UGSur` 参数表。
 9. 如已完成几何参数计算（MAC），应根据部件网格参数表调整各部件的目标尺寸和最小尺寸。参见 `references/geometry-parameters.md`。
-10. 如果已通过 AI 自动部件分割完成了分部件处理，按分组生成表面网格可转而使用 `references/part-based-surface-mesh.md` 的流程，利用 `GenerateSurMeshBySpitAssemblyGroupProperty` 为各部件组分别设置基于 MAC 的网格参数。
+10. 自动部件分割完成后，按分组生成表面网格使用 `references/part-based-surface-mesh.md` 的流程，利用 `GenerateSurMeshBySpitAssemblyGroupProperty` 为各部件组分别设置基于 MAC 的网格参数。
 11. 手动模式由用户确认，自动模式采用查询结果直接调用 `UGSur`；等待成功结果后才报告表面网格完成。
-12. 这条路径的强制顺序为：`ImportCADFile` → 公差查询 → 水密性处理 → 自由边检查 → 表面网格默认参数查询 → `UGSur`（或 `GenerateSurMeshBySpitAssemblyGroupProperty` 分部件优化路径）。
+12. 这条路径的强制顺序为：`ImportCADFile` → 公差查询 → 水密性处理 → 自由边检查 → 自动部件分割（`ProcessWithServer`，见 `references/part-segmentation.md`）→ 表面网格默认参数查询 → `UGSur`（或 `GenerateSurMeshBySpitAssemblyGroupProperty` 分部件路径）→ 各向异性处理 → 后缘面处理。
 
 ## 3. 分部件处理路径
 
-本节描述手动分部件处理流程。如需 AI 自动识别部件并分组，转至 `references/part-segmentation.md`。
+标准链中的分部件处理由 AI 自动部件分割（`ProcessWithServer`）完成，见 `references/part-segmentation.md`；数模导入、水密性处理成功后必须执行，不得跳过。
+
+本节仅描述用户明确要求手动创建、调整分组时的手动流程。
 
 1. 获取现有分组或分部件信息。
 2. 根据用户目标创建、重命名或调整分组。
@@ -73,24 +77,36 @@
 
 各向异性处理属于独立 Skill `wing-anisotropy-processing`，流程见该 Skill 的 SKILL.md。
 
-## 6. 后缘面处理
-
-后缘面处理属于独立 Skill `trailing-edge-processing`，流程见 `references/trailing-edge-processing.md`。
-
-**阶段位置**：在后缘面处理之后、体网格块创建之前执行。
+**阶段位置**：表面网格生成之后、后缘面处理之前。
 
 **前置条件**：
-1. 表面网格已生成
-2. 分部件处理已完成（翼面分组 `wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge` 等已存在）
-3. 后缘面处理已完成
+1. 自动部件分割已完成，机翼子组 `wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge` 已存在
+2. 表面网格已生成
+
+**执行要求**：前置条件满足时必须执行，不得以用户未提网格数量要求为由跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
 
 **核心工具**：`WingAnisoProcessWingAnisotropy` — 一键执行完整 7 步流程。
 
 **完成标准**：`WingAnisoProcessWingAnisotropy` 返回 `status: "success"`，见 `wing-anisotropy-processing` 的 SKILL.md。
 
+## 6. 后缘面处理
+
+后缘面处理属于独立 Skill `trailing-edge-processing`，流程见该 Skill 的 SKILL.md。
+
+**阶段位置**：各向异性处理之后、体网格块创建之前。
+
+**前置条件**：
+1. 表面网格已生成
+2. 自动部件分割已完成，后缘相关分组 `wingTrailingEdge` / `wingTip` / `fuselage` 等已存在
+3. 各向异性处理已执行完成，或被标记为 `skipped`
+
+**核心工具**：优先用 `ProcessAllTrailingEdges` 全自动批量处理；有失败或跳过条目时回退到 `ProcessTrailingEdgeType1` / `ProcessTrailingEdgeType2` 分步流程（先处理全部类型一，再处理全部类型二）。
+
+**完成标准**：所有后缘面处理返回成功，见 `trailing-edge-processing` 的 SKILL.md。
+
 ## 7. 体网格与空间网格
 
-**阶段闸门（强制）**：表面网格生成成功后，必须完成体网格块创建（`UGBlockCreate`），然后才能进入空间网格生成（`UGUGSp`）。任何时候都不得在表面网格生成后直接调用 `UGUGSp`。
+**阶段闸门（强制）**：表面网格生成成功后，必须按 各向异性处理（前置条件满足时）→ 后缘面处理 → 体网格块创建（`UGBlockCreate`）的顺序执行，然后才能进入空间网格生成（`UGUGSp`）。任何时候都不得跳过各向异性处理、后缘面处理或体网格块创建直接调用 `UGUGSp`。
 
 此步骤为强制，不可跳过。manual 模式使用 `tool_params` 确认体创建参数；auto 模式查询默认参数后直接执行 `UGBlockCreate`。体网格块成功后，manual 模式使用 `options` 询问是否继续生成空间网格；auto 模式根据用户原始目标判断。然后按以下步骤执行。
 

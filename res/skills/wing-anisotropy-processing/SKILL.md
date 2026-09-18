@@ -18,7 +18,7 @@ allowed-tools: []
 必须在以下步骤完成后才能进入本 Skill：
 
 1. 数模已导入（`ImportCADFile`）
-2. 分部件处理已完成，以下分组已存在：
+2. 自动部件分割已完成，以下分组已存在：
    - `wingUpperSurface`（机翼上表面）
    - `wingLowerSurface`（机翼下表面）
    - `wingTip`（翼梢）
@@ -26,7 +26,7 @@ allowed-tools: []
    - `fuselage`（机身）
    - `engine` / `engine_*`（引擎/吊舱，若存在）
 3. 表面网格已生成（通过 `UGSur` 或 `GenerateSurMeshBySpitAssemblyGroupProperty`）
-4. 若用户对网格数量没有要求，可跳过各向异性处理
+4. 所属流程中只要上述机翼子组存在就必须执行本 Skill；分组缺失时才可跳过，并在阶段 `note` 中说明原因
 
 ## 处理流程（由工具内部自动完成）
 

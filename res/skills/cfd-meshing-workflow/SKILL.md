@@ -24,23 +24,25 @@ allowed-tools: []
 
 ## 流程 A：从 CAD 到网格导出（完整链）
 
-阶段链：CAD 导入与单位设置 → 水密性处理与自由边检查 → 分部件处理 → 碎面合并 → 关键几何参数计算 → 表面网格生成 → 各向异性网格处理（可选）→ 后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查 → 保存工程与网格导出。
+阶段链：CAD 导入与单位设置 → 水密性处理与自由边检查 → 自动部件分割 → 碎面合并 → 关键几何参数计算 → 表面网格生成 → 各向异性网格处理 → 后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查 → 保存工程与网格导出。
+
+**表面网格生成之后的顺序固定为：各向异性处理 → 后缘面处理 → 体网格块创建 → 空间网格生成。** 各向异性处理与后缘面处理是否执行，由自动部件分割结果是否包含对应前置分组决定（见"硬闸门"第 5 条）。
 
 | # | 阶段 / 触发意图 | 读取 |
 |---|---|---|
 | 1 | CAD 导入、单位设置（导入模型、打开 CAD、开始新项目） | `references/cad-to-mesh.md` §1 |
 | 2 | 水密性处理、缝隙、自由边检查 | `references/watertight-processing.md` |
-| 3 | 部件分割、自动分割、识别部件、分组 | `references/part-segmentation.md`（手动分组见 `references/cad-to-mesh.md` §3） |
+| 3 | 部件分割、自动分割、识别部件、分组（水密性处理后的必经阶段） | `references/part-segmentation.md`（用户明确要求手动分组时才见 `references/cad-to-mesh.md` §3） |
 | 4 | 碎面、合并面、合并碎面 | `references/cad-to-mesh.md` §3.1 |
 | 5 | MAC、平均气动弦长、翼根/翼尖弦长、展长、特征长度、尺寸测量 | `references/geometry-parameters.md` |
 | 6 | 表面网格、面网格生成 | `references/cad-to-mesh.md` §4；已按部件分组时用 `references/part-based-surface-mesh.md` |
-| 7 | 各向异性、网格线分布、前缘/后缘/翼梢加密、减少网格数量（可选） | `references/anisotropic-mesh.md` |
-| 8 | 后缘面处理、后缘网格、trailing edge、翼梢交线 | 独立 Skill `trailing-edge-processing`（入口说明见 `references/trailing-edge-processing.md`） |
-| 9 | 体网格块创建、外场生成、半模边界线 | `references/cad-to-mesh.md` §6.1–§6.3 |
-| 10 | 空间网格、体网格、附面层 | `references/cad-to-mesh.md` §6.4 |
+| 7 | 各向异性、网格线分布、前缘/后缘/翼梢加密（机翼子组存在时强制） | `references/anisotropic-mesh.md` |
+| 8 | 后缘面处理、后缘网格、trailing edge、翼梢交线（机翼子组存在时强制） | 独立 Skill `trailing-edge-processing`（入口说明见 `references/trailing-edge-processing.md`） |
+| 9 | 体网格块创建、外场生成、半模边界线 | `references/cad-to-mesh.md` §7.1–§7.3 |
+| 10 | 空间网格、体网格、附面层 | `references/cad-to-mesh.md` §7.4 |
 | 11 | 边界条件、BC、物面、远场、对称、流入流出 | `references/boundary-conditions.md` |
 | 12 | 网格块质量、网格面/网格线质量、质量报告 | `references/quality-check.md` |
-| 13 | 保存工程、导出网格、CGNS | `references/cad-to-mesh.md` §7 |
+| 13 | 保存工程、导出网格、CGNS | `references/cad-to-mesh.md` §8 |
 
 补充入口（不占阶段，可与上表任意阶段并行）：
 
@@ -49,28 +51,30 @@ allowed-tools: []
 
 ## 流程 B：表面网格已完成，继续后续（优先走此流程）
 
-用户明确表示表面网格已生成（"表面网格已经生成了"、"面网格做好了"、"继续生成网格"、"帮我生成空间网格"等）时进入此流程，跳过流程 A 的阶段 1–7，从后缘面处理开始：
+用户明确表示表面网格已生成（"表面网格已经生成了"、"面网格做好了"、"继续生成网格"、"帮我生成空间网格"等）时进入此流程，跳过流程 A 的阶段 1–6，从各向异性处理开始。阶段 3 的自动部件分割结果仍是本流程的前置条件（分组已存在），分组缺失时先补齐分组或向用户说明。
 
-**后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查**
+**各向异性网格处理（前置条件满足时）→ 后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查**
 
-1. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
-2. **体网格块创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时先按外场规则体创建生成外场。
-3. **空间网格生成**：按流程 A 表第 10 行执行。
-4. **边界条件设置**：按流程 A 表第 11 行执行。
-5. **网格块质量检查**：按流程 A 表第 12 行执行。
+1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认机翼子组存在（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）。存在时按流程 A 表第 7 行执行 `WingAnisoProcessWingAnisotropy`；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。
+2. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
+3. **体网格块创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时先按外场规则体创建生成外场。
+4. **空间网格生成**：按流程 A 表第 10 行执行。
+5. **边界条件设置**：按流程 A 表第 11 行执行。
+6. **网格块质量检查**：按流程 A 表第 12 行执行。
 
 ## 硬闸门（任何流程都不得违反）
 
-1. **顺序闸门**：表面网格生成成功后必须按 后缘面处理 → 体网格块创建（`UGBlockCreate`）→ 空间网格生成（`UGUGSp`）执行，严禁跳过后缘面处理或体网格块创建直接调用 `UGUGSp`。体网格块创建完成后，manual 模式用 `options` 询问是否创建附面层/设定外场，auto 模式按用户原始目标判断。
-2. **水密闸门**：表面网格生成前必须完成水密性处理（自由边检查通过）和分部件处理。处理失败时公差加大 5 倍重试，最多 2 次；仍无效则停止迭代，提示用户模型可能存在缝隙、穿插、孔洞等错误，不得继续查询网格默认参数或调用 `UGSur`。自由边全部位于半模线位置时可接受。
+1. **顺序闸门**：水密性处理成功后必须先执行自动部件分割（`ProcessWithServer`，见 `references/part-segmentation.md`），再进入分部件网格与表面网格生成。表面网格生成成功后必须按 各向异性处理（前置条件满足时）→ 后缘面处理 → 体网格块创建（`UGBlockCreate`）→ 空间网格生成（`UGUGSp`）执行，严禁跳过自动部件分割、各向异性处理、后缘面处理或体网格块创建直接调用 `UGUGSp`。体网格块创建完成后，manual 模式用 `options` 询问是否创建附面层/设定外场，auto 模式按用户原始目标判断。
+2. **水密闸门**：表面网格生成前必须完成水密性处理（自由边检查通过）和自动部件分割。处理失败时公差加大 5 倍重试，最多 2 次；仍无效则停止迭代，提示用户模型可能存在缝隙、穿插、孔洞等错误，不得继续查询网格默认参数或调用 `UGSur`。自由边全部位于半模线位置时可接受。
 3. **边界闸门**：首次铺底（场景 A）时 `BorderConditionSaveDataToDomain` 的 `property` **必须统一为 `-10`（无边界条件）**，严禁在挂载阶段写入 4/7 等实际属性值。实际属性（物面→粘性固壁、外场→远场、对称→对称等）只能在铺底完成后、按用户明确要求通过 `BorderConditioConfigProperty` 逐组设置；用户未明确要求前不写入任何实际属性。物面可按分部件情况拆成多个物面组。
 4. **质量闸门**：面网格除去各向异性单元处最小角应大于 10°；体网格最大角不大于 178° 算合格，严格禁止存在 179.9° 单元。
+5. **前置条件闸门**：自动部件分割完成后必须检查分割结果中的分组。存在机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）时，表面网格生成后必须依次执行各向异性处理与后缘面处理；分组缺失时不得调用 `WingAnisoProcessWingAnisotropy` 或后缘面处理工具，须先补齐分组，无法补齐时向用户说明并在阶段 `note` 中记录跳过原因。
 
 ## 依赖与可选性
 
 - 部件网格参数表和各向异性尺寸均依赖 MAC；MAC 依赖翼根弦长、翼尖弦长、机翼展长。用户直接提供这些参数时跳过测量步骤。
 - `GetModelParameters` 返回 0.0 表示该参数未自动计算，回退 `references/geometry-parameters.md` §1.2 的文档默认值。`MeasureDistance`、`GetPointOnSurface`、`CalculateFirstLayerHeight` 为预留工具（当前 MCP 列表中不存在），按对应 reference 的替代方案处理。
-- 用户对网格数量没有要求时，可跳过各向异性阶段。
+- 自动部件分割结果包含机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）时，各向异性处理与后缘面处理是表面网格生成后的必经阶段，不得以"用户未提网格数量要求"为由跳过；仅当分组缺失而无法补齐时才跳过，并在阶段 `note` 中说明原因。
 - 翼身组合体标准划分：机头、机尾、机翼（上翼面/下翼面/翼稍面/后缘面）、垂尾、平尾；模型含外场时把外场单独设为一个部件。
 
 ## 完成标准

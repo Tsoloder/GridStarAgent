@@ -132,14 +132,17 @@
   "phases": [
     {"id": "import", "title": "CAD 导入", "status": "in_progress", "note": ""},
     {"id": "watertight", "title": "水密性处理", "status": "pending", "note": ""},
-    {"id": "parts", "title": "分部件处理", "status": "pending", "note": ""},
+    {"id": "parts", "title": "自动部件分割", "status": "pending", "note": ""},
     {"id": "surface", "title": "表面网格生成", "status": "pending", "note": ""},
+    {"id": "anisotropy", "title": "各向异性处理", "status": "pending", "note": ""},
+    {"id": "trailing_edge", "title": "后缘面处理", "status": "pending", "note": ""},
     {"id": "volume", "title": "体网格块创建", "status": "pending", "note": ""},
     {"id": "space", "title": "空间网格生成", "status": "pending", "note": ""}
   ]
 }
 ```
 
+- 表面网格生成后的顺序固定为 各向异性处理 → 后缘面处理 → 体网格块创建 → 空间网格生成；各向异性处理与后缘面处理依赖自动部件分割产生的机翼子组（`wingUpperSurface`/`wingLowerSurface`/`wingTip`/`wingTrailingEdge`），分组存在时必须执行，分组缺失时才标 `skipped` 并在 `note` 中说明原因。
 - `status` 只能是 `pending`、`in_progress`、`done`、`failed`、`skipped` 之一。
 - 只有工具明确成功后才能标记 `done`；失败时标记 `failed`。
 - `note` 可选但建议填写：简要记录该阶段的关键结果（如"导入 128 个数模面""查询到公差 0.01"）。
