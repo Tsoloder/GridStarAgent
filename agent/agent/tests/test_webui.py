@@ -287,8 +287,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=51" in index
-    assert "style.css?v=42" in index
+    assert "app.js?v=53" in index
+    assert "style.css?v=43" in index
 
 
 def test_webui_voice_input_contract():
@@ -302,8 +302,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=42" in index
-    assert "app.js?v=51" in index
+    assert "style.css?v=43" in index
+    assert "app.js?v=53" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -359,6 +359,10 @@ def test_webui_choice_card_contract():
     assert ".choice-overlay{position:absolute;" in stylesheet
     assert ".choice-overlay.open{" in stylesheet
     assert ".choice-overlay .choice-card{width:100%;margin:0}" in stylesheet
+    # 面板展示期间彻底藏掉输入框（卡片圆角更大，不藏会露出输入框圆角与投影）
+    assert ".composer.choice-open .input-wrap{opacity:0;visibility:hidden" in stylesheet
+    assert 'if (el.composer) el.composer.classList.add("choice-open");' in script
+    assert 'if (el.composer) el.composer.classList.remove("choice-open");' in script
     assert "function openChoiceOverlay(payload)" in script
     assert "function closeChoiceOverlay()" in script
     assert 'requestAnimationFrame(() => host.classList.add("open"))' in script
@@ -375,7 +379,8 @@ def test_webui_choice_card_contract():
     assert 'if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node);' in script
     assert 'if (name === ASK_USER_TOOL) { item.pendingAsk = args; return; }' in script
     assert 'if (message.tool_name === ASK_USER_TOOL) return turn;' in script
-    # 交互契约：序号输入与选项双向同步、未选中不发、Enter 提交、折叠、关闭、Esc 收起
+    # 交互契约：点选项即确认、序号输入与选项双向同步、未选中不发、折叠、关闭、Esc 收起
+    assert "entry.item.onclick = () => { pick(index); submit(); };" in script
     assert 'placeholder="提交答案"' in script
     assert "input.oninput = () => {" in script
     assert 'input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };' in script

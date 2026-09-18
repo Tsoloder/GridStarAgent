@@ -31,7 +31,7 @@ const el = {
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
-  input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"),
+  input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"), composer: $(".composer"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
@@ -622,11 +622,14 @@ function openChoiceOverlay(payload) {
   host.classList.remove("hidden", "open");
   renderChoiceCard(payload, host);
   if (!host.firstElementChild) return;
+  if (el.composer) el.composer.classList.add("choice-open");
   requestAnimationFrame(() => host.classList.add("open"));
 }
 function closeChoiceOverlay() {
   const host = el.choiceOverlay;
   if (!host || host.classList.contains("hidden")) return;
+  // 立刻恢复输入框：卡片向下收缩的同时输入框淡入，就像卡片缩回成了输入框
+  if (el.composer) el.composer.classList.remove("choice-open");
   host.classList.remove("open");
   clearTimeout(choiceTimer);
   choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; }, 240);
@@ -691,8 +694,9 @@ function renderChoiceCard(payload, parent) {
     closeChoiceOverlay();
   };
   entries.forEach((entry, index) => {
-    entry.item.onclick = () => pick(index);
-    entry.item.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(index); } };
+    // 点选项即确认：先给一次选中高亮，随即提交并缩回输入框
+    entry.item.onclick = () => { pick(index); submit(); };
+    entry.item.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(index); submit(); } };
   });
   input.oninput = () => {
     if (submitted) return;
