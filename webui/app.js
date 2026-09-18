@@ -829,7 +829,7 @@ function openChoiceOverlay(payload) {
   renderChoiceCard(payload, host);
   if (!host.firstElementChild) return;
   if (el.composer) el.composer.classList.add("choice-open");
-  requestAnimationFrame(() => host.classList.add("open"));
+  requestAnimationFrame(() => { host.classList.add("open"); syncPhasePanelLift(); });
 }
 function closeChoiceOverlay() {
   const host = el.choiceOverlay;
@@ -837,8 +837,28 @@ function closeChoiceOverlay() {
   // 立刻恢复输入框：卡片向下收缩的同时输入框淡入，就像卡片缩回成了输入框
   if (el.composer) el.composer.classList.remove("choice-open");
   host.classList.remove("open");
+  syncPhasePanelLift();
   clearTimeout(choiceTimer);
   choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; }, 240);
+}
+// 选择窗口浮在输入框上方，会盖住紧贴其上的计划窗口：浮层出现/变高时把计划窗口顶开，
+// 浮层收起/变矮后再贴着浮层的上沿落回来
+function syncPhasePanelLift() {
+  const panel = el.phasePanel;
+  const overlay = el.choiceOverlay;
+  if (!panel) return;
+  const open = overlay && !overlay.classList.contains("hidden") && overlay.classList.contains("open");
+  if (!open || panel.classList.contains("hidden")) {
+    panel.style.marginBottom = "";
+    return;
+  }
+  // 浮层绝对定位在 .composer 内且底距 12px，故其上沿 = 输入区高度 - 12px - 浮层高度；
+  // 计划窗口在普通流里，把这个差值当作 margin-bottom 就能让它始终贴着浮层上沿：
+  // 浮层高于计划窗口原位时向上移（挤走中间消息区），浮层很矮时向下沉（此时输入框本就藏起）
+  // 用 offset* 而不是 getBoundingClientRect，避开浮层入场动画 transform 的影响
+  const gap = 8;  // 计划窗口与浮层之间留出的空隙
+  const lift = overlay.offsetHeight + gap + 12 - (el.composer ? el.composer.offsetHeight : 0);
+  panel.style.marginBottom = `${lift}px`;
 }
 // 模型询问用户：可单选、也能用序号提交的选项卡片（挂在浮层里）。
 // 工具参数询问与后端审批共用这一张卡：参数表 + 选项，一次提交同时回执参数与选择
@@ -1052,6 +1072,8 @@ function renderPhase(value) {
     head.setAttribute("aria-expanded", String(el.phasePanel.classList.contains("expanded")));
   });
   phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.note || item.desc || "")}"><span class="phase-step-title">${escapeHtml(item.title || item.id || "阶段")}</span><span class="phase-step-note">${escapeHtml(item.note || item.desc || "")}</span></div>`));
+  // 计划窗口此刻才出现、而选择窗口已经开着时，同样要把它顶到浮层上方
+  syncPhasePanelLift();
 }
 
 // 过程区挂在卡底：思考与工具调用各占一行 chip（默认收起，可就地展开），
@@ -1789,6 +1811,8 @@ el.input.oninput = () => { autoGrowInput(); updateSendState(); };
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
+// 浮层高度会随卡片折叠/换提问而变，计划窗口得跟着重新贴合（变大顶开、变小落回）
+if (typeof ResizeObserver === "function" && el.choiceOverlay) new ResizeObserver(syncPhasePanelLift).observe(el.choiceOverlay);
 // Esc 收起询问浮层，露出被盖住的输入框；设置弹窗打开时交给弹窗自己处理。
 // 审批卡要等后端回执，Esc 收掉就等于把这次审批漏掉，所以不放行
 document.addEventListener("keydown", event => {
