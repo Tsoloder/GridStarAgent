@@ -433,3 +433,16 @@
 .markdown .md-check{margin-right:5px;color:var(--cyan)}
 .markdown del{color:var(--muted-2)}
 .markdown img.md-image{display:block;max-width:100%;margin:6px 0;border:1px solid var(--line);border-radius:var(--radius-sm)}
+
+/* --- 对话轮次导航轨：页面最左边缘竖排白点，一轮一个，垂直居中 --- */
+/* 固定在视口左侧（不随消息滚动），点只有 12px 的命中区，不会挡住消息正文 */
+.turn-rail{position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:15;display:flex;flex-direction:column;align-items:center;gap:6px;max-height:62vh;padding:6px 0;overflow-y:auto;scrollbar-width:none}
+.turn-rail::-webkit-scrollbar{width:0;height:0}
+.turn-rail-dot{flex:0 0 auto;width:12px;height:12px;display:grid;place-items:center;padding:0;border:0;background:none}
+/* 白点用主题的最亮前景色，浅色皮肤（银白/蔚蓝）下自动转为深色点，不会糊在背景上 */
+.turn-rail-dot:before{content:"";width:5px;height:5px;border-radius:50%;background:var(--text-bright);opacity:.3;transition:opacity .15s ease,transform .15s ease,box-shadow .15s ease}
+.turn-rail-dot:hover:before{opacity:.7}
+.turn-rail-dot.active:before{opacity:1;transform:scale(1.4);box-shadow:0 0 7px var(--text-bright)}
+/* 悬浮内容单独挂在 app-shell 下并 fixed 定位：轨道要纵向滚动，放在轨道内会被 overflow 裁掉 */
+.turn-rail-tip{position:fixed;z-index:15;width:max-content;max-width:260px;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:4;overflow:hidden;padding:7px 9px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--panel);color:var(--text);box-shadow:var(--card-shadow);font-size:11px;line-height:1.5;overflow-wrap:break-word;pointer-events:none;opacity:0;visibility:hidden;transition:opacity .12s ease}
+.turn-rail-tip.show{opacity:1;visibility:visible}

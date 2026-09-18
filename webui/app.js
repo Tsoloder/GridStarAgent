@@ -39,6 +39,7 @@ const el = {
   tabChat: $("#tab-chat"), tabTraj: $("#tab-trajectory"), trajView: $("#trajectory-view"),
   trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
   trajTimeline: $("#traj-timeline"), composer: $(".composer"),
+  turnRail: $("#turn-rail"), turnRailTip: $("#turn-rail-tip"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -666,12 +667,75 @@ function scrollMessages(force) {
   el.messages.scrollTop = el.messages.scrollHeight;
 }
 // 滚动条拖动、滚轮、触摸、键盘翻页都会触发 scroll：离开底部即交出滚动控制权
-el.messages.addEventListener("scroll", () => { followBottom = atBottom(); }, {passive: true});
+el.messages.addEventListener("scroll", () => { followBottom = atBottom(); updateTurnRailActive(); }, {passive: true});
 // 点击展开过程行/工具条目会把内容顶高，此时用户已不在底部，下一帧重判后停止跟随，避免刚展开就被拽走
 el.messages.addEventListener("click", event => {
   if (!event.target.closest("summary,.proc-row")) return;
   requestAnimationFrame(() => { followBottom = atBottom(); });
 });
+
+/* --- 对话轮次导航轨：页面最左边缘竖排白点，一轮一个点 ---
+   轮次以用户消息为界：一条 user 消息与其后的 assistant/tool 消息同属一轮。
+   悬浮显示该轮提问，点击定位到该轮；当前所处的轮次（滚动位置落在中间线及以前的最末一轮）高亮。 */
+let railNodes = [], railDots = [], railPending = false;
+function railTurnText(node) {
+  const body = node.querySelector(".markdown");
+  const text = (body ? body.textContent : "").replace(/\s+/g, " ").trim();
+  return text || "（本轮无文本内容）";
+}
+function hideTurnRailTip() { if (el.turnRailTip) el.turnRailTip.classList.remove("show"); }
+// 悬浮窗贴点右侧显示；节点靠近视口上下边时整体回推，避免被裁掉
+function showTurnRailTip(dot, node) {
+  const tip = el.turnRailTip;
+  if (!tip) return;
+  tip.textContent = railTurnText(node);
+  tip.classList.add("show");
+  const rect = dot.getBoundingClientRect();
+  tip.style.left = Math.round(rect.right + 10) + "px";
+  const top = rect.top + rect.height / 2 - tip.offsetHeight / 2;
+  tip.style.top = Math.round(Math.min(Math.max(8, top), Math.max(8, window.innerHeight - tip.offsetHeight - 8))) + "px";
+}
+function updateTurnRailActive() {
+  if (!railDots.length) return;
+  const box = el.messages.getBoundingClientRect();
+  const mid = box.top + box.height / 2;
+  let active = 0;
+  // 依次找「顶边还在中间线及以上」的最后一轮；一轮都够不着时停在第一轮
+  railNodes.forEach((node, index) => { if (index < railDots.length && node.getBoundingClientRect().top <= mid) active = index; });
+  railDots.forEach((dot, index) => dot.classList.toggle("active", index === active));
+}
+// 轮次节点集合未变就不重建，避免流式输出时反复刷 DOM 打断悬浮
+function renderTurnRail() {
+  if (!el.turnRail) return;
+  const turns = state.viewTab === "chat" && !el.messages.classList.contains("hidden")
+    ? Array.prototype.slice.call(el.messages.querySelectorAll(".message.user")) : [];
+  const same = turns.length === railNodes.length && turns.every((node, index) => node === railNodes[index]);
+  if (!same) {
+    hideTurnRailTip();
+    railNodes = turns;
+    el.turnRail.innerHTML = "";
+    railDots = turns.map((node, index) => {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.className = "turn-rail-dot";
+      dot.setAttribute("aria-label", "第 " + (index + 1) + " 轮");
+      dot.onclick = () => node.scrollIntoView({block: "start", behavior: "smooth"});
+      dot.onmouseenter = () => showTurnRailTip(dot, node);
+      dot.onmouseleave = hideTurnRailTip;
+      el.turnRail.append(dot);
+      return dot;
+    });
+  }
+  el.turnRail.classList.toggle("hidden", !turns.length);
+  updateTurnRailActive();
+}
+// 消息区增删（发消息、切会话、历史重放、暂存/挂回）都走这里，统一按下一帧合并刷新
+function syncTurnRail() {
+  if (railPending) return;
+  railPending = true;
+  requestAnimationFrame(() => { railPending = false; renderTurnRail(); });
+}
+new MutationObserver(syncTurnRail).observe(el.messages, {childList: true});
 // 会话的流式回复已被切走（DOM 摘下暂存）：内容照常写入暂存节点，但滚动等全局副作用要锁住
 function hiddenFor(id) { const stream = state.streams.get(id); return Boolean(stream && stream.hidden); }
 function backgroundSafe(id, render) { if (!hiddenFor(id)) return render(); scrollLocked = true; try { return render(); } finally { scrollLocked = false; } }
@@ -2362,6 +2426,7 @@ function switchViewTab(tab) {
   el.composer.classList.toggle("hidden", traj);
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
   else { if (el.phasePanel.innerHTML.trim() && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
+  syncTurnRail();
 }
 // 时间轴命中检测：优先取包含该点的最窄跨度，否则取投影上最近的跨度（deepseek-harness 式点击定位）
 function trajSpanHit(d) {
