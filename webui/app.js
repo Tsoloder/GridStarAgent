@@ -332,13 +332,58 @@ function dragHasFiles(event) {
   return false;
 }
 
-function inlineMarkdown(text) {
-  return escapeHtml(text)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-    .replace(/\[([^\]]+)]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+// 行内：先整行转义，再把代码段换成占位符（否则代码里的 ** / _ 会被二次解析），
+// 之后依次解析图片、链接、粗体、删除线、斜体，最后把代码段还原
+const MD_CODE_TOKEN = "\u0001";
+function mdHref(raw) {
+  const href = String(raw || "").trim();
+  if (/^(?:https?:|mailto:)/i.test(href)) return href;
+  // 相对路径与锚点放行；javascript:、data: 等无法命中白名单，降级成纯文本
+  if (/^[#/?]/.test(href) || /^[\w.\-/]+$/.test(href)) return href;
+  return "";
 }
+function inlineMarkdown(text) {
+  const codes = [];
+  return escapeHtml(text)
+    .replace(/`([^`]+)`/g, (_, code) => {
+      const token = MD_CODE_TOKEN + codes.length + MD_CODE_TOKEN;
+      codes.push(`<code>${code}</code>`);
+      return token;
+    })
+    .replace(/!\[([^\]]*)]\(([^\s)]+)\)/g, (whole, alt, src) => {
+      const url = mdHref(src);
+      return url ? `<img class="md-image" src="${url}" alt="${alt}">` : whole;
+    })
+    .replace(/\[([^\]]+)]\(([^\s)]+)\)/g, (whole, label, href) => {
+      const url = mdHref(href);
+      return url ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : whole;
+    })
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/(^|[^\w])_([^_]+)_(?=$|[^\w])/g, "$1<em>$2</em>")
+    .replace(new RegExp(`${MD_CODE_TOKEN}(\\d+)${MD_CODE_TOKEN}`, "g"), (_, index) => codes[Number(index)] || "");
+}
+// 表格：GFM 管道表格，列数不匹配的行按表头列数截断/补空
+function tableCells(line) {
+  const raw = String(line || "").trim();
+  if (!raw.includes("|")) return null;
+  return raw.replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+}
+const MD_TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+function tableAlign(cell) {
+  const left = cell.startsWith(":"), right = cell.endsWith(":");
+  return left && right ? "center" : (right ? "right" : "left");
+}
+function renderTable(head, aligns, rows) {
+  const cell = (tag, text, index) => `<${tag} style="text-align:${aligns[index] || "left"}">${inlineMarkdown(text || "")}</${tag}>`;
+  const headHtml = head.map((text, index) => cell("th", text, index)).join("");
+  const bodyHtml = rows.map(row => `<tr>${head.map((_, index) => cell("td", row[index], index)).join("")}</tr>`).join("");
+  return `<div class="md-table-wrap"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
+}
+// 块级：代码块 → 标题 → 分隔线 → 引用 → 表格 → 列表（支持缩进嵌套与任务框）→ 段落。
+// 段落与引用内的连续行合并成同一个块，换行按软换行（空格）处理，行尾两空格或反斜杠为硬换行
 function basicMarkdown(text) {
   const blocks = [];
   const source = String(text || "").replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
@@ -347,24 +392,70 @@ function basicMarkdown(text) {
     return token;
   });
   const lines = source.split("\n");
-  let html = "", list = "";
-  const closeList = () => { if (list) { html += `</${list}>`; list = ""; } };
-  for (const line of lines) {
+  const out = [];
+  const para = [];
+  const quote = [];
+  const stack = []; // 列表层级：{type, indent}
+  const hardBreak = /(?: {2,}|\\)$/;
+  const joins = (buffer, soft) => {
+    const parts = [];
+    buffer.forEach((line, index) => {
+      parts.push(inlineMarkdown(line.replace(/(?: {2,}|\\)+$/, "")));
+      if (index < buffer.length - 1) parts.push(hardBreak.test(line) ? "<br>" : soft);
+    });
+    return parts.join("");
+  };
+  const flushPara = () => { if (para.length) { out.push(`<p>${joins(para, "\n")}</p>`); para.length = 0; } };
+  const flushQuote = () => { if (quote.length) { out.push(`<blockquote><p>${joins(quote, " ")}</p></blockquote>`); quote.length = 0; } };
+  const closeList = () => { while (stack.length) out.push(`</${stack.pop().type}>`); };
+  const flushAll = () => { flushPara(); flushQuote(); closeList(); };
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
     const token = line.match(/^\u0000(\d+)\u0000$/);
-    if (token) { closeList(); html += blocks[Number(token[1])]; continue; }
-    const heading = line.match(/^(#{1,3})\s+(.+)/);
-    if (heading) { closeList(); const level = heading[1].length; html += `<h${level}>${inlineMarkdown(heading[2])}</h${level}>`; continue; }
-    const item = line.match(/^\s*([-*]|\d+\.)\s+(.+)/);
-    if (item) {
-      const type = item[1].endsWith(".") ? "ol" : "ul";
-      if (list !== type) { closeList(); list = type; html += `<${type}>`; }
-      html += `<li>${inlineMarkdown(item[2])}</li>`; continue;
+    if (token) { flushAll(); out.push(blocks[Number(token[1])]); continue; }
+    if (!line.trim()) { flushAll(); continue; }
+    const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+    if (heading) {
+      flushAll(); const level = heading[1].length;
+      out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue;
     }
-    closeList();
-    if (line.trim()) html += `<p>${inlineMarkdown(line)}</p>`;
+    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) { flushAll(); out.push("<hr>"); continue; }
+    const quoteMark = line.match(/^\s*(?:>\s?)+/);
+    if (quoteMark) { flushPara(); closeList(); quote.push(line.slice(quoteMark[0].length)); continue; }
+    const head = tableCells(line);
+    const divider = head && i + 1 < lines.length ? tableCells(lines[i + 1]) : null;
+    if (divider && divider.length === head.length && MD_TABLE_DIVIDER.test(lines[i + 1])) {
+      flushAll();
+      const aligns = divider.map(tableAlign);
+      const rows = [];
+      let j = i + 2;
+      for (; j < lines.length; j += 1) {
+        const cells = tableCells(lines[j]);
+        if (!cells || !lines[j].trim()) break;
+        rows.push(cells);
+      }
+      out.push(renderTable(head, aligns, rows));
+      i = j - 1; continue;
+    }
+    const item = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+    if (item) {
+      flushPara(); flushQuote();
+      const indent = item[1].replace(/\t/g, "  ").length;
+      const type = /^\d/.test(item[2]) ? "ol" : "ul";
+      while (stack.length && stack[stack.length - 1].indent > indent) out.push(`</${stack.pop().type}>`);
+      let top = stack[stack.length - 1];
+      if (top && top.indent === indent && top.type !== type) { out.push(`</${top.type}>`); stack.pop(); top = stack[stack.length - 1]; }
+      if (!top || top.indent < indent) { out.push(`<${type}>`); stack.push({ type, indent }); }
+      const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
+      if (task) out.push(`<li class="md-task"><span class="md-check" aria-hidden="true">${task[1].toLowerCase() === "x" ? "☑" : "☐"}</span>${inlineMarkdown(task[2])}</li>`);
+      else out.push(`<li>${inlineMarkdown(item[3])}</li>`);
+      continue;
+    }
+    flushQuote(); closeList();
+    para.push(line);
   }
-  closeList();
-  return html;
+  flushAll();
+  return out.join("");
 }
 function structuredBlocks(text) {
   const found = [];

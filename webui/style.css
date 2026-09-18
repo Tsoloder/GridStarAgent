@@ -415,3 +415,21 @@
 /* 详情面板关闭按钮：与附件/设置按钮同族，悬停才浮出边框与底色 */
 .traj-insp-head .icon-button{border-color:transparent;background:none;color:var(--muted-2)}
 .traj-insp-head .icon-button:hover{border-color:var(--line-strong);background:var(--surface-2);color:var(--cyan)}
+
+/* --- 消息正文新增语法：表格 / 引用 / 分隔线 / 深层标题 / 嵌套列表 / 删除线 / 图片 --- */
+/* 表格：与工具参数表同族，窄屏横向滚动而不撑破气泡 */
+.markdown .md-table-wrap{margin:8px 0;border:1px solid var(--line);border-radius:var(--radius-sm);overflow-x:auto;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
+.markdown table{width:100%;border-collapse:collapse;font-size:11px}
+.markdown thead th{padding:6px 9px;background:var(--band-3);color:var(--text-bright);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--line)}
+.markdown tbody td{padding:6px 9px;border-top:1px solid var(--line);vertical-align:top;overflow-wrap:break-word}
+.markdown tbody tr:first-child td{border-top:0}
+.markdown tbody tr:nth-child(even){background:var(--band-2)}
+.markdown blockquote{margin:8px 0;padding:2px 0 2px 10px;border-left:2px solid var(--cyan-mid);color:var(--muted)}
+.markdown blockquote p{margin:0}
+.markdown hr{margin:10px 0;border:0;border-top:1px solid var(--line)}
+.markdown h4,.markdown h5,.markdown h6{margin:9px 0 5px;color:var(--text-bright);font-size:13px}
+.markdown ul ul,.markdown ul ol,.markdown ol ul,.markdown ol ol{margin:2px 0}
+.markdown li.md-task{list-style:none}
+.markdown .md-check{margin-right:5px;color:var(--cyan)}
+.markdown del{color:var(--muted-2)}
+.markdown img.md-image{display:block;max-width:100%;margin:6px 0;border:1px solid var(--line);border-radius:var(--radius-sm)}
