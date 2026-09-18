@@ -133,12 +133,16 @@
 .choice-text strong{display:block;color:var(--text-bright);font-size:12px;font-weight:600;overflow-wrap:break-word}
 .choice-text small{display:block;margin-top:2px;color:var(--muted-2);font-size:11px;line-height:1.45;overflow-wrap:break-word}
 .choice-foot{display:flex;flex-direction:column;gap:4px;padding:0 11px 10px}
-.choice-input{width:100%;height:32px;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset);padding:0 9px;outline:0;font-size:12px}
+.choice-answer{display:flex;gap:6px}
+.choice-input{flex:1;min-width:0;height:32px;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset);padding:0 9px;outline:0;font-size:12px}
 .choice-input::placeholder{color:var(--muted-2)}
 .choice-input:hover{border-color:var(--line-strong)}
 .choice-input:focus{border-color:var(--cyan-mid)}
 .choice-input.invalid{border-color:var(--err-line);background:var(--err-tint)}
 .choice-input:disabled{opacity:.55;cursor:default}
+.choice-submit{flex:0 0 auto;height:32px;padding:0 12px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--surface-3);color:var(--text-bright);font-size:12px}
+.choice-submit:hover:not(:disabled){border-color:var(--cyan-mid);background:var(--accent-tint)}
+.choice-submit:disabled{opacity:.5;cursor:default}
 .choice-hint{color:var(--muted-2);font-size:9px;letter-spacing:.3px}
 .choice-card.submitted .choice-close{opacity:.5}
 /* 视图切换 tab（对话 / 轨迹） */

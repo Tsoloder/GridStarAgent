@@ -647,8 +647,10 @@ function renderChoiceCard(payload, parent) {
     + '<button class="choice-close" type="button" title="收起" aria-label="收起">×</button></div>'
     + '<div class="choice-question"></div>'
     + '<div class="choice-list" role="radiogroup" aria-label="候选选项"></div>'
-    + '<div class="choice-foot"><input class="choice-input" type="text" inputmode="numeric" autocomplete="off" placeholder="提交答案" aria-label="输入选项序号">'
-    + '<span class="choice-hint">按 Esc 取消</span></div>';
+    + '<div class="choice-foot"><div class="choice-answer">'
+    + '<input class="choice-input" type="text" autocomplete="off" placeholder="点击「其他」后在此输入答案" aria-label="输入自定义答案" disabled>'
+    + '<button class="choice-submit" type="button" disabled>提交答案</button>'
+    + '</div><span class="choice-hint">按 Esc 取消</span></div>';
   const question = $(".choice-question", card);
   question.textContent = payload.question || "";
   if (!payload.question) question.classList.add("hidden");
@@ -665,9 +667,21 @@ function renderChoiceCard(payload, parent) {
       + (option.description ? `<small>${escapeHtml(String(option.description))}</small>` : "")
       + '</span>';
     list.append(item);
-    return {item, option, label};
+    return {item, option, label, other: false};
   });
+  // 末尾固定补一个「其他」：模型没给自由项时也能自己写答案
+  if (!entries.some(entry => /^(其他|其它|other)$/i.test(entry.label.trim()))) {
+    const item = document.createElement("div");
+    item.className = "choice-item";
+    item.setAttribute("role", "radio");
+    item.setAttribute("aria-checked", "false");
+    item.tabIndex = 0;
+    item.innerHTML = '<span class="choice-dot" aria-hidden="true"></span><span class="choice-text"><strong>其他</strong></span>';
+    list.append(item);
+    entries.push({item, option: null, label: "其他", other: true});
+  }
   const input = $(".choice-input", card);
+  const submitBtn = $(".choice-submit", card);
   let selected = -1;
   let submitted = false;
   const paint = index => {
@@ -677,36 +691,45 @@ function renderChoiceCard(payload, parent) {
       entry.item.setAttribute("aria-checked", String(position === index));
     });
   };
-  const pick = index => {
-    if (submitted) return;
-    paint(index); input.value = String(index + 1); input.classList.remove("invalid");
+  const pick = index => { if (!submitted) paint(index); };
+  // 选中「其他」才放开输入框：先写清楚要什么，再点提交答案
+  const openAnswer = index => {
+    pick(index);
+    input.disabled = false;
+    submitBtn.disabled = false;
+    input.classList.remove("invalid");
+    input.focus();
   };
   const submit = () => {
     if (submitted) return;
-    // 未选中不发消息，只提示输入框
-    if (selected < 0) { input.classList.add("invalid"); input.focus(); return; }
+    // 未选中不发消息，只提示
+    if (selected < 0) return;
+    const chosen = entries[selected];
+    let value = chosen.label;
+    if (chosen.other) {
+      const text = input.value.trim();
+      if (!text) { input.classList.add("invalid"); input.focus(); return; }
+      value = text;
+    } else if (chosen.option && chosen.option.value != null) {
+      value = String(chosen.option.value);
+    }
     submitted = true;
     card.classList.add("submitted");
     input.disabled = true;
+    submitBtn.disabled = true;
     entries.forEach(entry => entry.item.classList.add("locked"));
-    const chosen = entries[selected];
-    sendMessage(chosen.option.value != null ? String(chosen.option.value) : chosen.label, chosen.label);
+    sendMessage(value, chosen.other ? value : chosen.label);
     closeChoiceOverlay();
   };
   entries.forEach((entry, index) => {
-    // 点选项即确认：先给一次选中高亮，随即提交并缩回输入框
-    entry.item.onclick = () => { pick(index); submit(); };
-    entry.item.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(index); submit(); } };
+    // 普通选项点一下就直接确认；「其他」只亮起输入框，写完再点提交答案
+    const activate = () => { if (entry.other) openAnswer(index); else { pick(index); submit(); } };
+    entry.item.onclick = activate;
+    entry.item.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activate(); } };
   });
-  input.oninput = () => {
-    if (submitted) return;
-    const digits = input.value.replace(/\D/g, "");
-    if (digits !== input.value) input.value = digits;
-    const index = Number(digits) - 1;
-    if (digits && index >= 0 && index < entries.length) { paint(index); input.classList.remove("invalid"); }
-    else paint(-1);
-  };
+  input.oninput = () => { if (!submitted) input.classList.remove("invalid"); };
   input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };
+  submitBtn.onclick = submit;
   const head = $(".choice-head", card);
   const toggleCollapse = () => {
     const collapsed = card.classList.toggle("collapsed");

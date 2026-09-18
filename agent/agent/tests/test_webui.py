@@ -287,8 +287,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=53" in index
-    assert "style.css?v=43" in index
+    assert "app.js?v=54" in index
+    assert "style.css?v=44" in index
 
 
 def test_webui_voice_input_contract():
@@ -302,8 +302,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=43" in index
-    assert "app.js?v=53" in index
+    assert "style.css?v=44" in index
+    assert "app.js?v=54" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -379,10 +379,13 @@ def test_webui_choice_card_contract():
     assert 'if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node);' in script
     assert 'if (name === ASK_USER_TOOL) { item.pendingAsk = args; return; }' in script
     assert 'if (message.tool_name === ASK_USER_TOOL) return turn;' in script
-    # 交互契约：点选项即确认、序号输入与选项双向同步、未选中不发、折叠、关闭、Esc 收起
-    assert "entry.item.onclick = () => { pick(index); submit(); };" in script
-    assert 'placeholder="提交答案"' in script
-    assert "input.oninput = () => {" in script
+    # 交互契约：普通选项点一下即确认；「其他」先放开输入框、写完再点提交答案；折叠、关闭、Esc 收起
+    assert 'entries.push({item, option: null, label: "其他", other: true});' in script
+    assert "const activate = () => { if (entry.other) openAnswer(index); else { pick(index); submit(); } };" in script
+    assert 'placeholder="点击「其他」后在此输入答案"' in script
+    assert '<button class="choice-submit" type="button" disabled>提交答案</button>' in script
+    assert "submitBtn.onclick = submit;" in script
+    assert 'if (!text) { input.classList.add("invalid"); input.focus(); return; }' in script
     assert 'input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };' in script
     assert 'card.classList.toggle("collapsed")' in script
     assert '$(".choice-close", card).onclick = event => { event.stopPropagation(); closeChoiceOverlay(); };' in script
@@ -392,6 +395,6 @@ def test_webui_choice_card_contract():
     # 卡片样式（三主题共用变量）
     for rule in (".choice-card{", ".choice-head{", ".choice-close{", ".choice-item{",
                  ".choice-item.selected .choice-dot:after{", ".choice-input:focus{",
-                 ".choice-input.invalid{", ".choice-hint{"):
+                 ".choice-input.invalid{", ".choice-submit{", ".choice-hint{"):
         assert rule in stylesheet
 
