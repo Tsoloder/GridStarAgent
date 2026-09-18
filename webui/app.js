@@ -206,6 +206,16 @@ function updateSendState() {
   el.send.disabled = !isBusy() && (!hasPayload || !state.configLoaded || state.uploading > 0);
 }
 
+// 输入框随内容行数增高；到上限后锁定高度并改为可滚动
+const INPUT_MAX_HEIGHT = 200;
+function autoGrowInput() {
+  const node = el.input;
+  node.style.height = "auto";
+  const full = node.scrollHeight;
+  node.style.height = `${Math.min(full, INPUT_MAX_HEIGHT)}px`;
+  node.style.overflowY = full > INPUT_MAX_HEIGHT ? "auto" : "hidden";
+}
+
 // --- 附件：拖拽/选择文件 → POST /upload → 芯片列表 → 随消息一起发给大模型 ---
 const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
 const ATTACH_MAX_COUNT = 6;
@@ -1068,7 +1078,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   if (retryAttachments == null) clearAttachments();
   // 新一轮提问必须落底并恢复自动跟随，即使用户上一轮上滚停留在历史里
   followBottom = true;
-  createMessage("user", shown, "", sentAttachments); el.input.value = ""; updateSendState();
+  createMessage("user", shown, "", sentAttachments); el.input.value = ""; autoGrowInput(); updateSendState();
   if ((state.session.meta.title || "").trim() === "New Session" && !state.session.messages.length) {
     const title = message.replace(/\s+/g, " ").trim().slice(0, 10);
     // 重命名不阻塞发送（fire-and-forget），避免 await 期间 state.session 已指向别的会话
@@ -1338,8 +1348,10 @@ el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ?
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
 el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
-el.input.oninput = updateSendState;
+el.input.oninput = () => { autoGrowInput(); updateSendState(); };
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
+autoGrowInput();
+window.addEventListener("resize", autoGrowInput);
 // --- 附件交互：选择按钮、文件 input、芯片移除、全局拖拽 ---
 if (el.attachBtn) el.attachBtn.onclick = () => { if (el.fileInput) el.fileInput.click(); };
 if (el.fileInput) el.fileInput.onchange = () => { addFiles(el.fileInput.files); el.fileInput.value = ""; };
