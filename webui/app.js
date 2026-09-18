@@ -365,11 +365,17 @@ function inlineMarkdown(text) {
     .replace(/(^|[^\w])_([^_]+)_(?=$|[^\w])/g, "$1<em>$2</em>")
     .replace(new RegExp(`${MD_CODE_TOKEN}(\\d+)${MD_CODE_TOKEN}`, "g"), (_, index) => codes[Number(index)] || "");
 }
-// 表格：GFM 管道表格，列数不匹配的行按表头列数截断/补空
+// 表格：GFM 管道表格，列数不匹配的行按表头列数截断/补空。
+// `\|` 是单元格内写竖线的转义写法，先用占位符护住再切列，切完还原
+const MD_PIPE_TOKEN = "\u0002";
 function tableCells(line) {
   const raw = String(line || "").trim();
   if (!raw.includes("|")) return null;
-  return raw.replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
+  return raw
+    .replace(/\\\|/g, MD_PIPE_TOKEN)
+    .replace(/^\|/, "").replace(/\|$/, "")
+    .split("|")
+    .map(cell => cell.trim().replace(new RegExp(MD_PIPE_TOKEN, "g"), "|"));
 }
 const MD_TABLE_DIVIDER = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 function tableAlign(cell) {
@@ -382,8 +388,9 @@ function renderTable(head, aligns, rows) {
   const bodyHtml = rows.map(row => `<tr>${head.map((_, index) => cell("td", row[index], index)).join("")}</tr>`).join("");
   return `<div class="md-table-wrap"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
 }
-// 块级：代码块 → 标题 → 分隔线 → 引用 → 表格 → 列表（支持缩进嵌套与任务框）→ 段落。
-// 段落与引用内的连续行合并成同一个块，换行按软换行（空格）处理，行尾两空格或反斜杠为硬换行
+// 块级：代码块 → 标题 → 分隔线 → 引用 → 表格 → 列表（缩进嵌套 / 任务框 / 续行）→ 段落。
+// 段落与引用内的连续行合并成同一个块，换行按软换行（空格）处理，行尾两空格或反斜杠为硬换行。
+// 引用内容用同一套规则递归渲染，所以引用里的列表、表格、代码块都能正常解析
 function basicMarkdown(text) {
   const blocks = [];
   const source = String(text || "").replace(/```([\w-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
@@ -391,71 +398,91 @@ function basicMarkdown(text) {
     blocks.push(`<div class="code-block"><header>${escapeHtml(lang || "text")}</header><pre>${escapeHtml(code.trim())}</pre></div>`);
     return token;
   });
-  const lines = source.split("\n");
-  const out = [];
-  const para = [];
-  const quote = [];
-  const stack = []; // 列表层级：{type, indent}
   const hardBreak = /(?: {2,}|\\)$/;
-  const joins = (buffer, soft) => {
-    const parts = [];
-    buffer.forEach((line, index) => {
-      parts.push(inlineMarkdown(line.replace(/(?: {2,}|\\)+$/, "")));
-      if (index < buffer.length - 1) parts.push(hardBreak.test(line) ? "<br>" : soft);
-    });
-    return parts.join("");
-  };
-  const flushPara = () => { if (para.length) { out.push(`<p>${joins(para, "\n")}</p>`); para.length = 0; } };
-  const flushQuote = () => { if (quote.length) { out.push(`<blockquote><p>${joins(quote, " ")}</p></blockquote>`); quote.length = 0; } };
-  const closeList = () => { while (stack.length) out.push(`</${stack.pop().type}>`); };
-  const flushAll = () => { flushPara(); flushQuote(); closeList(); };
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i];
-    const token = line.match(/^\u0000(\d+)\u0000$/);
-    if (token) { flushAll(); out.push(blocks[Number(token[1])]); continue; }
-    if (!line.trim()) { flushAll(); continue; }
-    const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
-    if (heading) {
-      flushAll(); const level = heading[1].length;
-      out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue;
-    }
-    if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) { flushAll(); out.push("<hr>"); continue; }
-    const quoteMark = line.match(/^\s*(?:>\s?)+/);
-    if (quoteMark) { flushPara(); closeList(); quote.push(line.slice(quoteMark[0].length)); continue; }
-    const head = tableCells(line);
-    const divider = head && i + 1 < lines.length ? tableCells(lines[i + 1]) : null;
-    if (divider && divider.length === head.length && MD_TABLE_DIVIDER.test(lines[i + 1])) {
-      flushAll();
-      const aligns = divider.map(tableAlign);
-      const rows = [];
-      let j = i + 2;
-      for (; j < lines.length; j += 1) {
-        const cells = tableCells(lines[j]);
-        if (!cells || !lines[j].trim()) break;
-        rows.push(cells);
+  const parseLines = lines => {
+    const out = [];
+    const para = [];
+    const quote = [];
+    const stack = []; // 列表层级：{type, indent}
+    let itemIndex = -1; // 最近一个未闭合 <li> 在 out 里的下标：列表项续行要并回这里
+    let blank = false; // 空行后列表先不急着关，等下一行确认不是列表项再关
+    const joins = (buffer, soft) => {
+      const parts = [];
+      buffer.forEach((line, index) => {
+        parts.push(inlineMarkdown(line.replace(/(?: {2,}|\\)+$/, "")));
+        if (index < buffer.length - 1) parts.push(hardBreak.test(line) ? "<br>" : soft);
+      });
+      return parts.join("");
+    };
+    const closeItem = () => { if (itemIndex >= 0) { out.push("</li>"); itemIndex = -1; } };
+    const flushPara = () => { if (para.length) { out.push(`<p>${joins(para, "\n")}</p>`); para.length = 0; } };
+    const flushQuote = () => {
+      if (!quote.length) return;
+      out.push(`<blockquote>${parseLines(quote.slice())}</blockquote>`);
+      quote.length = 0;
+    };
+    const closeList = () => { while (stack.length) { closeItem(); out.push(`</${stack.pop().type}>`); } };
+    const flushAll = () => { flushPara(); flushQuote(); closeList(); };
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i];
+      const token = line.match(/^\u0000(\d+)\u0000$/);
+      if (token) { flushAll(); out.push(blocks[Number(token[1])]); continue; }
+      if (!line.trim()) { flushPara(); flushQuote(); blank = true; continue; }
+      const item = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
+      // 空行只打断段落与引用；下一行仍是列表项（含缩进子项）时列表继续，层级不丢
+      if (blank) { blank = false; if (!item) closeList(); }
+      const heading = line.match(/^\s*(#{1,6})\s+(.+?)\s*#*\s*$/);
+      if (heading) {
+        flushAll(); const level = heading[1].length;
+        out.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`); continue;
       }
-      out.push(renderTable(head, aligns, rows));
-      i = j - 1; continue;
+      if (/^\s*(?:[-*_]\s*){3,}$/.test(line)) { flushAll(); out.push("<hr>"); continue; }
+      const quoteMark = line.match(/^\s*(?:>\s?)+/);
+      if (quoteMark) { flushPara(); closeList(); quote.push(line.slice(quoteMark[0].length)); continue; }
+      const head = tableCells(line);
+      const divider = head && i + 1 < lines.length ? tableCells(lines[i + 1]) : null;
+      if (divider && divider.length === head.length && MD_TABLE_DIVIDER.test(lines[i + 1])) {
+        flushAll();
+        const aligns = divider.map(tableAlign);
+        const rows = [];
+        let j = i + 2;
+        for (; j < lines.length; j += 1) {
+          const cells = tableCells(lines[j]);
+          if (!cells || !lines[j].trim()) break;
+          rows.push(cells);
+        }
+        out.push(renderTable(head, aligns, rows));
+        i = j - 1; continue;
+      }
+      if (item) {
+        flushPara(); flushQuote();
+        const indent = item[1].replace(/\t/g, "  ").length;
+        const type = /^\d/.test(item[2]) ? "ol" : "ul";
+        const number = type === "ol" ? parseInt(item[2], 10) : 0;
+        while (stack.length && stack[stack.length - 1].indent > indent) { closeItem(); out.push(`</${stack.pop().type}>`); }
+        let top = stack[stack.length - 1];
+        if (top && top.indent === indent && top.type !== type) { closeItem(); out.push(`</${top.type}>`); stack.pop(); top = stack[stack.length - 1]; }
+        if (!top || top.indent < indent) {
+          closeItem();
+          out.push(type === "ol" && number > 1 ? `<ol start="${number}">` : `<${type}>`);
+          stack.push({ type, indent });
+        }
+        closeItem();
+        const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
+        if (task) out.push(`<li class="md-task"><span class="md-check" aria-hidden="true">${task[1].toLowerCase() === "x" ? "☑" : "☐"}</span>${inlineMarkdown(task[2])}`);
+        else out.push(`<li>${inlineMarkdown(item[3])}`);
+        itemIndex = out.length - 1;
+        continue;
+      }
+      // 列表项的续行（GFM lazy continuation）：并进上一个 <li>，不再另起段落
+      if (itemIndex >= 0) { out[itemIndex] += " " + inlineMarkdown(line.trim()); continue; }
+      flushQuote();
+      para.push(line);
     }
-    const item = line.match(/^(\s*)([-*+]|\d+[.)])\s+(.*)$/);
-    if (item) {
-      flushPara(); flushQuote();
-      const indent = item[1].replace(/\t/g, "  ").length;
-      const type = /^\d/.test(item[2]) ? "ol" : "ul";
-      while (stack.length && stack[stack.length - 1].indent > indent) out.push(`</${stack.pop().type}>`);
-      let top = stack[stack.length - 1];
-      if (top && top.indent === indent && top.type !== type) { out.push(`</${top.type}>`); stack.pop(); top = stack[stack.length - 1]; }
-      if (!top || top.indent < indent) { out.push(`<${type}>`); stack.push({ type, indent }); }
-      const task = item[3].match(/^\[([ xX])\]\s*(.*)$/);
-      if (task) out.push(`<li class="md-task"><span class="md-check" aria-hidden="true">${task[1].toLowerCase() === "x" ? "☑" : "☐"}</span>${inlineMarkdown(task[2])}</li>`);
-      else out.push(`<li>${inlineMarkdown(item[3])}</li>`);
-      continue;
-    }
-    flushQuote(); closeList();
-    para.push(line);
-  }
-  flushAll();
-  return out.join("");
+    flushAll();
+    return out.join("");
+  };
+  return parseLines(source.split("\n"));
 }
 function structuredBlocks(text) {
   const found = [];
