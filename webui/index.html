@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
   <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
-  <link rel="stylesheet" href="style.css?v=44">
+  <link rel="stylesheet" href="style.css?v=45">
 </head>
 <body>
   <main class="app-shell">
@@ -53,9 +53,12 @@
     <section id="trajectory-view" class="trajectory-view hidden" aria-label="轨迹视图">
       <div class="traj-toolbar">
         <div class="traj-views" role="group" aria-label="轨迹分组">
-          <button type="button" data-traj-view="duration" class="active" title="按耗时展示">时长</button>
+          <button type="button" data-traj-view="duration" class="active" title="平铺展示（不分组）">时长</button>
           <button type="button" data-traj-view="turn" title="按轮次分组">轮次</button>
           <button type="button" data-traj-view="call" title="按模型调用分组">调用</button>
+        </div>
+        <div class="traj-views" role="group" aria-label="概览投影">
+          <button type="button" data-traj-metric aria-pressed="false" title="当前按操作数等宽展示；点击按真实耗时展示">真实耗时</button>
         </div>
         <input id="traj-search" type="search" placeholder="搜索轨迹" aria-label="搜索轨迹">
       </div>
@@ -137,6 +140,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=54" defer></script>
+  <script src="app.js?v=57" defer></script>
 </body>
 </html>

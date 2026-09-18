@@ -24,7 +24,7 @@ const state = {
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
   viewTab: "chat",
-  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, showTimeline:true},
+  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
 const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
@@ -126,6 +126,12 @@ function usageModelLabel(key) {
   const hit = state.models.find(item => item.provider === providerId);
   const providerName = (hit && hit.provider_name) || providerId;
   return `${providerName} / ${modelId}`;
+}
+// 卡头只放模型名本身，供应商留给用量明细弹层
+function modelShortLabel(key) {
+  const raw = String(key || "").trim();
+  const slash = raw.indexOf("/");
+  return slash > 0 ? raw.slice(slash + 1) : raw;
 }
 function visibleModels() { return state.models.filter(item => item.enabled !== false && item.provider_enabled !== false); }
 function renderModelList() {
@@ -376,6 +382,9 @@ function structuredBlocks(text) {
   });
   return {visible: visible.trim(), found};
 }
+// 一轮消息渲染成一张卡：卡头是身份与指标，卡身是正文，卡底是过程（思考与工具调用）。
+// 工具返回这类角色的名字直接进卡头，正文里不再重复一个标记
+const CARD_ROLES = {user: "你", assistant: "GRIDSTAR", tool: "工具返回"};
 function createMessage(role, content = "", label = "", attachments = null) {
   const welcome = document.getElementById("welcome");
   if (welcome) welcome.remove();
@@ -384,18 +393,19 @@ function createMessage(role, content = "", label = "", attachments = null) {
   node.className = `message ${role}`;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  if (label) bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
+  if (label && role !== "tool") bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
   const body = document.createElement("div"); body.className = "markdown"; body.innerHTML = basicMarkdown(content);
   bubble.append(body);
-  const msg = {node, bubble, body, text: content, reasoning: "", structured: []};
-  // 对话气泡底部栏：最左复制按钮；右下角时间，assistant 在时间左边再显示用时
-  if (role === "user" || role === "assistant") {
-    const footer = document.createElement("div");
-    footer.className = "bubble-footer";
-    footer.innerHTML = '<button class="bubble-copy" type="button" title="复制内容" aria-label="复制内容">'
-      + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
-      + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
-      + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button>'
+  const msg = {node, card: null, bubble, body, text: content, reasoning: "", structured: []};
+  // 卡头从左到右：身份、模型、用量、用时、时间、复制；两个明细弹层跟着各自的按钮
+  if (CARD_ROLES[role]) {
+    const card = document.createElement("section");
+    card.className = `turn-card ${role}`;
+    const head = document.createElement("header");
+    head.className = "turn-head";
+    head.innerHTML = (role === "assistant" ? '<span class="turn-avatar" aria-hidden="true">GS</span>' : "")
+      + '<span class="turn-name"></span>'
+      + (role === "assistant" ? '<span class="turn-model" hidden></span>' : "")
       + '<span class="bubble-meta"><span class="bubble-usage-wrap">'
       + '<button class="bubble-usage" type="button" title="本轮用量明细" hidden>'
       + '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
@@ -421,9 +431,16 @@ function createMessage(role, content = "", label = "", attachments = null) {
       + '<div class="pop-row" data-row="think"><span>思考用时</span><b></b></div>'
       + '<div class="pop-row" data-row="tps"><span>输出速度 (TPS)</span><b></b></div>'
       + '<div class="pop-row" data-row="ttft"><span>首 token 用时 (TTFT，累计)</span><b></b></div>'
-      + '</div></span><span class="bubble-time"></span></span>';
-    bubble.append(footer);
-    msg.footer = footer;
+      + '</div></span><span class="bubble-time"></span>'
+      + '<button class="bubble-copy" type="button" title="复制内容" aria-label="复制内容">'
+      + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
+      + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button></span>';
+    head.querySelector(".turn-name").textContent = role === "tool" ? (label || CARD_ROLES[role]) : CARD_ROLES[role];
+    card.append(head, bubble); node.append(card);
+    msg.card = card;
+    msg.modelEl = head.querySelector(".turn-model");
+    const footer = head;
     msg.timingBtn = footer.querySelector(".bubble-timing");
     msg.timingPop = footer.querySelector(".bubble-timing-pop");
     msg.usageBtn = footer.querySelector(".bubble-usage");
@@ -431,14 +448,14 @@ function createMessage(role, content = "", label = "", attachments = null) {
     msg.timeEl = footer.querySelector(".bubble-time");
     msg.timingBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      // 运行中实时计时阶段还没有定稿明细，不弹层
-      if (msg.liveTimer) return;
-      toggleBubblePop(msg.timingPop, msg.usagePop);
+      // 运行中实时计时阶段还没有定稿明细，不弹层（但已展开的其他弹层照样收起）
+      if (msg.liveTimer) { closeBubblePops(); return; }
+      toggleBubblePop(msg.timingPop);
     });
     msg.timingPop.addEventListener("click", (e) => e.stopPropagation());
     msg.usageBtn.addEventListener("click", (e) => {
       e.stopPropagation();
-      toggleBubblePop(msg.usagePop, msg.timingPop);
+      toggleBubblePop(msg.usagePop);
     });
     msg.usagePop.addEventListener("click", (e) => e.stopPropagation());
     // 实时消息默认填当前时间；历史渲染会用消息自带 ts 覆盖（老会话无 ts 则清空）
@@ -449,7 +466,8 @@ function createMessage(role, content = "", label = "", attachments = null) {
       copyText(text).then(() => showToast("已复制到剪贴板"), () => showToast("复制失败"));
     });
   }
-  node.append(bubble); el.messages.append(node);
+  if (!msg.card) node.append(bubble);
+  el.messages.append(node);
   renderMessageAttachments(bubble, attachments);
   scrollMessages();
   return msg;
@@ -457,18 +475,32 @@ function createMessage(role, content = "", label = "", attachments = null) {
 function setBubbleTime(msg, value) {
   if (msg && msg.timeEl) msg.timeEl.textContent = formatClock(value);
 }
-// 点击气泡外任意位置收起用量/用时明细弹层
-document.addEventListener("click", () => {
+// 卡头的模型名：发送时先填当前选择，done/历史再用后端回传的模型覆盖
+function setTurnModel(msg, key) {
+  if (!msg || !msg.modelEl) return;
+  const label = modelShortLabel(key);
+  msg.modelEl.textContent = label;
+  msg.modelEl.hidden = !label;
+}
+// 明细弹层全局唯一：卡片一多，各卡自己管自己就会出现好几个同时挂着，
+// 所以统一由一个变量记录当前打开的那个，开新的先收起旧的
+let openPop = null;
+// 收起全部明细弹层。点击弹层外任意位置都会走到这里（弹层与触发按钮内部 stopPropagation 除外）
+function closeBubblePops() {
   const open = document.querySelectorAll(".bubble-timing-pop:not([hidden]),.bubble-usage-pop:not([hidden])");
   for (let i = 0; i < open.length; i++) open[i].hidden = true;
-});
-// 弹层左边缘对齐按钮、显示在按钮上方；两个弹层互斥展开。
+  openPop = null;
+}
+document.addEventListener("click", closeBubblePops);
+// 弹层左边缘对齐按钮、显示在按钮下方；已经开着同一个则收起。
 // 消息区 overflow-x:hidden，靠右放不下时整体左移，避免面板被裁掉。
-function toggleBubblePop(pop, other) {
-  if (other) other.hidden = true;
-  pop.hidden = !pop.hidden;
+function toggleBubblePop(pop) {
+  const wasOpen = openPop === pop && !pop.hidden;
+  closeBubblePops();
+  if (wasOpen) return;
+  pop.hidden = false;
+  openPop = pop;
   pop.style.marginLeft = "";
-  if (pop.hidden) return;
   const box = el.messages.getBoundingClientRect(), rect = pop.getBoundingClientRect();
   const overflow = rect.right - (box.right - 6);
   if (overflow <= 0) return;
@@ -489,6 +521,8 @@ function setBubbleTiming(msg, info) {
   if (t.elapsed == null) { msg.timingBtn.hidden = true; return; }
   msg.timingBtn.hidden = false;
   msg.timingBtn.querySelector(".bubble-timing-label").textContent = "用时 " + formatDurationCn(t.elapsed);
+  // 思考用时同时写进卡底的思考 chip，卡片收起时也能看到思考花了多久
+  if (t.think != null) { msg.thinkMs = t.think; updateThinkSummary(msg); }
   const rows = {
     total: formatDurationCn(t.elapsed),
     think: formatDurationCn(t.think),
@@ -507,6 +541,7 @@ function setBubbleTiming(msg, info) {
 function startLiveTiming(msg, startTs) {
   if (!msg || !msg.timingBtn) return;
   stopLiveTiming(msg);
+  if (msg.card) msg.card.classList.add("streaming");
   let t0 = startTs ? new Date(startTs).getTime() : NaN;
   if (isNaN(t0)) t0 = Date.now();
   const label = msg.timingBtn.querySelector(".bubble-timing-label");
@@ -531,9 +566,9 @@ function scrollMessages(force) {
 }
 // 滚动条拖动、滚轮、触摸、键盘翻页都会触发 scroll：离开底部即交出滚动控制权
 el.messages.addEventListener("scroll", () => { followBottom = atBottom(); }, {passive: true});
-// 点击展开工具调用/思考过程卡片会把内容顶高，此时用户已不在底部，下一帧重判后停止跟随，避免刚展开就被拽走
+// 点击展开过程行/工具条目会把内容顶高，此时用户已不在底部，下一帧重判后停止跟随，避免刚展开就被拽走
 el.messages.addEventListener("click", event => {
-  if (!event.target.closest("summary")) return;
+  if (!event.target.closest("summary,.proc-row")) return;
   requestAnimationFrame(() => { followBottom = atBottom(); });
 });
 // 会话的流式回复已被切走（DOM 摘下暂存）：内容照常写入暂存节点，但滚动等全局副作用要锁住
@@ -548,6 +583,7 @@ function formatInt(n) {
 function setBubbleUsage(message, usage) {
   if (!message || !message.usageBtn) return;
   const u = usage || {};
+  if (u.model) setTurnModel(message, u.model);
   const total = u.total || 0, input = u.input || 0, output = u.output || 0;
   if (!total && !input && !output) { message.usageBtn.hidden = true; return; }
   message.usageBtn.hidden = false;
@@ -574,8 +610,9 @@ function setBubbleUsage(message, usage) {
 function finishAssistant(message, deferred = false) {
   if (!message || message.finished) return;
   message.finished = true;
-  // 流结束（done/停止/出错）统一停掉实时「已用时」计时器
+  // 流结束（done/停止/出错）统一停掉实时「已用时」计时器，并让卡底的过程行停止呼吸
   stopLiveTiming(message);
+  settleProcess(message);
   const parsed = structuredBlocks(message.text);
   message.body.innerHTML = basicMarkdown(parsed.visible);
   parsed.found.forEach(data => renderStructured(data, message.node));
@@ -585,9 +622,9 @@ function finishAssistant(message, deferred = false) {
   // 本轮以询问浮层或工具参数面板收尾 → 会话进入「待确认」，等用户操作
   message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams))
     || Boolean(message.pendingAsk);
-  // 只有思考过程没有正文时也要留住气泡：停止在思考阶段是常见操作，丢掉节点等于
+  // 只有思考过程没有正文时也要留住这一轮：停止在思考阶段是常见操作，丢掉节点等于
   // 把这段内容从实时视图和重渲染后的历史里一起抹掉
-  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".tool-group,.approval-card,.reasoning")) message.node.remove();
+  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".proc-row,.approval-card")) message.node.remove();
   // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下；
   // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
   if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
@@ -595,14 +632,12 @@ function finishAssistant(message, deferred = false) {
 }
 function appendReasoning(message, delta) {
   message.reasoning += delta || "";
-  let details = $(".reasoning", message.node);
-  if (!details) {
-    details = document.createElement("details"); details.className = "reasoning";
-    details.innerHTML = "<summary>思考过程</summary><div></div>";
-    // 思考过程始终置顶（工具调用组固定挂在它下方，故不能用 bubble 作锚点）
-    message.node.insertBefore(details, message.node.firstChild);
-  }
-  $("div", details).textContent = message.reasoning;
+  const row = processRow(message.node, "think", PROC_LABEL.think, true);
+  if (!row) return;
+  row.classList.add("running");
+  setProcSummary(row, "思考中 · 已生成 " + message.reasoning.length + " 字");
+  const rail = processRail(message.node, "think");
+  if (rail) rail.textContent = message.reasoning;
 }
 
 function renderStructured(data, parent) {
@@ -807,27 +842,98 @@ function renderPhase(value) {
   phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.note || item.desc || "")}"><span class="phase-step-title">${escapeHtml(item.title || item.id || "阶段")}</span><span class="phase-step-note">${escapeHtml(item.note || item.desc || "")}</span></div>`));
 }
 
-// 工具调用折叠组固定排在「思考过程」下方、正文气泡上方
-function toolGroup(parent) {
-  let group = parent.querySelector(":scope > .tool-group");
-  if (group) return group;
-  group = document.createElement("details"); group.className = "tool-group";
-  group.innerHTML = `<summary class="tool-group-head"><span class="tool-chevron" aria-hidden="true"></span><strong>工具调用</strong><span class="tool-count">0 个</span><span class="status">执行中</span></summary><div class="tool-list"></div>`;
-  const reasoning = parent.querySelector(":scope > .reasoning");
-  const bubble = parent.querySelector(":scope > .bubble");
-  if (reasoning) reasoning.insertAdjacentElement("afterend", group);
-  else if (bubble) parent.insertBefore(group, bubble);
-  else parent.append(group);
-  return group;
+// 过程区挂在卡底：思考与工具调用各占一行 chip（默认收起，可就地展开），
+// 位置在整轮生命周期里固定不变——运行态只是换成呼吸点，结束后原地变回箭头，没有节点搬家
+function processHost(parent) {
+  if (!parent) return null;
+  const card = parent.classList && parent.classList.contains("turn-card")
+    ? parent : parent.querySelector(":scope > .turn-card");
+  if (!card) return null;
+  let host = card.querySelector(":scope > .turn-process");
+  if (!host) { host = document.createElement("div"); host.className = "turn-process"; card.append(host); }
+  return host;
 }
-function updateToolGroup(group) {
-  const items = [...group.querySelectorAll(".tool-item")];
-  $(".tool-count", group).textContent = `${items.length} 个`;
+function processToggle(row) {
+  const body = row.parentNode.querySelector(`:scope > .proc-body[data-proc-body="${row.dataset.proc}"]`);
+  const open = row.getAttribute("aria-expanded") === "true";
+  row.setAttribute("aria-expanded", String(!open));
+  if (body) body.hidden = open;
+}
+// first 为真时插到「工具调用」前面，保证思考始终在上
+function processRow(parent, key, label, first) {
+  const host = processHost(parent);
+  if (!host) return null;
+  let row = host.querySelector(`:scope > .proc-row[data-proc="${key}"]`);
+  if (row) return row;
+  row = document.createElement("div");
+  row.className = "proc-row"; row.dataset.proc = key;
+  row.setAttribute("role", "button"); row.setAttribute("tabindex", "0"); row.setAttribute("aria-expanded", "false");
+  row.innerHTML = '<span class="proc-chevron" aria-hidden="true"></span>'
+    + '<span class="run-dot" aria-hidden="true"></span>'
+    + '<span class="proc-label"></span><span class="proc-sum"></span>';
+  row.querySelector(".proc-label").textContent = label;
+  const body = document.createElement("div");
+  body.className = "proc-body"; body.dataset.procBody = key; body.hidden = true;
+  const anchor = first && host.querySelector(':scope > .proc-row[data-proc="tools"]');
+  if (anchor) { host.insertBefore(row, anchor); host.insertBefore(body, anchor); }
+  else { host.append(row); host.append(body); }
+  row.addEventListener("click", () => processToggle(row));
+  row.addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault(); processToggle(row);
+  });
+  return row;
+}
+// 过程行的展开体里统一用一根竖线做缩进轨道
+const PROC_LABEL = {think: "思考过程", tools: "工具调用"};
+function processRail(parent, key) {
+  const row = processRow(parent, key, PROC_LABEL[key], key === "think");
+  if (!row) return null;
+  const body = row.parentNode.querySelector(`:scope > .proc-body[data-proc-body="${key}"]`);
+  let rail = body.querySelector(".proc-rail");
+  if (!rail) { rail = document.createElement("div"); rail.className = "proc-rail"; body.append(rail); }
+  return rail;
+}
+function setProcSummary(row, text) { if (row) row.querySelector(".proc-sum").textContent = text; }
+function updateToolGroup(parent) {
+  const row = parent && parent.querySelector('.proc-row[data-proc="tools"]');
+  if (!row) return;
+  const items = [...parent.querySelectorAll(".tool-item")];
   const running = items.some(item => item.dataset.state === "running");
   const failed = items.some(item => item.dataset.state === "failed");
-  const status = $(".tool-group-head .status", group);
-  status.textContent = running ? "执行中" : failed ? "失败" : "完成";
-  status.className = `status ${running ? "" : failed ? "failed" : "succeeded"}`;
+  setProcSummary(row, `${items.length} 个 · ${running ? "执行中" : failed ? "有失败" : "全部完成"}`);
+  row.classList.toggle("running", running);
+  row.classList.toggle("failed", !running && failed);
+}
+// 思考 chip 的摘要：定稿后补上思考用时，字符数始终保留
+function updateThinkSummary(message) {
+  if (!message || !message.card) return;
+  const row = message.card.querySelector('.proc-row[data-proc="think"]');
+  if (!row) return;
+  const chars = (message.reasoning || "").length;
+  const duration = message.thinkMs == null ? "" : formatDurationCn(message.thinkMs);
+  setProcSummary(row, [duration, chars ? chars + " 字" : ""].filter(Boolean).join(" · "));
+}
+// 思考段落结束（正文开始产出或开始调工具）：思考 chip 立刻停止「思考中」，
+// 否则整轮都停在呼吸态，看起来像一直在想
+function settleThink(message) {
+  if (!message || !message.card) return;
+  const row = message.card.querySelector('.proc-row[data-proc="think"]');
+  if (!row || !row.classList.contains("running")) return;
+  row.classList.remove("running");
+  updateThinkSummary(message);
+}
+// 流结束（正常收尾 / 停止 / 出错）统一落定：停掉呼吸点，别让动画一直转下去
+function settleProcess(message) {
+  if (!message || !message.card) return;
+  message.card.classList.remove("streaming");
+  const todos = message.card.querySelectorAll(".proc-row.running");
+  for (let i = 0; i < todos.length; i++) {
+    const row = todos[i];
+    row.classList.remove("running");
+    if (row.dataset.proc === "think") updateThinkSummary(message);
+    else setProcSummary(row, row.querySelector(".proc-sum").textContent.replace("执行中", "已中断"));
+  }
 }
 function toolArgsTableHtml(args) {
   const entries = args && typeof args === "object" && !Array.isArray(args) ? Object.entries(args) : [];
@@ -841,10 +947,14 @@ function toolArgsTableHtml(args) {
   return `<div class="tool-args-scroll"><table class="tool-args-table"><thead><tr><th scope="col">参数</th><th scope="col">值</th></tr></thead><tbody>${rows}</tbody></table></div>`;
 }
 function renderToolCall(event, parent) {
-  const group = toolGroup(parent); const item = document.createElement("details");
+  const rail = processRail(parent, "tools");
+  if (!rail) return;
+  let list = rail.querySelector(".tool-list");
+  if (!list) { list = document.createElement("div"); list.className = "tool-list"; rail.append(list); }
+  const item = document.createElement("details");
   item.className = "tool-item"; item.dataset.callId = event.id || event.call_id || ""; item.dataset.state = "running";
   item.innerHTML = `<summary><span class="tool-dot" aria-hidden="true"></span><strong>${escapeHtml(event.name || "工具调用")}</strong><span class="status">执行中</span></summary><div class="tool-detail"><span class="tool-detail-label">调用参数</span>${toolArgsTableHtml(event.args)}<div class="tool-result hidden"><span class="tool-detail-label">调用结果</span><pre></pre></div></div>`;
-  $(".tool-list", group).append(item); updateToolGroup(group); scrollMessages();
+  list.append(item); updateToolGroup(parent); scrollMessages();
 }
 // 工具返回值多是 JSON 字符串：能解析就缩进美化，嵌套的 JSON 字符串一并展开，方便直接阅读
 function expandJsonStrings(value, depth) {
@@ -876,7 +986,7 @@ function renderToolResult(event, parent) {
   item.dataset.state = failed ? "failed" : "succeeded";
   const status = $(":scope > summary .status", item); status.textContent = failed ? "失败" : "完成"; status.className = `status ${failed ? "failed" : "succeeded"}`;
   const result = $(".tool-result", item); result.classList.remove("hidden"); $("pre", result).textContent = formatToolResult(event.result);
-  updateToolGroup(item.closest(".tool-group")); scrollMessages();
+  updateToolGroup(item.closest(".message")); scrollMessages();
 }
 function coerceSchemaValue(raw, type) {
   const text = String(raw == null ? "" : raw).trim();
@@ -1149,7 +1259,7 @@ function failureText(error) {
 }
 function renderFailure(error, retry) {
   const notice = createMessage("assistant", failureText(error), error.retryable ? "RETRY" : "ERROR");
-  notice.bubble.style.borderColor = "var(--red)";
+  if (notice.card) { notice.card.style.borderColor = "var(--red)"; notice.card.style.borderLeftColor = "var(--red)"; }
   if (retry) {
     const button = document.createElement("button");
     button.type = "button"; button.className = "action-button"; button.style.marginTop = "10px";
@@ -1184,10 +1294,10 @@ async function consumeSse(response, onEvent, controller) {
 function handleStreamEvent(id, type, event, assistant) {
   const hidden = hiddenFor(id);
   if (!hidden && TRAJ_LIVE_TYPES.indexOf(type) >= 0) { trajIngest(event); scheduleTrajRender(); }
-  if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
+  if (type === "text_chunk") { settleThink(assistant); assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
   else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
   else if (type === "plan_updated") { if (!hidden) renderPhase(event.plan); }
-  else if (type === "tool_call") { if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node); }
+  else if (type === "tool_call") { settleThink(assistant); if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node); }
   else if (type === "tool_result") { if (event.name !== ASK_USER_TOOL) renderToolResult(event,assistant.node); }
   else if (type === "options_offered") { assistant.pendingAsk = event; }
   else if (type === "tool_approval_required") { renderApproval(event, assistant.node, id); setStatus(id, "waiting"); }
@@ -1225,6 +1335,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   }
   const skill = selectedSkill();
   const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : "");
+  setTurnModel(assistant, el.model.value);
   startLiveTiming(assistant, null);
   const controller = createAbortController();
   state.controllers.set(sessionId, controller);
@@ -1265,6 +1376,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
 // 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
 async function reconnectStream(sessionId, info, turnTs) {
   const assistant = createMessage("assistant", "", "");
+  setTurnModel(assistant, (state.session && state.session.meta.model_id) || el.model.value);
   // 重连气泡时间/计时起点用本轮原始发送时间（落盘 ts），不是刷新时刻
   if (turnTs) setBubbleTime(assistant, turnTs);
   startLiveTiming(assistant, turnTs || null);
@@ -1847,12 +1959,12 @@ function renderTrajectory() {
   const st = state.traj;
   st.records = trajProject(st.events);
   markTurnStarts(st.records);
-  if (st.showTimeline) { el.trajTimeline.classList.remove("hidden"); renderTrajTimeline(); }
-  else el.trajTimeline.classList.add("hidden");
+  el.trajTimeline.classList.remove("hidden");
+  renderTrajTimeline();
   const query = st.query.trim().toLowerCase();
   let records = st.records;
   if (query) records = records.filter(rec => trajRecordText(rec).toLowerCase().indexOf(query) >= 0);
-  if (st.range) records = records.filter(rec => { const t = trajTimeMs(rec); return !isNaN(t) && t >= st.range.start && t <= st.range.end; });
+  if (st.range) records = trajRangeFilter(records, st.range);
   let maxMs = 0;
   records.forEach(rec => { const ms = trajRecordMs(rec); if (ms != null && ms > maxMs) maxMs = ms; });
   const chunks = [];
@@ -1888,10 +2000,13 @@ function renderTrajectory() {
     const main = rec.source === "tool"
       ? `<strong>${escapeHtml(rec.name)}</strong><span class="traj-row-preview">${escapeHtml(trajPreview(rec.status === "running" ? JSON.stringify(rec.args) : rec.content, 160))}</span>`
       : `<span class="traj-row-label">${escapeHtml(rec.label)}${rec.model ? ` <small>${escapeHtml(rec.model)}</small>` : ""}</span><span class="traj-row-preview">${escapeHtml(trajPreview(rec.content, 160))}</span>`;
-    const bar = (st.view === "duration" && st.showTimeline && maxMs > 0) ? (() => {
+    // 行内条 = 耗时占比（只在真实耗时投影下有意义）：无耗时的记录只画空轨道（不臆造时长），保证右侧 token 列对齐
+    const bar = (st.actualDuration && maxMs > 0) ? (() => {
       const ms = trajRecordMs(rec);
-      const pct = ms == null ? 0 : Math.max(0.5, (ms / maxMs) * 100);
-      return ms == null ? "" : `<span class="traj-row-bar"><i style="width:${pct.toFixed(2)}%"></i></span>`;
+      if (ms == null) return '<span class="traj-row-bar" title="该记录无耗时"></span>';
+      const pct = Math.max(0.5, (ms / maxMs) * 100);
+      const tip = "耗时 " + trajFormatMs(ms) + " · 本视图最长 " + trajFormatMs(maxMs) + "（" + pct.toFixed(1) + "%）";
+      return `<span class="traj-row-bar" title="${escapeHtml(tip)}"><i style="width:${pct.toFixed(2)}%"></i></span>`;
     })() : "";
     const statusCls = rec.status === "failed" ? " failed" : (rec.status === "running" ? " running" : "");
     chunks.push(`<div class="${cls.join(" ")}${statusCls}" role="listitem" tabindex="0" data-id="${rec.id}"><span class="traj-badge source-${rec.source}">${TRAJ_SOURCE_LABEL[rec.source]}</span><span class="traj-row-main">${main}</span><span class="traj-row-meta">${escapeHtml(trajRowMeta(rec))}</span>${bar}</div>`);
@@ -1910,11 +2025,22 @@ function trajAllGroupKeys(view, records) {
   records.forEach(rec => { const k = trajGroupKey(view, rec); if (k && keys.indexOf(k) < 0) keys.push(k); });
   return keys;
 }
-// 轮次边界粗线：投影后按 turn 变化打标
+// 轮次边界粗线：投影后按 turn 变化打标；同时记下投影内序号（等宽投影与区间命中都用它）
 function markTurnStarts(records) {
   let last = null;
-  records.forEach(rec => { rec.__turnStart = rec.turn !== last; last = rec.turn; });
+  records.forEach((rec, ix) => { rec.__ix = ix; rec.__turnStart = rec.turn !== last; last = rec.turn; });
 }
+// 区间命中：等宽投影按 span 序号，耗时投影按真实时间（与 dsh 的 focusIndexes 同义）
+function trajRangeFilter(records, range) {
+  if (range.seq) {
+    const hit = {};
+    (state.traj.spans || []).forEach(sp => { if (sp.ds <= range.end && sp.de >= range.start) hit[sp.ix] = true; });
+    return records.filter(rec => hit[rec.__ix]);
+  }
+  return records.filter(rec => { const t = trajTimeMs(rec); return !isNaN(t) && t >= range.start && t <= range.end; });
+}
+// 概览投影（对齐 dsh）：默认「等宽操作数」按记录序号等分，不受空转间隔影响；
+// 打开「真实耗时」后按真实起止绘制，并把空转间隔整体折叠掉，避免长会话把条压成发丝。
 function renderTrajTimeline() {
   const st = state.traj;
   const spans = [];
@@ -1923,40 +2049,54 @@ function renderTrajTimeline() {
     const durTxt = ms == null ? "" : " · " + trajFormatMs(ms);
     if (rec.source === "user") {
       const t = trajTimeMs(rec);
-      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user", id: rec.id, title: (rec.label || "用户消息") + " · " + (rec.ts || "")});
+      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user", id: rec.id, ix: rec.__ix, title: (rec.label || "用户消息") + " · " + (rec.ts || "")});
     } else if (rec.kind === "request" && rec.timing && rec.timing.start) {
       const t = Date.parse(rec.timing.start);
       if (isNaN(t)) return;
       const total = rec.timing.total_ms != null ? rec.timing.total_ms : 0;
       const title = rec.label + durTxt;
-      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model", id: rec.id, title: title});
-      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft", id: rec.id, title: title + " · 首 token " + trajFormatMs(rec.timing.ttft_ms)});
+      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model", id: rec.id, ix: rec.__ix, title: title});
+      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft", id: rec.id, ix: rec.__ix, title: title + " · 首 token " + trajFormatMs(rec.timing.ttft_ms)});
     } else if (rec.source === "tool" && rec.durationMs != null) {
       const endT = trajTimeMs(rec);
-      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool", id: rec.id, title: (rec.name || "工具") + durTxt});
+      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool", id: rec.id, ix: rec.__ix, title: (rec.name || "工具") + durTxt});
     }
   });
+  if (!st.actualDuration) {
+    spans.forEach((sp, i) => { sp.ds = i; sp.de = i + 1; }); // 等宽：每条占一格，x = 序号
+  } else {
+    // 耗时：没有任何 span 覆盖的时段（空转）不计入宽度
+    let removed = 0, covered = null;
+    spans.slice().sort((a, b) => a.start - b.start || a.end - b.end).forEach(sp => {
+      if (covered !== null && sp.start > covered) removed += sp.start - covered;
+      sp.__idle = removed;
+      covered = covered === null ? sp.end : Math.max(covered, sp.end);
+    });
+    spans.forEach(sp => { sp.ds = sp.start - sp.__idle; sp.de = sp.end - sp.__idle; });
+  }
   st.spans = spans;
   const lanes = [[], [], []];
-  let tMin = Infinity, tMax = -Infinity;
-  spans.forEach(sp => { lanes[sp.lane].push(sp); if (sp.start < tMin) tMin = sp.start; if (sp.end > tMax) tMax = sp.end; });
-  if (!isFinite(tMin)) { el.trajTimeline.innerHTML = '<div class="traj-lanes"><div class="traj-lane"><span class="traj-lane-label">输入</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">模型</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">工具</span><div class="traj-lane-track"></div></div></div>'; st.scale = null; return; }
-  const pad = Math.max((tMax - tMin) * 0.01, 50);
-  tMin -= pad; tMax += pad;
-  st.scale = {min: tMin, max: tMax};
+  let dMin = Infinity, dMax = -Infinity;
+  spans.forEach(sp => { lanes[sp.lane].push(sp); if (sp.ds < dMin) dMin = sp.ds; if (sp.de > dMax) dMax = sp.de; });
+  if (!isFinite(dMin)) { el.trajTimeline.innerHTML = '<div class="traj-lanes"><div class="traj-lane"><span class="traj-lane-label">输入</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">模型</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">工具</span><div class="traj-lane-track"></div></div></div>'; st.scale = null; return; }
+  if (st.actualDuration) { const pad = Math.max((dMax - dMin) * 0.01, 20); dMin -= pad; dMax += pad; }
+  st.scale = {min: dMin, max: dMax, seq: !st.actualDuration};
   const names = ["输入", "模型", "工具"];
   const laneHtml = lanes.map((list, idx) => {
     const items = list.map(sp => {
-      const left = ((sp.start - tMin) / (tMax - tMin)) * 100;
-      const width = Math.max(((sp.end - sp.start) / (tMax - tMin)) * 100, 0.35);
+      const left = ((sp.ds - dMin) / (dMax - dMin)) * 100;
+      const width = ((sp.de - sp.ds) / (dMax - dMin)) * 100;
+      // 相邻条各让出 min(宽度 8%, 1px) 的缝，最短保留 2px 保证可见（与 dsh 的 span 写法一致）
+      const gap = Math.min(width * 0.08, 1).toFixed(3);
       const sel = sp.id === st.selected ? " selected" : "";
-      return `<i class="traj-span ${sp.cls}${sel}" data-id="${sp.id}" title="${escapeHtml(sp.title)}" style="left:${left.toFixed(3)}%;width:${width.toFixed(3)}%"></i>`;
+      const style = `left:calc(${left.toFixed(3)}% + min(${gap}%,1px));width:max(2px,calc(${width.toFixed(3)}% - 2 * min(${gap}%,1px)))`;
+      return `<i class="traj-span ${sp.cls}${sel}" data-id="${sp.id}" title="${escapeHtml(sp.title)}" style="${style}"></i>`;
     }).join("");
     return `<div class="traj-lane"><span class="traj-lane-label">${names[idx]}</span><div class="traj-lane-track">${items}</div></div>`;
   }).join("");
   const rangeHtml = st.range ? (() => {
-    const left = Math.max(0, ((st.range.start - tMin) / (tMax - tMin)) * 100);
-    const right = Math.min(100, ((st.range.end - tMin) / (tMax - tMin)) * 100);
+    const left = Math.max(0, ((st.range.d0 - dMin) / (dMax - dMin)) * 100);
+    const right = Math.min(100, ((st.range.d1 - dMin) / (dMax - dMin)) * 100);
     return `<div class="traj-range" style="left:${left.toFixed(3)}%;width:${Math.max(right - left, 0).toFixed(3)}%"></div>`;
   })() : "";
   el.trajTimeline.innerHTML = `<div class="traj-lanes">${laneHtml}${rangeHtml}</div>`;
@@ -2050,17 +2190,30 @@ function switchViewTab(tab) {
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
   else { if (el.phasePanel.innerHTML.trim()) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
 }
-// 时间轴命中检测：优先取包含该时刻的最窄跨度，否则取时间上最近的跨度（deepseek-harness 式点击定位）
-function trajSpanHit(t) {
+// 时间轴命中检测：优先取包含该点的最窄跨度，否则取投影上最近的跨度（deepseek-harness 式点击定位）
+function trajSpanHit(d) {
   const spans = state.traj.spans || [];
-  if (t == null || !spans.length) return null;
+  if (d == null || !spans.length) return null;
   let best = null, bestDist = Infinity, bestWidth = Infinity;
   spans.forEach(sp => {
-    const dist = t < sp.start ? sp.start - t : (t > sp.end ? t - sp.end : 0);
-    const width = sp.end - sp.start;
+    const dist = d < sp.ds ? sp.ds - d : (d > sp.de ? d - sp.de : 0);
+    const width = sp.de - sp.ds;
     if (dist < bestDist || (dist === bestDist && width < bestWidth)) { best = sp; bestDist = dist; bestWidth = width; }
   });
   return best ? best.id : null;
+}
+// 投影坐标 → 真实时间：沿最近的 span 反查（空转间隔已被折叠成 0 宽，不会落在里面）
+function trajTimeAtDisplay(d) {
+  const st = state.traj;
+  const spans = st.spans || [];
+  if (d == null || (st.scale && st.scale.seq) || !spans.length) return null;
+  let best = null, bestDist = Infinity;
+  spans.forEach(sp => {
+    const dist = d < sp.ds ? sp.ds - d : (d > sp.de ? d - sp.de : 0);
+    if (dist < bestDist) { best = sp; bestDist = dist; }
+  });
+  if (!best) return null;
+  return best.start + Math.min(Math.max(d - best.ds, 0), best.end - best.start);
 }
 // 选中账本记录：打开详情面板并把账本行滚动到可视区
 function selectTrajRecord(id) {
@@ -2070,10 +2223,10 @@ function selectTrajRecord(id) {
   const row = el.trajLedger.querySelector('.traj-row[data-id="' + id + '"]');
   if (row) row.scrollIntoView({block: "nearest"});
 }
-// 时间轴拖拽选区间；单击（未拖动）定位到该时刻的账本记录并展示详情
+// 时间轴拖拽选区间；单击（未拖动）定位到该处的账本记录并展示详情
 (function bindTrajTimelineDrag() {
   let drag = null;
-  const timeAt = clientX => {
+  const displayAt = clientX => {
     const scale = state.traj.scale;
     // span 按 .traj-lane-track 宽度百分比定位，坐标换算须用轨道矩形（含泳道标签偏移与内边距会失准）
     const track = el.trajTimeline.querySelector(".traj-lane-track");
@@ -2082,26 +2235,35 @@ function selectTrajRecord(id) {
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return scale.min + ratio * (scale.max - scale.min);
   };
+  // 区间同时记投影坐标（画选区）与命中口径：等宽投影按 span 序号，耗时投影按真实时间
+  const setRange = (dA, dB) => {
+    const st = state.traj;
+    const d0 = Math.min(dA, dB), d1 = Math.max(dA, dB);
+    if (st.scale && st.scale.seq) { st.range = {seq: true, start: d0, end: d1, d0: d0, d1: d1}; return; }
+    const t0 = trajTimeAtDisplay(d0), t1 = trajTimeAtDisplay(d1);
+    if (t0 == null || t1 == null) return;
+    st.range = {seq: false, start: Math.min(t0, t1), end: Math.max(t0, t1), d0: d0, d1: d1};
+  };
   el.trajTimeline.addEventListener("mousedown", event => {
-    const t = timeAt(event.clientX);
-    if (t == null) return;
-    drag = {startT: t, startX: event.clientX, moved: false};
+    const d = displayAt(event.clientX);
+    if (d == null) return;
+    drag = {startD: d, startX: event.clientX, moved: false};
     event.preventDefault();
   });
   document.addEventListener("mousemove", event => {
     if (!drag) return;
-    const t = timeAt(event.clientX);
-    if (t == null) return;
+    const d = displayAt(event.clientX);
+    if (d == null) return;
     if (Math.abs(event.clientX - drag.startX) > 3) drag.moved = true;
     if (!drag.moved) return;
-    state.traj.range = {start: Math.min(drag.startT, t), end: Math.max(drag.startT, t)};
+    setRange(drag.startD, d);
     scheduleTrajRender();
   });
   document.addEventListener("mouseup", event => {
     if (!drag) return;
     if (!drag.moved) {
       state.traj.range = null;
-      const id = trajSpanHit(timeAt(event.clientX));
+      const id = trajSpanHit(displayAt(event.clientX));
       if (id) selectTrajRecord(id);
       else scheduleTrajRender();
     }
@@ -2111,23 +2273,36 @@ function selectTrajRecord(id) {
 })();
 el.tabChat.addEventListener("click", () => switchViewTab("chat"));
 el.tabTraj.addEventListener("click", () => switchViewTab("traj"));
-// 工具栏按钮高亮：时长为开关（同时反映条状显示开闭），轮次/调用为分组选中态
+// 工具栏按钮高亮：时长为平铺视图选中态，轮次/调用为分组选中态，真实耗时投影单独一个开关
 function trajSyncViewButtons() {
   const st = state.traj;
   Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), other => {
-    const v = other.getAttribute("data-traj-view");
-    const active = v === "duration" ? (st.view === "duration" && st.showTimeline) : st.view === v;
-    other.classList.toggle("active", active);
+    other.classList.toggle("active", other.getAttribute("data-traj-view") === st.view);
   });
+  const metric = document.querySelector("[data-traj-metric]");
+  if (metric) {
+    const on = !!st.actualDuration;
+    metric.classList.toggle("active", on);
+    metric.setAttribute("aria-pressed", String(on));
+    metric.title = on ? "当前按真实耗时展示（空转间隔已折叠）；点击切回按操作数等宽" : "当前按操作数等宽展示；点击按真实耗时展示";
+  }
 }
+// 概览投影开关：等宽操作数（默认）↔ 真实耗时；换投影后旧选区不再对应，清掉
+document.querySelector("[data-traj-metric]").addEventListener("click", () => {
+  const st = state.traj;
+  st.actualDuration = !st.actualDuration;
+  st.range = null;
+  trajSyncViewButtons();
+  renderTrajectory();
+});
 Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), button => {
   button.addEventListener("click", () => {
     const view = button.getAttribute("data-traj-view");
     const st = state.traj;
     if (view === "duration") {
-      // 时长是开关：时长视图内再点切换时间轴泳道与行内时长条的显示；其他视图下点击回到时长视图
-      if (st.view === "duration") st.showTimeline = !st.showTimeline;
-      else { st.view = "duration"; st.showTimeline = true; }
+      // 时长 = 平铺（不分组）视图；泳道与行内耗时条由「真实耗时」开关单独控制
+      if (st.view === "duration") return;
+      st.view = "duration";
       trajSyncViewButtons();
       renderTrajectory();
       return;

@@ -52,13 +52,13 @@ def test_webui_groups_tool_calls_in_collapsible_details():
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
     stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
 
+    # 工具调用仍是逐条可折叠的 details，只是外层改挂到卡片底部的「工具调用」过程行
     assert 'document.createElement("details")' in script
-    assert 'className = "tool-group"' in script
     assert 'className = "tool-item"' in script
-    assert 'class="tool-count"' in script
-    assert 'toolGroup(parent)' in script
-    assert '.tool-group{' in stylesheet
-    assert '.tool-item>summary{' in stylesheet
+    assert 'processRail(parent, "tools")' in script
+    assert 'data-proc="tools"' in script
+    assert ".proc-row{" in stylesheet
+    assert ".tool-item>summary{" in stylesheet
 
 
 def test_webui_contains_model_settings_center_contract():
@@ -128,7 +128,6 @@ def test_webui_model_listbox_has_static_provider_groups():
     group = script[script.index("function renderModelList"):script.index("function setConnection")]
     assert "items[0].provider_name || provider" in group
     assert "escapeHtml(label)" in group
-    assert 'className = "tool-group"' in script
     assert 'document.createElement("details")' not in script[script.index("function renderModelList"):script.index("function setConnection")]
     assert ".model-listbox{" in stylesheet
     assert ".model-group-label{" in stylesheet
@@ -287,8 +286,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=54" in index
-    assert "style.css?v=44" in index
+    assert "app.js?v=57" in index
+    assert "style.css?v=45" in index
 
 
 def test_webui_voice_input_contract():
@@ -302,8 +301,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=44" in index
-    assert "app.js?v=54" in index
+    assert "style.css?v=45" in index
+    assert "app.js?v=57" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
