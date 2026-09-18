@@ -12,7 +12,7 @@ function createAbortController() {
 }
 const state = {
   sessions: [], session: null, models: [], skills: [], mode: "manual",
-  workflow: null, configLoaded: false,
+  workflow: null, phasePlan: null, configLoaded: false,
   // 流式状态按会话隔离（支持多会话真并发）：
   // controllers: id → AbortController；streams: id → {hidden:切走后 DOM 已摘下暂存, workflow:工作流流}；
   // status: id → 徽标状态 running|done|stopped|error（done 常驻，该会话下次发消息时刷新）；
@@ -592,6 +592,8 @@ function setBubbleUsage(message, usage) {
 function finishAssistant(message, deferred = false) {
   if (!message || message.finished) return;
   message.finished = true;
+  // 本轮是否属于当前正在看的会话（后台会话的气泡已摘进暂存片段，供收尾时判断能否动共享的计划窗口）
+  const visible = message.node.isConnected;
   // 流结束（done/停止/出错）统一停掉实时「已用时」计时器，并让卡底的过程行停止呼吸
   stopLiveTiming(message);
   settleProcess(message);
@@ -611,6 +613,8 @@ function finishAssistant(message, deferred = false) {
   // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下；
   // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
   if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
+  // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起，下一条 plan_updated 会自动再出现
+  if (visible && planComplete(state.phasePlan)) el.phasePanel.classList.add("hidden");
   scrollMessages();
 }
 function appendReasoning(message, delta) {
@@ -843,11 +847,18 @@ function extractPhase(value) {
   const found = blocks.find(item => item.phase_plan);
   return (found && found.phase_plan) || null;
 }
+// 计划是否已跑完：所有阶段都进入终态。计划窗口只服务执行过程，跑完即收起
+const PHASE_DONE_STATUS = ["done", "succeeded", "completed", "skipped"];
+function planComplete(plan) {
+  const phases = plan && plan.phases;
+  return Boolean(phases && phases.length) && phases.every(item => PHASE_DONE_STATUS.includes(item && item.status));
+}
 function renderPhase(value) {
   const phase = extractPhase(value) || value;
   if (!phase || !Array.isArray(phase.phases)) return;
+  state.phasePlan = phase;
   el.phasePanel.classList.remove("hidden");
-  const completed = phase.phases.filter(item => ["done","succeeded","completed","skipped"].includes(item.status)).length;
+  const completed = phase.phases.filter(item => PHASE_DONE_STATUS.includes(item.status)).length;
   const expanded = el.phasePanel.classList.contains("expanded");
   const pct = phase.phases.length ? Math.round(completed / phase.phases.length * 100) : 0;
   el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
@@ -1062,12 +1073,6 @@ function renderWorkflowEvent(event) {
   scrollMessages();
 }
 
-function skillLabel(item, skills) {
-  const label = (skills || []).join(" · "); if (!label) return;
-  let node = $(".message-label", item.bubble);
-  if (!node) { node = document.createElement("div"); node.className = "message-label"; item.bubble.insertBefore(node, item.bubble.firstChild); }
-  node.textContent = label;
-}
 // 用户点「停止」中断的回复：给气泡补标记，避免半截内容看起来像正常答完。
 // 实时流（停止那一刻）和刷新后重建历史都走这里，两种呈现保持一致。
 function markStopped(item) {
@@ -1085,8 +1090,6 @@ function renderHistoryMessage(message, turn) {
   }
   if (message.role === "assistant") {
     const item = turn || createMessage("assistant", "", "");
-    // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
-    skillLabel(item, message.active_skills);
     if (message.interrupted) markStopped(item);
     if (message.content) item.text += (item.text ? "\n\n" : "") + message.content;
     item.body.innerHTML = basicMarkdown(item.text);
@@ -1309,7 +1312,7 @@ function handleStreamEvent(id, type, event, assistant) {
   else if (type === "tool_result") { if (event.name !== ASK_USER_TOOL) renderToolResult(event,assistant.node); }
   else if (type === "options_offered") { assistant.pendingAsk = event; }
   else if (type === "tool_approval_required") { queueApproval(id, event); }
-  else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
+  else if (type === "skill_loaded") { /* 识别但不在气泡上展示 Skill 标签 */ }
   else if (type === "notice") showToast(event.message || "附件处理提示");
   else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
   else if (type === "error") throw streamFailure(event);
@@ -1341,8 +1344,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
       renderSessions();
     }).catch(() => {});
   }
-  const skill = selectedSkill();
-  const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : "");
+  const assistant = createMessage("assistant", "", "");
   startLiveTiming(assistant, null);
   const controller = createAbortController();
   state.controllers.set(sessionId, controller);
@@ -2241,7 +2243,7 @@ function switchViewTab(tab) {
   el.messages.classList.toggle("hidden", traj);
   el.composer.classList.toggle("hidden", traj);
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
-  else { if (el.phasePanel.innerHTML.trim()) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
+  else { if (el.phasePanel.innerHTML.trim() && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
 }
 // 时间轴命中检测：优先取包含该点的最窄跨度，否则取投影上最近的跨度（deepseek-harness 式点击定位）
 function trajSpanHit(d) {
