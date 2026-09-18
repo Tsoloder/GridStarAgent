@@ -45,7 +45,7 @@ def UGUGSp(generateWay: int, ids: str, layer: int, growRate: float, caliperFirst
     """生成空间网格.
 
     Args:
-        generateWay: 生成方法,0 表示构造法,1 表示层推法.
+        generateWay: 生成方法,0 表示综合法,1 表示层推法,2 表示减层法.
         ids: 选择的网格块 ID,例如"5,6,7"
         layer: 附面层层数,默认值为40.
         growRate: 增长率,默认值为1.2.
