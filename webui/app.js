@@ -127,12 +127,6 @@ function usageModelLabel(key) {
   const providerName = (hit && hit.provider_name) || providerId;
   return `${providerName} / ${modelId}`;
 }
-// 卡头只放模型名本身，供应商留给用量明细弹层
-function modelShortLabel(key) {
-  const raw = String(key || "").trim();
-  const slash = raw.indexOf("/");
-  return slash > 0 ? raw.slice(slash + 1) : raw;
-}
 function visibleModels() { return state.models.filter(item => item.enabled !== false && item.provider_enabled !== false); }
 function renderModelList() {
   const selected = el.model.value; el.modelListbox.innerHTML = "";
@@ -382,9 +376,9 @@ function structuredBlocks(text) {
   });
   return {visible: visible.trim(), found};
 }
-// 一轮消息渲染成一张卡：卡头是身份与指标，卡身是正文，卡底是过程（思考与工具调用）。
-// 工具返回这类角色的名字直接进卡头，正文里不再重复一个标记
-const CARD_ROLES = {user: "你", assistant: "GRIDSTAR", tool: "工具返回"};
+// 一轮消息渲染成一张卡：正文在上，过程（思考与工具调用）居中，底部一条信息行。
+// 卡片不带身份行——助手与用户靠左右对齐 + 一侧色条区分
+const CARD_ROLES = ["user", "assistant", "tool"];
 function createMessage(role, content = "", label = "", attachments = null) {
   const welcome = document.getElementById("welcome");
   if (welcome) welcome.remove();
@@ -393,19 +387,20 @@ function createMessage(role, content = "", label = "", attachments = null) {
   node.className = `message ${role}`;
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  if (label && role !== "tool") bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
+  if (label) bubble.innerHTML = `<div class="message-label">${escapeHtml(label)}</div>`;
   const body = document.createElement("div"); body.className = "markdown"; body.innerHTML = basicMarkdown(content);
   bubble.append(body);
   const msg = {node, card: null, bubble, body, text: content, reasoning: "", structured: []};
-  // 卡头从左到右：身份、模型、用量、用时、时间、复制；两个明细弹层跟着各自的按钮
-  if (CARD_ROLES[role]) {
+  // 底部信息行：最左复制按钮，右侧依次是用量、用时、时间；两个明细弹层跟着各自的按钮
+  if (CARD_ROLES.includes(role)) {
     const card = document.createElement("section");
     card.className = `turn-card ${role}`;
-    const head = document.createElement("header");
-    head.className = "turn-head";
-    head.innerHTML = (role === "assistant" ? '<span class="turn-avatar" aria-hidden="true">GS</span>' : "")
-      + '<span class="turn-name"></span>'
-      + (role === "assistant" ? '<span class="turn-model" hidden></span>' : "")
+    const foot = document.createElement("div");
+    foot.className = "turn-foot";
+    foot.innerHTML = '<button class="bubble-copy" type="button" title="复制内容" aria-label="复制内容">'
+      + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
+      + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
+      + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button>'
       + '<span class="bubble-meta"><span class="bubble-usage-wrap">'
       + '<button class="bubble-usage" type="button" title="本轮用量明细" hidden>'
       + '<svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
@@ -431,16 +426,10 @@ function createMessage(role, content = "", label = "", attachments = null) {
       + '<div class="pop-row" data-row="think"><span>思考用时</span><b></b></div>'
       + '<div class="pop-row" data-row="tps"><span>输出速度 (TPS)</span><b></b></div>'
       + '<div class="pop-row" data-row="ttft"><span>首 token 用时 (TTFT，累计)</span><b></b></div>'
-      + '</div></span><span class="bubble-time"></span>'
-      + '<button class="bubble-copy" type="button" title="复制内容" aria-label="复制内容">'
-      + '<svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4">'
-      + '<rect x="5.5" y="5.5" width="8.5" height="8.5" rx="1.2"/>'
-      + '<path d="M10.5 5.5V3.2A1.2 1.2 0 0 0 9.3 2H3.2A1.2 1.2 0 0 0 2 3.2v6.1A1.2 1.2 0 0 0 3.2 10.5h2.3"/></svg></button></span>';
-    head.querySelector(".turn-name").textContent = role === "tool" ? (label || CARD_ROLES[role]) : CARD_ROLES[role];
-    card.append(head, bubble); node.append(card);
+      + '</div></span><span class="bubble-time"></span></span>';
+    card.append(bubble, foot); node.append(card);
     msg.card = card;
-    msg.modelEl = head.querySelector(".turn-model");
-    const footer = head;
+    const footer = foot;
     msg.timingBtn = footer.querySelector(".bubble-timing");
     msg.timingPop = footer.querySelector(".bubble-timing-pop");
     msg.usageBtn = footer.querySelector(".bubble-usage");
@@ -474,13 +463,6 @@ function createMessage(role, content = "", label = "", attachments = null) {
 }
 function setBubbleTime(msg, value) {
   if (msg && msg.timeEl) msg.timeEl.textContent = formatClock(value);
-}
-// 卡头的模型名：发送时先填当前选择，done/历史再用后端回传的模型覆盖
-function setTurnModel(msg, key) {
-  if (!msg || !msg.modelEl) return;
-  const label = modelShortLabel(key);
-  msg.modelEl.textContent = label;
-  msg.modelEl.hidden = !label;
 }
 // 明细弹层全局唯一：卡片一多，各卡自己管自己就会出现好几个同时挂着，
 // 所以统一由一个变量记录当前打开的那个，开新的先收起旧的
@@ -541,7 +523,6 @@ function setBubbleTiming(msg, info) {
 function startLiveTiming(msg, startTs) {
   if (!msg || !msg.timingBtn) return;
   stopLiveTiming(msg);
-  if (msg.card) msg.card.classList.add("streaming");
   let t0 = startTs ? new Date(startTs).getTime() : NaN;
   if (isNaN(t0)) t0 = Date.now();
   const label = msg.timingBtn.querySelector(".bubble-timing-label");
@@ -583,7 +564,6 @@ function formatInt(n) {
 function setBubbleUsage(message, usage) {
   if (!message || !message.usageBtn) return;
   const u = usage || {};
-  if (u.model) setTurnModel(message, u.model);
   const total = u.total || 0, input = u.input || 0, output = u.output || 0;
   if (!total && !input && !output) { message.usageBtn.hidden = true; return; }
   message.usageBtn.hidden = false;
@@ -926,7 +906,6 @@ function settleThink(message) {
 // 流结束（正常收尾 / 停止 / 出错）统一落定：停掉呼吸点，别让动画一直转下去
 function settleProcess(message) {
   if (!message || !message.card) return;
-  message.card.classList.remove("streaming");
   const todos = message.card.querySelectorAll(".proc-row.running");
   for (let i = 0; i < todos.length; i++) {
     const row = todos[i];
@@ -1335,7 +1314,6 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   }
   const skill = selectedSkill();
   const assistant = createMessage("assistant", "", skill ? (skill.name || skill.id) : "");
-  setTurnModel(assistant, el.model.value);
   startLiveTiming(assistant, null);
   const controller = createAbortController();
   state.controllers.set(sessionId, controller);
@@ -1376,7 +1354,6 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
 // 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
 async function reconnectStream(sessionId, info, turnTs) {
   const assistant = createMessage("assistant", "", "");
-  setTurnModel(assistant, (state.session && state.session.meta.model_id) || el.model.value);
   // 重连气泡时间/计时起点用本轮原始发送时间（落盘 ts），不是刷新时刻
   if (turnTs) setBubbleTime(assistant, turnTs);
   startLiveTiming(assistant, turnTs || null);
