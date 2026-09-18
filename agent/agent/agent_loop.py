@@ -15,7 +15,7 @@ from context import ContextManager, MAX_TURNS
 from document_loader import read_image_data
 from llm_client.adapters.base import is_retryable
 from mcp_bridge import McpBridge
-from session import Session
+from session import Session, export_session_markdown
 from tool_memory import (
     merge as merge_tool_memory,
     normalize as normalize_tool_args,
@@ -287,9 +287,25 @@ def normalize_ask_user_args(args) -> tuple:
     }, None
 
 
+EXPORT_SESSION_TOOL_NAME = "export_session_markdown"
+
+EXPORT_SESSION_TOOL = RuntimeTool(
+    name=EXPORT_SESSION_TOOL_NAME,
+    description=(
+        "把当前会话的完整历史导出为 Markdown 文件：包含用户提问、助手回复、"
+        "思考过程、工具调用参数与工具返回值。文件写入应用根目录下与 res 同级的 "
+        "exports 目录，调用后返回该文件的相对路径。"
+        "用户提出「导出对话 / 导出会话历史 / 保存聊天记录 / 把当前会话导出成 md」时调用。"
+        "本工具不需要参数，只新建文件、不改动会话数据，也不是 GridStar 数据操作。"
+    ),
+    inputSchema={"type": "object", "properties": {}},
+)
+
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
-                   UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME}
+                   UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME,
+                   EXPORT_SESSION_TOOL_NAME}
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -713,7 +729,9 @@ async def run_agent_loop(
                 all_external_tools, group_index, exposed_group_ids,
                 loaded_skills, skill_registry,
             )
-            runtime_tools = skill_registry.internal_tools() + [UPDATE_PLAN_TOOL, ASK_USER_TOOL]
+            runtime_tools = skill_registry.internal_tools() + [
+                UPDATE_PLAN_TOOL, ASK_USER_TOOL, EXPORT_SESSION_TOOL,
+            ]
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
             if model_runtime is None:
@@ -989,7 +1007,7 @@ async def run_agent_loop(
             for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,
-                                               ASK_USER_TOOL_NAME}
+                                               ASK_USER_TOOL_NAME, EXPORT_SESSION_TOOL_NAME}
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -1098,6 +1116,9 @@ async def run_agent_loop(
                             tc["args"].get("files", {}),
                             bool(tc["args"].get("overwrite", False)),
                         )
+                    elif tc["name"] == EXPORT_SESSION_TOOL_NAME:
+                        # 内置导出工具：不走 MCP、不走审批，把当前会话历史写成 md 落盘
+                        result = "已导出当前会话历史：%s" % export_session_markdown(session)
                     elif tc["name"] == ENABLE_TOOL_GROUP_NAME:
                         # 内置分组启用工具：不走 MCP、不走审批，只改本轮暴露范围
                         group_id = str(tc["args"].get("group_id", "")).strip().lower()

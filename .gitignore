@@ -16,6 +16,9 @@ _qt_*/.qmake.stash
 *.zip
 dist/
 
+# 会话导出产物（运行时生成，避免被打包进离线包）
+exports/
+
 # IDE / 工具临时产物
 .superpowers/
 _qt_float_demo/float_demo.pro

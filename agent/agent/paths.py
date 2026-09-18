@@ -25,3 +25,9 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 
 for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR):
     directory.mkdir(parents=True, exist_ok=True)
+
+# 应用根目录：开发态为仓库根，打包态为 bin（res / webui 所在层）
+APP_ROOT = Path(__file__).resolve().parents[2]
+# 会话导出目录：与 res 同级，目录名即对外展示的相对路径前缀
+EXPORT_DIR_NAME = "exports"
+EXPORT_DIR = APP_ROOT / EXPORT_DIR_NAME

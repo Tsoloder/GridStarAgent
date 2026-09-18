@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -10,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from paths import SESSIONS_DIR
+from paths import EXPORT_DIR, EXPORT_DIR_NAME, SESSIONS_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -465,3 +466,115 @@ def clear_session(sid: str):
         update_index(s)
         logger.info("session cleared: %s", sid)
         return True
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+
+
+def _export_file_name(session: Session) -> str:
+    """导出文件名：时间戳 + 会话短 id +（可选）清洗后的标题，便于按时间排序。"""
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    title = _UNSAFE_FILENAME_CHARS.sub("_", str(session.title or "")).strip(" ._")
+    parts = [stamp, str(session.id)[:8]]
+    if title:
+        parts.append(title[:40].rstrip(" ._"))
+    return "%s.md" % "_".join(part for part in parts if part)
+
+
+def _code_block(text: str, language: str = "") -> str:
+    """用比正文中最长反引号串更长的围栏包裹，避免内容里的 ``` 截断代码块。"""
+    longest = max((len(match.group(0)) for match in re.finditer(r"`+", text)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return "%s%s\n%s\n%s" % (fence, language, text.rstrip("\n"), fence)
+
+
+def _render_tool_calls(message: dict) -> list:
+    """把 assistant 消息里的 tool_calls 渲染为带标签的 JSON 代码块。"""
+    blocks = []
+    for call in message.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function") or {}
+        name = str(function.get("name") or "unknown")
+        raw_arguments = function.get("arguments") or ""
+        try:
+            arguments = json.dumps(json.loads(raw_arguments), ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            arguments = str(raw_arguments)
+        blocks.extend(["**工具调用：`%s`**" % name, "", _code_block(arguments, "json"), ""])
+    return blocks
+
+
+def _quote(text: str) -> str:
+    """把多行文本转成引用块：思考过程用引用块呈现，与回复正文在视觉上分开。"""
+    return "\n".join("> %s" % line if line.strip() else ">" for line in text.splitlines())
+
+
+def _render_message(message: dict) -> list:
+    role = message.get("role")
+    if role == "user":
+        # 结构化续传时 content 是内部封装，display_content 才是用户实际看到的内容
+        text = str(message.get("display_content") or message.get("content") or "").strip()
+        blocks = ["---", "", "## 用户", "", text, ""]
+        names = [
+            str(item.get("name") or "未命名附件")
+            for item in message.get("attachments") or [] if isinstance(item, dict)
+        ]
+        if names:
+            blocks.extend(["> 附件：%s" % "、".join(names), ""])
+        return blocks
+    if role == "assistant":
+        blocks = ["---", "", "## 助手", ""]
+        reasoning = str(message.get("reasoning_content") or "").strip()
+        if reasoning:
+            # 与 WebUI 的「思考过程」一致，推理按原文 Markdown 渲染；
+            # 整体缩进成引用块，避免与回复正文混在一起分不清
+            blocks.extend(["**思考过程**", "", _quote(reasoning), ""])
+        text = str(message.get("content") or "").strip()
+        if text:
+            # 有思考过程时才给正文加标签，否则「## 助手」下直接就是回复，无需重复标注
+            if reasoning:
+                blocks.extend(["**回复**", ""])
+            blocks.extend([text, ""])
+        if message.get("interrupted"):
+            blocks.extend(["**（本轮回复被用户中断，内容不完整）**", ""])
+        if not text and not reasoning and not message.get("tool_calls"):
+            blocks.extend(["（本轮没有文本输出）", ""])
+        blocks.extend(_render_tool_calls(message))
+        return blocks
+    if role == "tool":
+        name = str(message.get("tool_name") or "").strip()
+        label = "**工具返回：`%s`**" % name if name else "**工具返回**"
+        return [label, "", _code_block(str(message.get("content") or "")), ""]
+    if role == "workflow":
+        body = json.dumps(message.get("steps") or [], ensure_ascii=False, indent=2)
+        label = "**工作流：%s（%s）**" % (message.get("run_id") or "", message.get("status") or "")
+        return [label, "", _code_block(body, "json"), ""]
+    return []
+
+
+def render_session_markdown(session: Session) -> str:
+    """把会话历史渲染为 Markdown：用户提问、助手回复、工具调用与返回、工作流。"""
+    lines = [
+        "# %s" % (session.title or "未命名会话"),
+        "",
+        "- 会话 ID：`%s`" % session.id,
+        "- 创建时间：%s" % session.created_at,
+        "- 最后更新：%s" % session.updated_at,
+        "- 导出时间：%s" % datetime.now().isoformat(timespec="seconds"),
+        "- 消息条数：%d" % len(session.messages),
+        "",
+    ]
+    for message in session.messages:
+        if isinstance(message, dict):
+            lines.extend(_render_message(message))
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def export_session_markdown(session: Session) -> str:
+    """导出会话历史为 Markdown 文件，返回相对应用根目录的路径（如 exports/xxx.md）。"""
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    path = EXPORT_DIR / _export_file_name(session)
+    path.write_text(render_session_markdown(session), encoding="utf-8", newline="\n")
+    logger.info("session exported: %s -> %s", session.id, path.name)
+    return "%s/%s" % (EXPORT_DIR_NAME, path.name)
