@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
   <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
-  <link rel="stylesheet" href="style.css?v=46">
+  <link rel="stylesheet" href="style.css?v=49">
 </head>
 <body>
   <main class="app-shell">
@@ -13,7 +13,7 @@
       <div class="brand"><span class="brand-mark">GS</span><span>GRIDSTAR AI</span></div>
       <button id="connection" class="connection checking" type="button" title="重新检查连接"><span></span><b>连接中</b></button>
       <div class="theme-switch" id="theme-switch">
-        <button id="theme-trigger" class="theme-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" title="切换皮肤"><span class="theme-swatch" aria-hidden="true"></span><span id="theme-label" class="theme-name">深色</span><span aria-hidden="true">⌄</span></button>
+        <button id="theme-trigger" class="theme-trigger" type="button" aria-haspopup="listbox" aria-expanded="false" title="切换皮肤"><span class="theme-swatch" aria-hidden="true"></span><span id="theme-label" class="theme-name">深色</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
         <div id="theme-listbox" class="theme-listbox hidden" role="listbox" aria-label="皮肤列表">
           <button type="button" data-theme-opt="dark" class="theme-option" role="option"><i class="sw sw-dark" aria-hidden="true"></i>深色</button>
           <button type="button" data-theme-opt="silver" class="theme-option" role="option"><i class="sw sw-silver" aria-hidden="true"></i>银白</button>
@@ -23,9 +23,9 @@
     </header>
 
     <section class="sessionbar">
-      <button id="new-session" class="primary compact" type="button">＋ <span>新对话</span></button>
+      <button id="new-session" class="primary compact" type="button"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg><span>新对话</span></button>
       <button id="session-trigger" class="session-trigger" type="button" aria-haspopup="dialog" aria-expanded="false">
-        <span id="current-title">选择会话</span><span>⌄</span>
+        <span id="current-title">选择会话</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
     </section>
 
@@ -78,7 +78,7 @@
         <textarea id="message-input" rows="1" placeholder="输入任务...按Enter发送，Shift+Enter换行" aria-label="消息"></textarea>
         <div class="controls">
           <button id="attach-btn" class="attach" type="button" aria-label="添加附件" title="添加附件">
-            <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
           </button>
           <div class="mode-switch" role="group" aria-label="交互模式">
             <button type="button" data-mode="manual" class="active">手动</button>
@@ -87,23 +87,27 @@
           <div class="model-control" title="模型">
             <div class="model-combobox">
               <input id="model-select" type="hidden" value="">
-              <button id="model-trigger" type="button" role="combobox" aria-label="模型" aria-haspopup="listbox" aria-expanded="false"><span id="model-label">未配置</span><span aria-hidden="true">⌄</span></button>
+              <button id="model-trigger" type="button" role="combobox" aria-label="模型" aria-haspopup="listbox" aria-expanded="false"><span id="model-label">未配置</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
               <div id="model-listbox" class="model-listbox hidden" role="listbox" aria-label="按供应商分组的模型"></div>
             </div>
           </div>
           <div class="model-control skill-control" title="Skill">
             <div class="model-combobox">
               <input id="skill-select" type="hidden" value="">
-              <button id="skill-trigger" type="button" role="combobox" aria-label="Skill" aria-haspopup="listbox" aria-expanded="false"><span id="skill-label">无 Skill</span><span aria-hidden="true">⌄</span></button>
+              <button id="skill-trigger" type="button" role="combobox" aria-label="Skill" aria-haspopup="listbox" aria-expanded="false"><span id="skill-label">无 Skill</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
               <div id="skill-listbox" class="model-listbox hidden" role="listbox" aria-label="Skill 列表"></div>
             </div>
           </div>
           <span id="busy-label" class="busy-label"></span>
-          <button id="open-settings" class="settings-button" type="button" aria-label="打开设置" title="打开设置">⚙</button>
-          <button id="voice-btn" class="voice" type="button" aria-label="语音输入" title="语音输入" disabled>
-            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          <button id="open-settings" class="settings-button" type="button" aria-label="打开设置" title="打开设置">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
           </button>
-          <button id="send" class="send" type="button" aria-label="发送" title="发送">↑</button>
+          <button id="voice-btn" class="voice" type="button" aria-label="语音输入" title="语音输入" disabled>
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+          </button>
+          <button id="send" class="send" type="button" aria-label="发送" title="发送">
+            <svg class="send-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>
+          </button>
           <input id="file-input" class="file-input" type="file" multiple aria-label="选择附件">
         </div>
       </div>
@@ -140,6 +144,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=58" defer></script>
+  <script src="app.js?v=61" defer></script>
 </body>
 </html>

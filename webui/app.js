@@ -174,10 +174,13 @@ function setConnection(status, label) {
 function currentId() { return state.session ? state.session.meta.id : null; }
 // 当前会话是否有进行中的流：发送按钮的"停止/发送"形态只跟随当前会话
 function isBusy() { const id = currentId(); return Boolean(id && state.controllers.has(id)); }
+// 发送/停止两种形态用同一套描边图标，避免字体字形与 SVG 混在一起（笔画粗细对齐卡片拷贝按钮）
+const SEND_ICON = '<svg class="send-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5"/><path d="M5 12l7-7 7 7"/></svg>';
+const STOP_ICON = '<svg class="send-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor" stroke="none"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>';
 function syncComposer() {
   const busy = isBusy();
   el.send.classList.toggle("stop", busy);
-  el.send.textContent = busy ? "■" : "↑";
+  el.send.innerHTML = busy ? STOP_ICON : SEND_ICON;
   el.send.title = busy ? "停止接收" : "发送";
   el.send.setAttribute("aria-label", el.send.title);
   el.input.disabled = busy;
@@ -503,8 +506,7 @@ function setBubbleTiming(msg, info) {
   if (t.elapsed == null) { msg.timingBtn.hidden = true; return; }
   msg.timingBtn.hidden = false;
   msg.timingBtn.querySelector(".bubble-timing-label").textContent = "用时 " + formatDurationCn(t.elapsed);
-  // 思考用时同时写进卡底的思考 chip，卡片收起时也能看到思考花了多久
-  if (t.think != null) { msg.thinkMs = t.think; updateThinkSummary(msg); }
+  // 思考用时只在用时明细弹层里出现，折叠行的摘要留给正文片段
   const rows = {
     total: formatDurationCn(t.elapsed),
     think: formatDurationCn(t.think),
@@ -615,9 +617,12 @@ function appendReasoning(message, delta) {
   const row = processRow(message.node, "think", PROC_LABEL.think, true);
   if (!row) return;
   row.classList.add("running");
-  setProcSummary(row, "思考中 · 已生成 " + message.reasoning.length + " 字");
+  // 折叠态右侧一直刷新的就是思考正文的当前最后一行，展开后看全文
+  setProcSummary(row, latestLine(message.reasoning));
   const rail = processRail(message.node, "think");
   if (rail) rail.textContent = message.reasoning;
+  // 展开时思考正文会把内容顶高，贴底才跟随（用户上滚查看时不会被拽回）
+  if (rail && !rail.parentNode.hidden) scrollMessages();
 }
 
 function renderStructured(data, parent) {
@@ -850,7 +855,7 @@ function processRow(parent, key, label, first) {
   row.setAttribute("role", "button"); row.setAttribute("tabindex", "0"); row.setAttribute("aria-expanded", "false");
   row.innerHTML = '<span class="proc-chevron" aria-hidden="true"></span>'
     + '<span class="run-dot" aria-hidden="true"></span>'
-    + '<span class="proc-label"></span><span class="proc-sum"></span>';
+    + '<span class="proc-label"></span><span class="proc-sum"><span class="proc-sum-text"></span></span>';
   row.querySelector(".proc-label").textContent = label;
   const body = document.createElement("div");
   body.className = "proc-body"; body.dataset.procBody = key; body.hidden = true;
@@ -874,7 +879,12 @@ function processRail(parent, key) {
   if (!rail) { rail = document.createElement("div"); rail.className = "proc-rail"; body.append(rail); }
   return rail;
 }
-function setProcSummary(row, text) { if (row) row.querySelector(".proc-sum").textContent = text; }
+// 摘要文本写在里层 span 上：流式时靠它撑到 max-content，才能把超出的部分挤到左边裁掉
+function setProcSummary(row, text) {
+  if (!row) return;
+  const target = row.querySelector(".proc-sum-text");
+  if (target) target.textContent = text;
+}
 function updateToolGroup(parent) {
   const row = parent && parent.querySelector('.proc-row[data-proc="tools"]');
   if (!row) return;
@@ -885,14 +895,23 @@ function updateToolGroup(parent) {
   row.classList.toggle("running", running);
   row.classList.toggle("failed", !running && failed);
 }
-// 思考 chip 的摘要：定稿后补上思考用时，字符数始终保留
+// 思考正文定位到某一行：流式中取最后一行（跟着 token 一直刷新），结束后取第一行当预览
+function firstLine(text) {
+  const source = String(text || "").trim();
+  const newline = source.indexOf("\n");
+  return newline === -1 ? source : source.slice(0, newline);
+}
+function latestLine(text) {
+  const source = String(text || "").trimEnd();
+  const newline = source.lastIndexOf("\n");
+  return newline === -1 ? source : source.slice(newline + 1);
+}
+// 思考 chip 收起时的摘要：不再放耗时/字数，直接给正文片段，内容本身比指标有用
 function updateThinkSummary(message) {
   if (!message || !message.card) return;
   const row = message.card.querySelector('.proc-row[data-proc="think"]');
   if (!row) return;
-  const chars = (message.reasoning || "").length;
-  const duration = message.thinkMs == null ? "" : formatDurationCn(message.thinkMs);
-  setProcSummary(row, [duration, chars ? chars + " 字" : ""].filter(Boolean).join(" · "));
+  setProcSummary(row, firstLine(message.reasoning));
 }
 // 思考段落结束（正文开始产出或开始调工具）：思考 chip 立刻停止「思考中」，
 // 否则整轮都停在呼吸态，看起来像一直在想
@@ -1238,7 +1257,8 @@ function failureText(error) {
 }
 function renderFailure(error, retry) {
   const notice = createMessage("assistant", failureText(error), error.retryable ? "RETRY" : "ERROR");
-  if (notice.card) { notice.card.style.borderColor = "var(--red)"; notice.card.style.borderLeftColor = "var(--red)"; }
+  // 卡片已没有一侧高亮条，错误只标整圈边框
+  if (notice.card) notice.card.style.borderColor = "var(--red)";
   if (retry) {
     const button = document.createElement("button");
     button.type = "button"; button.className = "action-button"; button.style.marginTop = "10px";
