@@ -571,7 +571,9 @@ function finishAssistant(message) {
   parsed.found.forEach(data => renderStructured(data, message.node));
   // 本轮以选项卡片或工具参数面板收尾 → 会话进入「待确认」，等用户点击
   message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams || (Array.isArray(data.options) && data.options.length)));
-  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".tool-group,.approval-card")) message.node.remove();
+  // 只有思考过程没有正文时也要留住气泡：停止在思考阶段是常见操作，丢掉节点等于
+  // 把这段内容从实时视图和重渲染后的历史里一起抹掉
+  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".tool-group,.approval-card,.reasoning")) message.node.remove();
   scrollMessages();
 }
 function appendReasoning(message, delta) {
@@ -580,7 +582,8 @@ function appendReasoning(message, delta) {
   if (!details) {
     details = document.createElement("details"); details.className = "reasoning";
     details.innerHTML = "<summary>思考过程</summary><div></div>";
-    message.node.insertBefore(details, message.bubble);
+    // 思考过程始终置顶（工具调用组固定挂在它下方，故不能用 bubble 作锚点）
+    message.node.insertBefore(details, message.node.firstChild);
   }
   $("div", details).textContent = message.reasoning;
 }
@@ -671,12 +674,18 @@ function renderPhase(value) {
   phase.phases.forEach(item => $(".phase-steps", el.phasePanel).insertAdjacentHTML("beforeend", `<div class="phase-step ${escapeHtml(item.status || "pending")}" title="${escapeHtml(item.note || item.desc || "")}"><span class="phase-step-title">${escapeHtml(item.title || item.id || "阶段")}</span><span class="phase-step-note">${escapeHtml(item.note || item.desc || "")}</span></div>`));
 }
 
+// 工具调用折叠组固定排在「思考过程」下方、正文气泡上方
 function toolGroup(parent) {
   let group = parent.querySelector(":scope > .tool-group");
   if (group) return group;
   group = document.createElement("details"); group.className = "tool-group";
   group.innerHTML = `<summary class="tool-group-head"><span class="tool-chevron" aria-hidden="true"></span><strong>工具调用</strong><span class="tool-count">0 个</span><span class="status">执行中</span></summary><div class="tool-list"></div>`;
-  parent.append(group); return group;
+  const reasoning = parent.querySelector(":scope > .reasoning");
+  const bubble = parent.querySelector(":scope > .bubble");
+  if (reasoning) reasoning.insertAdjacentElement("afterend", group);
+  else if (bubble) parent.insertBefore(group, bubble);
+  else parent.append(group);
+  return group;
 }
 function updateToolGroup(group) {
   const items = [...group.querySelectorAll(".tool-item")];
@@ -704,6 +713,28 @@ function renderToolCall(event, parent) {
   item.innerHTML = `<summary><span class="tool-dot" aria-hidden="true"></span><strong>${escapeHtml(event.name || "工具调用")}</strong><span class="status">执行中</span></summary><div class="tool-detail"><span class="tool-detail-label">调用参数</span>${toolArgsTableHtml(event.args)}<div class="tool-result hidden"><span class="tool-detail-label">调用结果</span><pre></pre></div></div>`;
   $(".tool-list", group).append(item); updateToolGroup(group); scrollMessages();
 }
+// 工具返回值多是 JSON 字符串：能解析就缩进美化，嵌套的 JSON 字符串一并展开，方便直接阅读
+function expandJsonStrings(value, depth) {
+  if (depth <= 0) return value;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (text[0] !== "{" && text[0] !== "[") return value;
+    try { return expandJsonStrings(JSON.parse(text), depth - 1); } catch (_) { return value; }
+  }
+  if (Array.isArray(value)) return value.map(item => expandJsonStrings(item, depth - 1));
+  if (value && typeof value === "object") {
+    const out = {};
+    Object.keys(value).forEach(key => { out[key] = expandJsonStrings(value[key], depth - 1); });
+    return out;
+  }
+  return value;
+}
+function formatToolResult(raw) {
+  const text = String(raw == null ? "" : raw);
+  const trimmed = text.trim();
+  if (trimmed[0] !== "{" && trimmed[0] !== "[") return text;
+  try { return JSON.stringify(expandJsonStrings(JSON.parse(trimmed), 3), null, 2); } catch (_) { return text; }
+}
 function renderToolResult(event, parent) {
   const selector = `[data-call-id="${CSS.escape(event.call_id || "")}"]`;
   let item = parent.querySelector(selector) || document.querySelector(selector);
@@ -711,7 +742,7 @@ function renderToolResult(event, parent) {
   const failed = String(event.result || "").toLowerCase().includes("error") || String(event.result || "").includes("denied");
   item.dataset.state = failed ? "failed" : "succeeded";
   const status = $(":scope > summary .status", item); status.textContent = failed ? "失败" : "完成"; status.className = `status ${failed ? "failed" : "succeeded"}`;
-  const result = $(".tool-result", item); result.classList.remove("hidden"); $("pre", result).textContent = String(event.result == null ? "" : event.result);
+  const result = $(".tool-result", item); result.classList.remove("hidden"); $("pre", result).textContent = formatToolResult(event.result);
   updateToolGroup(item.closest(".tool-group")); scrollMessages();
 }
 function coerceSchemaValue(raw, type) {
@@ -791,6 +822,13 @@ function skillLabel(item, skills) {
   if (!node) { node = document.createElement("div"); node.className = "message-label"; item.bubble.insertBefore(node, item.bubble.firstChild); }
   node.textContent = label;
 }
+// 用户点「停止」中断的回复：给气泡补标记，避免半截内容看起来像正常答完。
+// 实时流（停止那一刻）和刷新后重建历史都走这里，两种呈现保持一致。
+function markStopped(item) {
+  let label = $(".message-label", item.bubble);
+  if (!label) { label = document.createElement("div"); label.className = "message-label"; item.bubble.insertBefore(label, item.bubble.firstChild); }
+  if (label.textContent.indexOf("已停止") < 0) label.textContent = label.textContent ? label.textContent + " · 已停止" : "已停止";
+}
 // turn 为本轮已合并的气泡：实时流里一轮对话只有一个 assistant 气泡（文本累加、
 // 所有工具调用进同一个折叠组），而持久化会拆成多条消息，渲染时必须合并回去。
 function renderHistoryMessage(message, turn) {
@@ -803,6 +841,7 @@ function renderHistoryMessage(message, turn) {
     const item = turn || createMessage("assistant", "", "");
     // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
     skillLabel(item, message.active_skills);
+    if (message.interrupted) markStopped(item);
     if (message.content) item.text += (item.text ? "\n\n" : "") + message.content;
     item.body.innerHTML = basicMarkdown(item.text);
     if (message.reasoning_content) appendReasoning(item, message.reasoning_content);
@@ -946,6 +985,7 @@ const FAILURE_HINTS = {
   stream_error: "模型流式响应中断",
   upstream_http: "模型服务返回错误",
   provider_error: "模型服务异常",
+  busy: "上一轮还没停下来",
 };
 function streamFailure(event, fallback = "Agent 处理失败") {
   const failure = new Error(event.message || fallback);
@@ -1049,7 +1089,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
     const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
-    await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)));
+    await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)), controller);
     backgroundSafe(sessionId, () => finishAssistant(assistant));
     // 回合以选项/参数卡片收尾 → 「待确认」，否则「已完成」
     const ended = state.streams.get(sessionId);
@@ -1057,12 +1097,18 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
     await refreshSessions();
   } catch (error) {
     backgroundSafe(sessionId, () => finishAssistant(assistant));
-    const notice = backgroundSafe(sessionId, () => error.name === "AbortError"
+    const stopped = error.name === "AbortError";
+    // 停止时这条气泡若已产出内容（没被 finishAssistant 当空气泡移除），就地在它上面标
+    // 「已停止」：与刷新后重建的历史一致。只有一个字都没产出时才另起一条提示气泡，
+    // 否则实时视图会多出一条刷新后就消失的提示，看起来像「气泡内容刷新有问题」。
+    const kept = stopped && assistant.node.parentNode;
+    if (kept) backgroundSafe(sessionId, () => markStopped(assistant));
+    const notice = kept ? null : backgroundSafe(sessionId, () => stopped
       ? createMessage("assistant", "已停止接收当前响应。", "STOPPED")
       : renderFailure(error, {message, display: shown, attachments: sentAttachments}));
-    adoptIntoStash(sessionId, notice);
+    if (notice) adoptIntoStash(sessionId, notice);
     // 停止/失败写进会话徽标；停止过的会话不再自动重连，否则切回时又会粘回后台流
-    setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error");
+    setStatus(sessionId, stopped ? "stopped" : "error");
   } finally {
     if (state.controllers.get(sessionId) === controller) state.controllers.delete(sessionId);
     state.streams.delete(sessionId);
@@ -1084,7 +1130,7 @@ async function reconnectStream(sessionId, info, turnTs) {
   syncComposer();
   let completed = false, endedHidden = false;
   try {
-    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message:info.last_message,interaction_mode:state.mode,model_id:(state.session && state.session.meta.model_id) || el.model.value || "",selected_skills:[]})});
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message:info.last_message,resume:true,interaction_mode:state.mode,model_id:(state.session && state.session.meta.model_id) || el.model.value || "",selected_skills:[]})});
     await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)), controller);
     backgroundSafe(sessionId, () => finishAssistant(assistant));
     completed = true;
@@ -1627,6 +1673,12 @@ function trajPreview(text, limit) {
   const str = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
   return str.length > limit ? str.slice(0, limit) + "…" : str;
 }
+// 概述里的参数用缩进 JSON 原样换行展示，长参数不再挤成一行
+function trajArgsText(args) {
+  let text;
+  try { text = JSON.stringify(args == null ? {} : args, null, 2); } catch (_) { text = String(args); }
+  return text.length > 1200 ? text.slice(0, 1200) + "\n…" : text;
+}
 function trajRowMeta(rec) {
   const bits = [];
   if (rec.tokens && rec.tokens.total) bits.push(rec.tokens.total + " tok" + (rec.tokens.estimated ? "≈" : ""));
@@ -1763,16 +1815,13 @@ function trajInspectorRows(rec) {
     : rec.source === "tool" ? (rec.name || "工具")
     : TRAJ_SOURCE_LABEL[rec.source];
   rows.push(["来源", escapeHtml(sourceText) + (pos.length ? ` <small>${escapeHtml(pos.join(" · "))}</small>` : "")]);
-  rows.push(["状态", rec.status === "completed" ? "已完成" : rec.status === "failed" ? "失败" : "进行中"]);
+  rows.push(["状态", rec.status === "completed" ? "已完成" : rec.status === "failed" ? "失败" : rec.status === "interrupted" ? "已停止" : "进行中"]);
   if (rec.tokens) {
     rows.push(["Token", rec.tokens.total + " tok" + (rec.tokens.estimated ? "（估算）" : "")]);
     rows.push(["推理", rec.tokens.reasoning + " tok"]);
     rows.push(["内容", rec.tokens.content + " tok"]);
   }
-  if (rec.source === "tool") {
-    rows.push(["耗时", trajFormatMs(rec.durationMs)]);
-    rows.push(["参数", escapeHtml(trajPreview(JSON.stringify(rec.args || {}), 120))]);
-  }
+  if (rec.source === "tool") rows.push(["耗时", trajFormatMs(rec.durationMs)]);
   return rows;
 }
 function renderTrajInspector() {
@@ -1791,6 +1840,7 @@ function renderTrajInspector() {
   if (st.inspectorTab === "overview") {
     const rows = trajInspectorRows(rec);
     let html = '<div class="traj-insp-grid">' + rows.map(row => `<div class="traj-insp-row"><span>${row[0]}</span><b>${row[1]}</b></div>`).join("") + "</div>";
+    if (rec.source === "tool") html += `<div class="traj-insp-section">参数</div><pre class="traj-insp-args">${escapeHtml(trajArgsText(rec.args))}</pre>`;
     if (rec.kind === "request" && rec.timing) {
       const t = rec.timing;
       const timingRows = [

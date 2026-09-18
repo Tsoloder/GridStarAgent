@@ -604,39 +604,45 @@ async def chat_stream(body: dict):
             bg._cleanup_timer = None
 
         try:
+            # 是不是新一轮由前端显式声明（只有重连会带 resume）。不能靠比较消息文本：
+            # 停止后重发同一句话时文本和上一轮相同，会被误判成重连，旧的 queue/history
+            # 又灌进新气泡，正是「停止后再发送、气泡内容刷新不对」的成因之一。
+            resume = bool(body.get("resume"))
+            new_turn = not resume
+
+            # 点「停止」只是给旧 task 递了取消请求，它要等当前 await（模型流/工具线程）
+            # 返回才真正结束。新消息这时进来若直接复用 bg，旧 task 收尾写的事件和 done
+            # 会灌进新一轮：前端新气泡刷出上一轮内容、或一闪就空。先等旧 task 落地。
+            if new_turn and bg.task is not None and not bg.task.done():
+                bg.task.cancel()
+                if isinstance(bg.task, asyncio.Task):
+                    await asyncio.wait({bg.task}, timeout=_BG_CANCEL_WAIT_SECONDS)
+                if not bg.task.done():
+                    busy = {
+                        "type": "error",
+                        "message": "上一轮任务还在停止中，请稍候再发送这条消息",
+                        "category": "busy",
+                        "retryable": True,
+                    }
+                    yield f"event: error\ndata: {json.dumps(busy, ensure_ascii=False)}\n\n"
+                    return
+
             # 启动后台 task（如果未运行或已结束）
             if bg.task is None or bg.task.done():
-                if bg.task and bg.task.done() and not bg.cancelled:
-                    # task 已自然结束，需要区分：SSE 重连 vs 新的用户消息
-                    if turn_marker and turn_marker != bg.last_message:
-                        # 新的用户消息 — 重置 bg 状态，走下方启动新 task
-                        bg.queue = asyncio.Queue()
-                        bg.done_event = asyncio.Event()
-                        bg.cancelled = False
-                        bg.started_at = None
-                        bg.last_message = turn_marker
-                        bg.last_display = display_content or message
-                        bg.history = []
-                        bg.seq = 0
-                        bg.turn_msg_count = None
-                    else:
-                        # SSE 重连 — 回放最后一条 assistant 消息
-                        session = load_session(session_id)
-                        if session:
-                            for msg in reversed(session.messages):
-                                if msg.get("role") == "assistant":
-                                    content = msg.get("content", "") or ""
-                                    yield f"event: text_chunk\ndata: {json.dumps({'delta': content}, ensure_ascii=False)}\n\n"
-                                    break
-                        yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
-                        return
-                else:
-                    # task 为 None（首次请求）或已被取消 — 记录消息并重置事件存档
-                    bg.last_message = turn_marker
-                    bg.last_display = display_content or message
-                    bg.history = []
-                    bg.seq = 0
-                    bg.turn_msg_count = None
+                if not new_turn:
+                    # 重连且本轮已经结束 — 只回放落盘的最终文本，不再跑一轮
+                    session = load_session(session_id)
+                    if session:
+                        for msg in reversed(session.messages):
+                            if msg.get("role") == "assistant":
+                                content = msg.get("content", "") or ""
+                                yield f"event: text_chunk\ndata: {json.dumps({'delta': content}, ensure_ascii=False)}\n\n"
+                                break
+                    yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+                    return
+
+                # 首次请求、新的用户消息、或上一轮被停止过 — 整轮状态清零再启动新 task
+                _reset_bg_turn(bg, turn_marker, display_content or message)
 
                 # 启动新的后台 task
                 async with _session_async_lock(session_id):
@@ -1089,6 +1095,7 @@ class BackgroundSession:
 
 _background_sessions = {}
 _BG_CLEANUP_SECONDS = 300  # 后台任务结束后，保留 5 分钟等重连
+_BG_CANCEL_WAIT_SECONDS = 10  # 新消息到达时，等上一轮被取消的 task 收尾的上限
 
 
 def _get_or_create_background(session_id: str) -> BackgroundSession:
@@ -1098,6 +1105,55 @@ def _get_or_create_background(session_id: str) -> BackgroundSession:
         bg = BackgroundSession(session_id)
         _background_sessions[session_id] = bg
     return bg
+
+
+def _reset_bg_turn(bg: BackgroundSession, turn_marker: str, display: str):
+    """新一轮开始前清空上一轮的全部状态。
+
+    queue / done_event 也必须换成新对象：上一轮收尾时 done_event 已置位、queue 里
+    还留着终态 done，沿用会让新一轮的消费循环立刻退出，前端气泡刚建出来就被清空。
+    """
+    bg.queue = asyncio.Queue()
+    bg.done_event = asyncio.Event()
+    bg.cancelled = False
+    bg.started_at = None
+    bg.last_message = turn_marker
+    bg.last_display = display
+    bg.history = []
+    bg.seq = 0
+    bg.turn_msg_count = None
+
+
+def _close_interrupted_turn(session):
+    """停止本轮后补齐悬空的 tool_calls。
+
+    assistant(tool_calls) 在工具执行前就已落盘，中途停止会留下没有 tool 应答的
+    调用。这样的历史发给模型服务会被直接拒绝（tool_calls 必须紧跟 tool 消息），
+    导致停止之后再也发不出下一条消息，所以这里补一条「已停止」的占位结果。
+    """
+    dangling = None
+    for message in reversed(session.messages):
+        role = message.get("role")
+        if role == "tool":
+            continue
+        if role == "assistant" and message.get("tool_calls"):
+            dangling = message["tool_calls"]
+        break  # 遇到 user / 纯文本 assistant 说明上一轮已闭合
+
+    if not dangling:
+        return
+    answered = {
+        item.get("tool_call_id")
+        for item in session.messages if item.get("role") == "tool"
+    }
+    for call in dangling:
+        call_id = call.get("id", "")
+        if not call_id or call_id in answered:
+            continue
+        session.append_tool_result(
+            call_id, "[用户停止了本轮对话，工具未返回结果]",
+            call.get("function", {}).get("name", ""),
+        )
 
 
 async def _bg_put(bg: BackgroundSession, event: dict):
@@ -1234,6 +1290,8 @@ async def _run_background_loop(
             await _bg_put(bg, event)
     except asyncio.CancelledError:
         bg.cancelled = True
+        # 停止 = 本轮对话结束：补齐被中断的 tool_calls，让会话停在可直接续聊的状态
+        _close_interrupted_turn(session)
         with locked_session(session_id):
             save_session(session)
             update_index(session)

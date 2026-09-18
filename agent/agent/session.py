@@ -190,8 +190,11 @@ class Session:
         _append_jsonl(str(session_dir(self.id) / "messages.jsonl"), message)
 
     def append_assistant(self, content: str, active_skills=None, reasoning_content: str = "", usage: dict = None,
-                         elapsed_ms=None, think_ms=None, ttft_ms=None, tps=None):
+                         elapsed_ms=None, think_ms=None, ttft_ms=None, tps=None, interrupted: bool = False):
         message = {"role": "assistant", "content": content, "ts": _now_ts()}
+        if interrupted:
+            # 用户点「停止」中断的本轮：历史里要能看出这条回复没写完
+            message["interrupted"] = True
         if reasoning_content:
             message["reasoning_content"] = reasoning_content
         if active_skills:

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -9,6 +10,24 @@ from config import API_KEY_MASK, config_from_dict, config_revision
 def _strip_seq(event):
     """去掉后台事件里重连回放用的内部序号 _seq，便于按业务字段断言。"""
     return {k: v for k, v in event.items() if k != "_seq"}
+
+
+def _frames(text):
+    """把 SSE 响应体解析成 [(event 名, data), ...]，便于按顺序断言。"""
+    import json
+
+    frames = []
+    for frame in text.split("\n\n"):
+        if not frame.strip():
+            continue
+        name, data = None, None
+        for line in frame.split("\n"):
+            if line.startswith("event:"):
+                name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data = json.loads(line[len("data:"):].strip())
+        frames.append((name, data))
+    return frames
 
 
 def config_data():
@@ -395,23 +414,14 @@ def test_chat_stream_replays_history_on_reconnect(monkeypatch):
     asyncio.run(seed())
     monkeypatch.setitem(server._background_sessions, session_id, bg)
 
+    # 重连必须显式带 resume：后端只认这个标志，不看消息文本是否和上一轮相同
     response = TestClient(server.app).post(
-        "/chat/stream", json={"session_id": session_id, "message": "hi"}
+        "/chat/stream", json={"session_id": session_id, "message": "hi", "resume": True}
     )
     assert response.status_code == 200
     assert "_seq" not in response.text
 
-    frames = []
-    for frame in response.text.split("\n\n"):
-        if not frame.strip():
-            continue
-        name, data = None, None
-        for line in frame.split("\n"):
-            if line.startswith("event:"):
-                name = line[len("event:"):].strip()
-            elif line.startswith("data:"):
-                data = json.loads(line[len("data:"):].strip())
-        frames.append((name, data))
+    frames = _frames(response.text)
     assert frames == [
         ("user", {"type": "user", "turn": 1, "content": "hi"}),
         ("text_chunk", {"type": "text_chunk", "delta": "你好"}),
@@ -444,6 +454,166 @@ def test_cancel_background_stops_running_task(monkeypatch):
     bg.task = SimpleNamespace(done=lambda: True, cancel=lambda: cancelled.append("late"))
     assert client.post("/sessions/%s/cancel" % session_id).json() == {"cancelled": False}
     assert cancelled == [session_id]
+
+
+def test_stop_closes_dangling_tool_calls():
+    """停止在工具执行中：给没有应答的 tool_call 补占位结果。
+
+    否则历史里留下 tool_calls 后面不跟 tool 消息的残缺结构，下一轮请求会被模型
+    服务直接拒绝——停止之后就再也发不出消息了。
+    """
+    added = []
+    session = SimpleNamespace(messages=[
+        {"role": "user", "content": "导入模型"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call-1", "type": "function",
+             "function": {"name": "ImportCAD", "arguments": "{}"}},
+            {"id": "call-2", "type": "function",
+             "function": {"name": "GetModelTree", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "call-1", "content": "导入完成",
+         "tool_name": "ImportCAD"},
+    ])
+    session.append_tool_result = lambda *args: added.append(args)
+
+    server._close_interrupted_turn(session)
+
+    # call-1 已有结果，只补被中断的 call-2
+    assert added == [("call-2", "[用户停止了本轮对话，工具未返回结果]", "GetModelTree")]
+
+    closed = SimpleNamespace(messages=[
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "答完了"},
+    ])
+    closed.append_tool_result = lambda *args: added.append(args)
+    server._close_interrupted_turn(closed)
+    assert len(added) == 1  # 已闭合的轮次不动它
+
+
+def _seed_stopped_turn(session_id):
+    """构造「上一轮被停止过」的后台状态：旧事件存档 + done_event 置位 + 队列残留终态。"""
+    import asyncio
+
+    bg = server.BackgroundSession(session_id)
+    bg.cancelled = True
+    bg.last_message = "上一句"
+
+    async def seed():
+        await server._bg_put(bg, {"type": "text_chunk", "delta": "上一轮的回答"})
+        await server._bg_put(bg, {"type": "done"})
+        bg.done_event.set()
+
+    asyncio.run(seed())
+    return bg
+
+
+def _install_fake_loop(monkeypatch, started):
+    """用假 agent_loop 顶掉真实模型调用，新任务一启动就产出可断言的事件。"""
+
+    async def fake_loop(bg, session_id, message, *args, **kwargs):
+        started.append(message)
+        await server._bg_put(bg, {"type": "text_chunk", "delta": "新一轮的回答"})
+        await server._bg_put(bg, {"type": "done", "tokens": 1})
+        bg.done_event.set()
+
+    monkeypatch.setattr(server, "_run_background_loop", fake_loop)
+
+
+def _install_stream_env(monkeypatch):
+    install_config(monkeypatch)
+    monkeypatch.setattr(server, "_mcp", object())
+    monkeypatch.setattr(server, "skill_registry",
+                        SimpleNamespace(reload=lambda: None,
+                                        set_roots=lambda *a, **k: None))
+
+
+def test_new_message_waits_for_cancelling_task_and_resets_turn(monkeypatch):
+    """「停止」后立刻重发：旧任务还在收尾时先等它落地，整轮状态重置后再起新任务。
+
+    回归的 bug：旧代码此时直接复用旧 queue/history，上一轮的事件和收尾 done 会灌进
+    新一轮 SSE，前端新气泡被刷成旧内容、或刚建出来就被清空。
+    """
+    import uuid
+
+    _install_stream_env(monkeypatch)
+
+    session_id = str(uuid.uuid4())
+    bg = _seed_stopped_turn(session_id)
+    # cancel() 请求一到旧任务就收尾 —— 模拟取消在等待期内落地
+    state = {"done": False}
+    bg.task = SimpleNamespace(done=lambda: state["done"],
+                              cancel=lambda: state.update(done=True))
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    started = []
+    _install_fake_loop(monkeypatch, started)
+
+    response = TestClient(server.app).post(
+        "/chat/stream", json={"session_id": session_id, "message": "新的一轮"}
+    )
+    assert response.status_code == 200
+    assert started == ["新的一轮"]
+    assert _frames(response.text) == [
+        ("text_chunk", {"type": "text_chunk", "delta": "新一轮的回答"}),
+        ("done", {"type": "done", "tokens": 1}),
+    ]
+
+
+def test_new_message_after_stop_resets_instead_of_replaying(monkeypatch):
+    """停止后重发**同一句话**：要起新一轮，而不是被当成重连回放旧内容。
+
+    这条是同会话「停止 → 继续发送」最容易踩中的路径：旧实现按消息文本判断新一轮，
+    重发同一句话时文本与上一轮相同，被误判为 SSE 重连，上一轮的 history 直接灌进
+    新气泡，用户看到的就是「刚发出去的气泡刷成了上一轮的内容」。
+    """
+    import uuid
+
+    _install_stream_env(monkeypatch)
+
+    session_id = str(uuid.uuid4())
+    bg = _seed_stopped_turn(session_id)  # 上一轮消息就是「上一句」
+    bg.task = SimpleNamespace(done=lambda: True, cancel=lambda: None)
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    started = []
+    _install_fake_loop(monkeypatch, started)
+
+    response = TestClient(server.app).post(
+        "/chat/stream", json={"session_id": session_id, "message": "上一句"}
+    )
+    assert response.status_code == 200
+    assert started == ["上一句"]
+    frames = _frames(response.text)
+    assert frames == [
+        ("text_chunk", {"type": "text_chunk", "delta": "新一轮的回答"}),
+        ("done", {"type": "done", "tokens": 1}),
+    ]
+    assert all("上一轮的回答" not in data.get("delta", "") for _, data in frames)
+
+
+def test_new_message_while_task_still_stopping_reports_busy(monkeypatch):
+    """旧任务迟迟停不下来时返回可重试的 busy 错误，而不是把两轮事件搅在一起。"""
+    import uuid
+
+    _install_stream_env(monkeypatch)
+
+    session_id = str(uuid.uuid4())
+    bg = _seed_stopped_turn(session_id)
+    bg.task = SimpleNamespace(done=lambda: False, cancel=lambda: None)  # 取消不动它
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    started = []
+    _install_fake_loop(monkeypatch, started)
+
+    response = TestClient(server.app).post(
+        "/chat/stream", json={"session_id": session_id, "message": "新的一轮"}
+    )
+    assert response.status_code == 200
+    assert started == []  # 旧任务没落地前不得启动新一轮
+    frames = _frames(response.text)
+    assert [name for name, _ in frames] == ["error"]
+    assert frames[0][1]["category"] == "busy"
+    assert frames[0][1]["retryable"] is True
 
 
 def test_get_sessions_marks_active_background(monkeypatch):

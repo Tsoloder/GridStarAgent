@@ -457,7 +457,7 @@ async def run_agent_loop(
         for message in compressed_messages:
             clean = {key: value for key, value in message.items()
                      if key not in {"active_skills", "attachments", "display_content", "usage",
-                                    "ts", "elapsed_ms", "think_ms", "ttft_ms", "tps"}}
+                                    "ts", "elapsed_ms", "think_ms", "ttft_ms", "tps", "interrupted"}}
             docs = message.get("attachments", [])
             if docs and message.get("role") == "user":
                 sections = []
@@ -647,6 +647,17 @@ async def run_agent_loop(
                 if _now - _last_heartbeat >= 30.0:
                     _last_heartbeat = _now
                     yield {"type": "heartbeat"}
+        except asyncio.CancelledError:
+            # 用户点「停止」= 本轮对话到此结束。已生成的部分文本必须落盘，否则
+            # 刷新页面后这一轮只剩提问，刚才看到的回复凭空消失；轨迹也要收尾，
+            # 不然请求记录永远停在 running。CancelledError 是 BaseException，
+            # 下面的 except Exception 接不到，必须单独处理并重新抛出。
+            if text_acc or reasoning_acc:
+                session.append_assistant(text_acc, loaded_skills, reasoning_acc,
+                                         interrupted=True)
+            session.append_trajectory(_traj_request_end("interrupted"))
+            logger.info("model stream interrupted by user: session=%s", session.id)
+            raise
         except Exception as e:
             logger.exception("model stream failed")
             yield _traj_request_end("failed")

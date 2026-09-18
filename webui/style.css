@@ -180,7 +180,8 @@ textarea#message-input{padding-right:114px}
 .traj-insp-body{min-height:0;flex:1;overflow:auto;padding:10px 12px;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
 .traj-insp-row{display:grid;grid-template-columns:76px minmax(0,1fr);grid-gap:4px 10px;gap:4px 10px;padding:3px 0;font-size:11px}
 .traj-insp-row>span{color:var(--muted)}
-.traj-insp-row>b{color:var(--text);font-weight:500;overflow-wrap:break-word}
+.traj-insp-row>b{color:var(--text);font-weight:500;overflow-wrap:anywhere}
+.traj-insp-args{margin:0;padding:8px;border:1px solid var(--line);background:var(--inset);color:var(--text);font:10px/1.5 Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
 .traj-insp-section{margin:12px 0 6px;color:var(--cyan);font-size:9px;font-weight:700;letter-spacing:1.2px}
 .traj-insp-preview{font-size:12px;line-height:1.55}
 .traj-insp-preview p{margin:0 0 7px}
@@ -240,7 +241,7 @@ textarea#message-input{padding-right:114px}
 .session-panel,.settings-dialog{overflow:hidden}
 .model-listbox{border-radius:var(--radius-lg)}
 /* 卡片类容器统一 --radius，并裁掉子元素直角 */
-.code-block,.reasoning,.structured,.workflow-card,.approval-card,.tool-group,.provider-section,.settings-model,.add-model,.mcp-tool,.skill-card,.tool-args-scroll,.traj-insp-raw{border-radius:var(--radius)}
+.code-block,.reasoning,.structured,.workflow-card,.approval-card,.tool-group,.provider-section,.settings-model,.add-model,.mcp-tool,.skill-card,.tool-args-scroll,.traj-insp-raw,.traj-insp-args{border-radius:var(--radius)}
 .code-block,.reasoning,.structured,.workflow-card,.approval-card,.tool-group,.settings-model,.mcp-tool,.skill-card{overflow:hidden}
 .phase-panel{border-radius:var(--radius-lg);box-shadow:0 10px 26px rgba(0,0,0,.28)}
 .phase-step{border-radius:var(--radius)}

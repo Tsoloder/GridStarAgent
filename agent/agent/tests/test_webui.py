@@ -237,11 +237,19 @@ def test_webui_reconnects_background_stream_after_switching_sessions():
     reconnect = script[script.index("async function reconnectStream"):]
     # 重连要恢复"停止"按钮状态（按当前会话计算），并原样带回本轮消息标识，避免被当成新消息再跑一轮
     assert "message:info.last_message" in reconnect
+    # 重连必须显式带 resume：后端只认这个标志区分「回放」和「新一轮」，否则停止后
+    # 重发同一句话会被当成重连，上一轮内容灌进新气泡
+    assert "resume:true" in reconnect
     assert "state.controllers.set(sessionId, controller)" in reconnect
     assert "syncComposer();" in reconnect
     # 用户主动停止过的会话不自动重连，否则切回时又粘回后台流
-    assert 'setStatus(sessionId, error.name === "AbortError" ? "stopped" : "error")' in script
+    assert 'const stopped = error.name === "AbortError";' in script
+    assert 'setStatus(sessionId, stopped ? "stopped" : "error");' in script
     assert 'state.status.get(id) === "stopped"' in script
+    # 停止标记实时流与重建历史共用一套逻辑，避免实时多一条「已停止」提示、刷新后又消失
+    assert "function markStopped(item)" in script
+    assert "if (message.interrupted) markStopped(item);" in script
+    assert "markStopped(assistant)" in script
 
 
 def test_webui_per_session_stream_state_and_badges():
@@ -279,8 +287,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=46" in index
-    assert "style.css?v=34" in index
+    assert "app.js?v=47" in index
+    assert "style.css?v=35" in index
 
 
 def test_webui_voice_input_contract():
@@ -294,8 +302,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=34" in index
-    assert "app.js?v=46" in index
+    assert "style.css?v=35" in index
+    assert "app.js?v=47" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

@@ -604,3 +604,90 @@ async def test_bridge_without_group_info_stays_empty():
     assert bridge.tool_groups() == []
     assert bridge.group_for_tool("UGSur") is None
 
+
+@pytest.mark.asyncio
+async def test_cancel_persists_partial_reply_as_interrupted(tmp_path, monkeypatch):
+    """停止本轮对话：已生成的部分文本要落盘并标 interrupted，否则刷新后凭空消失。
+
+    CancelledError 继承自 BaseException，agent_loop 里原有的 except Exception 接不到，
+    必须单独兜底，否则 text_acc 随协程栈一起丢掉、轨迹也停在 running。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    import agent_loop
+
+    reached = asyncio.Event()
+
+    async def stream_runtime(runtime, model_key, messages, system_prompt, tools):
+        yield {"type": "text_chunk", "delta": "前一半"}
+        reached.set()
+        await asyncio.Event().wait()   # 模型还在生成，此时用户点了停止
+        yield {"type": "text_chunk", "delta": "后一半"}
+
+    monkeypatch.setattr(agent_loop, "_stream_runtime", stream_runtime)
+
+    session = _make_session("cancel-mid-stream")
+    stream = agent_loop.run_agent_loop(
+        session=session, user_message="你好", base_system_prompt="base",
+        config=_make_config(), mcp=MockMcpBridge({}), ctx_mgr=MockContextManager(),
+        skill_registry=MockSkillRegistry(), model_runtime=MockLLMClient([]),
+    )
+
+    async def consume():
+        async for _ in stream:
+            pass
+
+    task = asyncio.create_task(consume())
+    await reached.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assistants = [m for m in session.messages if m["role"] == "assistant"]
+    assert [m["content"] for m in assistants] == ["前一半"]
+    assert assistants[0].get("interrupted") is True
+
+    ends = [e for e in session.read_trajectory() if e["type"] == "traj_request_end"]
+    assert [e["status"] for e in ends] == ["interrupted"]
+    assert ends[0]["content"] == "前一半"
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_first_token_writes_no_empty_reply(tmp_path, monkeypatch):
+    """一个字都没生成就停止：不留空气泡，轨迹仍要收尾。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    import agent_loop
+
+    reached = asyncio.Event()
+
+    async def stream_runtime(runtime, model_key, messages, system_prompt, tools):
+        reached.set()
+        await asyncio.Event().wait()
+        yield {"type": "text_chunk", "delta": "never"}
+
+    monkeypatch.setattr(agent_loop, "_stream_runtime", stream_runtime)
+
+    session = _make_session("cancel-before-token")
+    stream = agent_loop.run_agent_loop(
+        session=session, user_message="你好", base_system_prompt="base",
+        config=_make_config(), mcp=MockMcpBridge({}), ctx_mgr=MockContextManager(),
+        skill_registry=MockSkillRegistry(), model_runtime=MockLLMClient([]),
+    )
+
+    async def consume():
+        async for _ in stream:
+            pass
+
+    task = asyncio.create_task(consume())
+    await reached.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert [m for m in session.messages if m["role"] == "assistant"] == []
+    ends = [e for e in session.read_trajectory() if e["type"] == "traj_request_end"]
+    assert [e["status"] for e in ends] == ["interrupted"]
+
