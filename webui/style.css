@@ -163,9 +163,8 @@
 .traj-views{display:flex}
 .traj-views button{height:26px;padding:0 10px;border:1px solid var(--line);background:var(--surface-2);color:var(--muted);font-size:11px}
 .traj-views button+button{border-left:0}
+/* 轨迹工具栏三个按钮都是开关：亮 = 开启（时长=按时长投影，轮次=按轮次分组，调用=按调用分组） */
 .traj-views button.active{border-color:var(--cyan-mid);background:var(--accent-tint);color:var(--cyan)}
-/* 概览投影开关自成一组：单按钮时首尾圆角会互相覆盖，单独收回 */
-.traj-views button[data-traj-metric]{border-radius:var(--radius-sm)}
 #traj-search{margin-left:auto;width:220px;height:26px;border:1px solid var(--line);background:var(--inset);padding:0 8px;outline:none;font-size:11px}
 #traj-search:focus{border-color:var(--cyan)}
 /* 轨迹时间轴概览 */
@@ -178,9 +177,12 @@
 .traj-span{position:absolute;top:0;bottom:0;display:block;cursor:pointer}
 .traj-span:hover{filter:brightness(1.3)}
 .traj-span.user{background:var(--cyan)}
+/* 进度条颜色与账本徽标（.traj-badge.source-*）的前景色保持一致，避免同一来源两种颜色 */
+.traj-span.system{background:var(--muted)}
+.traj-span.context{background:var(--ok-text)}
 .traj-span.model{background:var(--assistant-text)}
 .traj-span.ttft{background:#f9dcef}
-.traj-span.tool{background:var(--orange)}
+.traj-span.tool{background:var(--warn-text)}
 .traj-span.failed{background:var(--red)}
 .traj-span.selected{outline:1px solid var(--cyan);outline-offset:1px;z-index:1}
 .traj-range{position:absolute;top:-4px;bottom:-4px;border:1px solid var(--cyan);background:rgba(80,186,223,.10);pointer-events:none}
@@ -194,6 +196,11 @@
 .traj-group.collapsed{color:var(--muted)}
 .traj-group-caret{display:inline-block;width:10px;margin-right:2px;color:var(--muted-2);font-size:9px}
 .traj-group small{margin-left:6px;color:var(--muted-2);font:9px Consolas,monospace}
+/* 分组头标签：过长省略，避免把右侧统计挤走 */
+.traj-group-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 收起的一轮：用户消息行照常显示，其余记录折成这一行，点击展开 */
+.traj-summary{padding:6px 10px 8px 22px;color:var(--muted-2);font-size:11px;cursor:pointer;-webkit-user-select:none;user-select:none}
+.traj-summary:hover{color:var(--text)}
 .traj-row{display:flex;align-items:center;min-height:30px;padding:4px 10px;border-left:3px solid transparent;cursor:pointer}
 .traj-row>*+*{margin-left:8px}
 .traj-row:hover{background:var(--band-2)}
@@ -201,11 +208,14 @@
 .traj-row.selected{background:var(--accent-tint);border-left-color:var(--cyan)}
 .traj-row.failed .traj-row-meta,.traj-row.failed .traj-row-label{color:var(--red)}
 .traj-row.running .traj-row-meta{color:var(--orange)}
-.traj-badge{flex:0 0 auto;min-width:44px;padding:2px 6px;border:1px solid var(--line);border-radius:3px;background:var(--surface-2);color:var(--muted);font-size:9px;letter-spacing:.5px;text-align:center}
-.traj-badge.source-user{border-color:var(--cyan-mid);background:var(--accent-tint);color:var(--cyan)}
-.traj-badge.source-context{border-color:var(--ok-line);background:var(--ok-tint);color:var(--ok-text)}
-.traj-badge.source-assistant{border-color:var(--assistant-line);background:var(--assistant-tint);color:var(--assistant-text)}
-.traj-badge.source-tool{border-color:var(--warn-line);background:var(--warn-tint);color:var(--warn-text)}
+/* 徽标列：列宽固定、内容靠右；徽标框按文字自适应，文字右对齐 */
+.traj-badge-cell{flex:0 0 46px;display:flex;justify-content:flex-end}
+/* 去掉彩色描边，只留淡色底 + 同色文字，风格更干净 */
+.traj-badge{flex:0 0 auto;padding:2px 6px;border-radius:3px;background:var(--surface-2);color:var(--muted);font-size:9px;letter-spacing:.5px;text-align:right}
+.traj-badge.source-user{background:var(--accent-tint);color:var(--cyan)}
+.traj-badge.source-context{background:var(--ok-tint);color:var(--ok-text)}
+.traj-badge.source-assistant{background:var(--assistant-tint);color:var(--assistant-text)}
+.traj-badge.source-tool{background:var(--warn-tint);color:var(--warn-text)}
 .traj-row-main{display:flex;align-items:baseline;min-width:0;flex:1}
 .traj-row-main>*+*{margin-left:8px}
 .traj-row-main strong{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px;font-weight:500}
@@ -216,8 +226,9 @@
 .traj-row-bar{flex:0 0 90px;height:5px;background:var(--inset);border:1px solid var(--line)}
 .traj-row-bar>i{display:block;height:100%;min-width:2px;background:linear-gradient(90deg,var(--cyan-mid),var(--cyan))}
 .traj-row.source-assistant .traj-row-bar>i{background:var(--assistant-text)}
-.traj-row.source-tool .traj-row-bar>i{background:var(--orange)}
-.traj-row.source-context .traj-row-bar>i{background:var(--green)}
+.traj-row.source-tool .traj-row-bar>i{background:var(--warn-text)}
+.traj-row.source-system .traj-row-bar>i{background:var(--muted)}
+.traj-row.source-context .traj-row-bar>i{background:var(--ok-text)}
 .traj-row.failed .traj-row-bar>i{background:var(--red)}
 /* 轨迹详情 inspector */
 .traj-inspector{display:flex;flex-direction:column;min-height:0;flex:0 0 380px;width:380px;border-left:1px solid var(--line);background:var(--band-3)}

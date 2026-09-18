@@ -24,7 +24,7 @@ const state = {
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
   viewTab: "chat",
-  traj: {events:[], keys:{}, count:{}, records:[], view:"duration", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
+  traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
 const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
@@ -1797,6 +1797,8 @@ if (el.voiceBtn) el.voiceBtn.onclick = toggleVoice;
 /* ================= 轨迹视图：事件账本投影 ================= */
 const TRAJ_LIVE_TYPES = ["user", "traj_system_prompt", "traj_context", "traj_request_start", "traj_request_end", "tool_call", "tool_result"];
 const TRAJ_SOURCE_LABEL = {system: "系统", user: "用户", context: "上下文", assistant: "助手", tool: "工具"};
+// 时间轴条的颜色类：跟账本徽标 source-* 对应（助手记为 model，其余同名），保证同一来源同色
+const TRAJ_SPAN_CLASS = {system: "system", user: "user", context: "context", assistant: "model", tool: "tool"};
 const TRAJ_FAILED_RE = /^(Tool error:|Tool execution denied|Tool blocked by active Skill policy|\[deferred\])/;
 
 // 与后端 _estimate_tokens 一致：中日韩 1 token，其余 4 字符 1 token
@@ -1962,6 +1964,32 @@ function trajRowMeta(rec) {
   if (ms != null) bits.push(trajFormatMs(ms));
   return bits.join(" · ");
 }
+// 账本与时间轴共用的排序：初始系统提示词不属于某一轮，固定排在最前
+// 返回 {preamble, rest}：preamble 为首条系统提示词（无则为 null），rest 是其余记录且已剔除它
+function trajSplitPreamble(records) {
+  const at = records.findIndex(rec => rec.kind === "system_prompt");
+  if (at < 0) return {preamble: null, rest: records};
+  return {preamble: records[at], rest: records.slice(0, at).concat(records.slice(at + 1))};
+}
+// 账本行：平铺行、分组展开行、收起时保留的用户消息行共用同一套标记
+function trajRowHtml(rec, maxMs, markTurnStart) {
+  const cls = ["traj-row", "source-" + rec.source];
+  if (rec.id === state.traj.selected) cls.push("selected");
+  if (markTurnStart && rec.__turnStart) cls.push("turn-start");
+  const main = rec.source === "tool"
+    ? `<strong>${escapeHtml(rec.name)}</strong><span class="traj-row-preview">${escapeHtml(trajPreview(rec.status === "running" ? JSON.stringify(rec.args) : rec.content, 160))}</span>`
+    : `<span class="traj-row-label">${escapeHtml(rec.label)}${rec.model ? ` <small>${escapeHtml(rec.model)}</small>` : ""}</span><span class="traj-row-preview">${escapeHtml(trajPreview(rec.content, 160))}</span>`;
+  // 行内耗时条 = 每条记录的耗时占比（与本视图最长耗时比）：无耗时的记录只画空轨道（不臆造时长），保证右侧 token 列对齐
+  const bar = maxMs > 0 ? (() => {
+    const ms = trajRecordMs(rec);
+    if (ms == null) return '<span class="traj-row-bar" title="该记录无耗时"></span>';
+    const pct = Math.max(0.5, (ms / maxMs) * 100);
+    const tip = "耗时 " + trajFormatMs(ms) + " · 本视图最长 " + trajFormatMs(maxMs) + "（" + pct.toFixed(1) + "%）";
+    return `<span class="traj-row-bar" title="${escapeHtml(tip)}"><i style="width:${pct.toFixed(2)}%"></i></span>`;
+  })() : "";
+  const statusCls = rec.status === "failed" ? " failed" : (rec.status === "running" ? " running" : "");
+  return `<div class="${cls.join(" ")}${statusCls}" role="listitem" tabindex="0" data-id="${rec.id}"><span class="traj-badge-cell"><span class="traj-badge source-${rec.source}">${TRAJ_SOURCE_LABEL[rec.source]}</span></span><span class="traj-row-main">${main}</span><span class="traj-row-meta">${escapeHtml(trajRowMeta(rec))}</span>${bar}</div>`;
+}
 function renderTrajectory() {
   if (!el.trajView || state.viewTab !== "traj") return;
   const st = state.traj;
@@ -1972,108 +2000,124 @@ function renderTrajectory() {
   const query = st.query.trim().toLowerCase();
   let records = st.records;
   if (query) records = records.filter(rec => trajRecordText(rec).toLowerCase().indexOf(query) >= 0);
-  if (st.range) records = trajRangeFilter(records, st.range);
+  // 选区过滤按时间轴命中的记录 id（见 setRange 注释），不按时间戳回算
+  if (st.range) records = records.filter(rec => st.range.ids.indexOf(rec.id) >= 0);
   let maxMs = 0;
   records.forEach(rec => { const ms = trajRecordMs(rec); if (ms != null && ms > maxMs) maxMs = ms; });
   const chunks = [];
   let lastGroup = null;
   if (!records.length) chunks.push('<div class="empty-state"><p>暂无轨迹记录</p></div>');
-  const groupCounts = {}, groupTok = {}, groupMs = {};
-  records.forEach(rec => {
+  // 分组开关未开启（平铺）时逐条平铺，不产生分组头
+  const grouped = !!st.view;
+  // 初始系统提示词不属于某一轮：任何视图（平铺/轮次/调用）都排到列表最前
+  const split = trajSplitPreamble(records);
+  const preamble = split.preamble;
+  const list = split.rest;
+  const groupCounts = {}, groupTok = {}, groupMs = {}, groupSteps = {}, groupTools = {};
+  if (grouped) list.forEach(rec => {
     const k = trajGroupKey(st.view, rec);
-    if (!k) return;
     groupCounts[k] = (groupCounts[k] || 0) + 1;
     if (rec.tokens && rec.tokens.total) groupTok[k] = (groupTok[k] || 0) + rec.tokens.total;
     const ms = trajRecordMs(rec);
     if (ms != null) groupMs[k] = (groupMs[k] || 0) + ms;
+    if (rec.source === "user") return;
+    if (rec.kind === "request") groupSteps[k] = (groupSteps[k] || 0) + 1;
+    if (rec.source === "tool") groupTools[k] = (groupTools[k] || 0) + 1;
   });
-  records.forEach(rec => {
-    const groupKey = trajGroupKey(st.view, rec);
-    if (groupKey !== lastGroup) {
+  if (preamble) chunks.push(trajRowHtml(preamble, maxMs, false));
+  const summarized = {};
+  list.forEach(rec => {
+    const groupKey = grouped ? trajGroupKey(st.view, rec) : "";
+    if (grouped && groupKey !== lastGroup) {
       lastGroup = groupKey;
-      if (groupKey) {
-        const isCollapsed = !!st.collapsed[groupKey];
-        const label = st.view === "turn" ? `第 ${rec.turn} 轮`
-          : (rec.request ? `第 ${rec.turn} 轮 · 请求 #${rec.request}` : `第 ${rec.turn} 轮 · 输入与上下文`);
-        const metaBits = [groupCounts[groupKey] + " 条"];
-        if (groupTok[groupKey]) metaBits.push(groupTok[groupKey] + " tok");
-        if (groupMs[groupKey]) metaBits.push(trajFormatMs(groupMs[groupKey]));
-        chunks.push(`<div class="traj-group${isCollapsed ? " collapsed" : ""}" role="button" tabindex="0" aria-expanded="${isCollapsed ? "false" : "true"}" data-group="${groupKey}"><span class="traj-group-caret">${isCollapsed ? "▸" : "▾"}</span>${escapeHtml(label)}<small>${groupCounts[groupKey] || 0}</small><span class="traj-group-meta">${escapeHtml(metaBits.join(" · "))}</span></div>`);
-      }
+      const isCollapsed = !!st.collapsed[groupKey];
+      const label = st.view === "turn" ? `第 ${rec.turn} 轮`
+        : (rec.request ? `第 ${rec.turn} 轮 · 请求 #${rec.request}` : `第 ${rec.turn} 轮 · 输入与上下文`);
+      const metaBits = [groupCounts[groupKey] + " 条"];
+      if (groupTok[groupKey]) metaBits.push(groupTok[groupKey] + " tok");
+      if (groupMs[groupKey]) metaBits.push(trajFormatMs(groupMs[groupKey]));
+      chunks.push(`<div class="traj-group${isCollapsed ? " collapsed" : ""}" role="button" tabindex="0" aria-expanded="${isCollapsed ? "false" : "true"}" data-group="${groupKey}"><span class="traj-group-caret">${isCollapsed ? "▸" : "▾"}</span><span class="traj-group-label">${escapeHtml(label)}</span><small>${groupCounts[groupKey] || 0}</small><span class="traj-group-meta">${escapeHtml(metaBits.join(" · "))}</span></div>`);
     }
-    if (groupKey && st.collapsed[groupKey]) return;
-    const cls = ["traj-row", "source-" + rec.source];
-    if (rec.id === st.selected) cls.push("selected");
-    if (st.view !== "call" && rec.__turnStart) cls.push("turn-start");
-    const main = rec.source === "tool"
-      ? `<strong>${escapeHtml(rec.name)}</strong><span class="traj-row-preview">${escapeHtml(trajPreview(rec.status === "running" ? JSON.stringify(rec.args) : rec.content, 160))}</span>`
-      : `<span class="traj-row-label">${escapeHtml(rec.label)}${rec.model ? ` <small>${escapeHtml(rec.model)}</small>` : ""}</span><span class="traj-row-preview">${escapeHtml(trajPreview(rec.content, 160))}</span>`;
-    // 行内条 = 耗时占比（只在真实耗时投影下有意义）：无耗时的记录只画空轨道（不臆造时长），保证右侧 token 列对齐
-    const bar = (st.actualDuration && maxMs > 0) ? (() => {
-      const ms = trajRecordMs(rec);
-      if (ms == null) return '<span class="traj-row-bar" title="该记录无耗时"></span>';
-      const pct = Math.max(0.5, (ms / maxMs) * 100);
-      const tip = "耗时 " + trajFormatMs(ms) + " · 本视图最长 " + trajFormatMs(maxMs) + "（" + pct.toFixed(1) + "%）";
-      return `<span class="traj-row-bar" title="${escapeHtml(tip)}"><i style="width:${pct.toFixed(2)}%"></i></span>`;
-    })() : "";
-    const statusCls = rec.status === "failed" ? " failed" : (rec.status === "running" ? " running" : "");
-    chunks.push(`<div class="${cls.join(" ")}${statusCls}" role="listitem" tabindex="0" data-id="${rec.id}"><span class="traj-badge source-${rec.source}">${TRAJ_SOURCE_LABEL[rec.source]}</span><span class="traj-row-main">${main}</span><span class="traj-row-meta">${escapeHtml(trajRowMeta(rec))}</span>${bar}</div>`);
+    if (grouped && st.collapsed[groupKey]) {
+      // 轮次视图收起时保留本轮的用户消息行，其余记录折成一行「… N 个步骤 · M 个工具调用」
+      if (st.view === "turn" && rec.source === "user") { chunks.push(trajRowHtml(rec, maxMs, true)); return; }
+      if (st.view === "turn" && !summarized[groupKey]) {
+        summarized[groupKey] = true;
+        chunks.push(`<div class="traj-summary" role="button" tabindex="0" data-group="${groupKey}" title="展开本轮全部记录">… ${groupSteps[groupKey] || 0} 个步骤 · ${groupTools[groupKey] || 0} 个工具调用</div>`);
+      }
+      return;
+    }
+    chunks.push(trajRowHtml(rec, maxMs, st.view !== "call"));
   });
   el.trajLedger.innerHTML = chunks.join("");
   renderTrajInspector();
 }
-// 分组键：轮次视图按 turn，调用视图按 turn.request；时长视图不分组
+// 分组键：轮次开关开启按 turn，调用开关开启按 turn.request；两个开关都关（平铺）时不分组
 function trajGroupKey(view, rec) {
-  if (view === "turn") return "t" + rec.turn;
-  if (view === "call") return "c" + rec.turn + "." + rec.request;
-  return null;
+  if (!view) return "";
+  return view === "call" ? "c" + rec.turn + "." + rec.request : "t" + rec.turn;
 }
 function trajAllGroupKeys(view, records) {
+  if (!view) return [];
   const keys = [];
-  records.forEach(rec => { const k = trajGroupKey(view, rec); if (k && keys.indexOf(k) < 0) keys.push(k); });
+  records.forEach(rec => { const k = trajGroupKey(view, rec); if (keys.indexOf(k) < 0) keys.push(k); });
   return keys;
 }
-// 轮次边界粗线：投影后按 turn 变化打标；同时记下投影内序号（等宽投影与区间命中都用它）
+// 轮次边界粗线：投影后按 turn 变化打标
 function markTurnStarts(records) {
   let last = null;
-  records.forEach((rec, ix) => { rec.__ix = ix; rec.__turnStart = rec.turn !== last; last = rec.turn; });
+  records.forEach(rec => { rec.__turnStart = rec.turn !== last; last = rec.turn; });
 }
-// 区间命中：等宽投影按 span 序号，耗时投影按真实时间（与 dsh 的 focusIndexes 同义）
-function trajRangeFilter(records, range) {
-  if (range.seq) {
-    const hit = {};
-    (state.traj.spans || []).forEach(sp => { if (sp.ds <= range.end && sp.de >= range.start) hit[sp.ix] = true; });
-    return records.filter(rec => hit[rec.__ix]);
-  }
-  return records.filter(rec => { const t = trajTimeMs(rec); return !isNaN(t) && t >= range.start && t <= range.end; });
-}
-// 概览投影（对齐 dsh）：默认「等宽操作数」按记录序号等分，不受空转间隔影响；
-// 打开「真实耗时」后按真实起止绘制，并把空转间隔整体折叠掉，避免长会话把条压成发丝。
+// 概览投影由「时长」开关控制，两态（参考 deepseek-harness 的 sequence / duration）：
+// 关（默认）= 等宽操作，每个记录等宽、按操作顺序排列，与时间无关；
+// 开 = 实际时长，条长对应该记录的耗时，并折叠空转间隔，便于横向比较各步耗时长短。
 function renderTrajTimeline() {
   const st = state.traj;
   const spans = [];
-  st.records.forEach(rec => {
-    const ms = trajRecordMs(rec);
-    const durTxt = ms == null ? "" : " · " + trajFormatMs(ms);
-    if (rec.source === "user") {
-      const t = trajTimeMs(rec);
-      if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user", id: rec.id, ix: rec.__ix, title: (rec.label || "用户消息") + " · " + (rec.ts || "")});
-    } else if (rec.kind === "request" && rec.timing && rec.timing.start) {
-      const t = Date.parse(rec.timing.start);
-      if (isNaN(t)) return;
-      const total = rec.timing.total_ms != null ? rec.timing.total_ms : 0;
-      const title = rec.label + durTxt;
-      spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model", id: rec.id, ix: rec.__ix, title: title});
-      if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft", id: rec.id, ix: rec.__ix, title: title + " · 首 token " + trajFormatMs(rec.timing.ttft_ms)});
-    } else if (rec.source === "tool" && rec.durationMs != null) {
-      const endT = trajTimeMs(rec);
-      if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool", id: rec.id, ix: rec.__ix, title: (rec.name || "工具") + durTxt});
-    }
-  });
   if (!st.actualDuration) {
-    spans.forEach((sp, i) => { sp.ds = i; sp.de = i + 1; }); // 等宽：每条占一格，x = 序号
+    // 等宽投影：横轴 = 记录序号，每条记录占 1 格，顺序与账本列表一致；首 token 占该请求格子的前一段
+    const ordered = trajSplitPreamble(st.records);
+    const sequence = ordered.preamble ? [ordered.preamble].concat(ordered.rest) : ordered.rest;
+    let lastTs = 0;
+    sequence.forEach((rec, index) => {
+      const ts = trajTimeMs(rec);
+      if (!isNaN(ts)) lastTs = ts;
+      const isTool = rec.source === "tool";
+      const isRequest = rec.kind === "request";
+      const failed = rec.status === "failed" ? " failed" : "";
+      const ms = trajRecordMs(rec);
+      const label = isTool ? (rec.name || "工具") : (rec.label || TRAJ_SOURCE_LABEL[rec.source] || "");
+      const title = label + (ms == null ? "" : " · " + trajFormatMs(ms));
+      // start/end 仍存真实时刻，供时间轴选区反查；ds/de 才是等宽投影坐标
+      spans.push({lane: isTool ? 2 : (isRequest ? 1 : 0), start: lastTs, end: lastTs,
+        ds: index, de: index + 1, cls: (TRAJ_SPAN_CLASS[rec.source] || "user") + failed,
+        id: rec.id, title: title});
+      const timing = rec.timing || {};
+      if (isRequest && timing.total_ms > 0 && timing.ttft_ms > 0 && timing.ttft_ms < timing.total_ms) {
+        spans.push({lane: 1, start: lastTs, end: lastTs, ds: index, de: index + timing.ttft_ms / timing.total_ms,
+          cls: "ttft" + failed, id: rec.id, title: title + " · 首 token " + trajFormatMs(timing.ttft_ms)});
+      }
+    });
   } else {
-    // 耗时：没有任何 span 覆盖的时段（空转）不计入宽度
+    st.records.forEach(rec => {
+      const ms = trajRecordMs(rec);
+      const durTxt = ms == null ? "" : " · " + trajFormatMs(ms);
+      if (rec.source === "user") {
+        const t = trajTimeMs(rec);
+        if (!isNaN(t)) spans.push({lane: 0, start: t, end: t + 1, cls: "user", id: rec.id, title: (rec.label || "用户消息") + " · " + (rec.ts || "")});
+      } else if (rec.kind === "request" && rec.timing && rec.timing.start) {
+        const t = Date.parse(rec.timing.start);
+        if (isNaN(t)) return;
+        const total = rec.timing.total_ms != null ? rec.timing.total_ms : 0;
+        const title = rec.label + durTxt;
+        spans.push({lane: 1, start: t, end: t + Math.max(total, 1), cls: rec.status === "failed" ? "model failed" : "model", id: rec.id, title: title});
+        if (rec.timing.ttft_ms != null && rec.timing.ttft_ms > 0) spans.push({lane: 1, start: t, end: t + rec.timing.ttft_ms, cls: "ttft", id: rec.id, title: title + " · 首 token " + trajFormatMs(rec.timing.ttft_ms)});
+      } else if (rec.source === "tool" && rec.durationMs != null) {
+        const endT = trajTimeMs(rec);
+        if (!isNaN(endT)) spans.push({lane: 2, start: endT - rec.durationMs, end: endT, cls: rec.status === "failed" ? "tool failed" : "tool", id: rec.id, title: (rec.name || "工具") + durTxt});
+      }
+    });
+    // 时长：没有任何 span 覆盖的时段（空转）不计入宽度，条长直接对应记录本身的耗时
     let removed = 0, covered = null;
     spans.slice().sort((a, b) => a.start - b.start || a.end - b.end).forEach(sp => {
       if (covered !== null && sp.start > covered) removed += sp.start - covered;
@@ -2087,8 +2131,9 @@ function renderTrajTimeline() {
   let dMin = Infinity, dMax = -Infinity;
   spans.forEach(sp => { lanes[sp.lane].push(sp); if (sp.ds < dMin) dMin = sp.ds; if (sp.de > dMax) dMax = sp.de; });
   if (!isFinite(dMin)) { el.trajTimeline.innerHTML = '<div class="traj-lanes"><div class="traj-lane"><span class="traj-lane-label">输入</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">模型</span><div class="traj-lane-track"></div></div><div class="traj-lane"><span class="traj-lane-label">工具</span><div class="traj-lane-track"></div></div></div>'; st.scale = null; return; }
-  if (st.actualDuration) { const pad = Math.max((dMax - dMin) * 0.01, 20); dMin -= pad; dMax += pad; }
-  st.scale = {min: dMin, max: dMax, seq: !st.actualDuration};
+  // 铺满轨道：两端不留边距，首尾条直接贴住两侧；域宽为 0（单条瞬时记录）时补 1 格避免除零
+  if (dMax - dMin <= 0) dMax = dMin + 1;
+  st.scale = {min: dMin, max: dMax};
   const names = ["输入", "模型", "工具"];
   const laneHtml = lanes.map((list, idx) => {
     const items = list.map(sp => {
@@ -2210,19 +2255,6 @@ function trajSpanHit(d) {
   });
   return best ? best.id : null;
 }
-// 投影坐标 → 真实时间：沿最近的 span 反查（空转间隔已被折叠成 0 宽，不会落在里面）
-function trajTimeAtDisplay(d) {
-  const st = state.traj;
-  const spans = st.spans || [];
-  if (d == null || (st.scale && st.scale.seq) || !spans.length) return null;
-  let best = null, bestDist = Infinity;
-  spans.forEach(sp => {
-    const dist = d < sp.ds ? sp.ds - d : (d > sp.de ? d - sp.de : 0);
-    if (dist < bestDist) { best = sp; bestDist = dist; }
-  });
-  if (!best) return null;
-  return best.start + Math.min(Math.max(d - best.ds, 0), best.end - best.start);
-}
 // 选中账本记录：打开详情面板并把账本行滚动到可视区
 function selectTrajRecord(id) {
   const st = state.traj;
@@ -2243,14 +2275,14 @@ function selectTrajRecord(id) {
     const ratio = Math.min(1, Math.max(0, (clientX - rect.left) / rect.width));
     return scale.min + ratio * (scale.max - scale.min);
   };
-  // 区间同时记投影坐标（画选区）与命中口径：等宽投影按 span 序号，耗时投影按真实时间
+  // 区间记投影坐标（画选区）+ 命中的记录 id（过滤账本）。
+  // 用命中记录而非回算时间戳：等宽投影的横轴是记录序号，且初始系统提示词排在用户消息之前、
+  // 时间戳却更晚，按时间戳回算会漏掉选中的记录。
   const setRange = (dA, dB) => {
     const st = state.traj;
     const d0 = Math.min(dA, dB), d1 = Math.max(dA, dB);
-    if (st.scale && st.scale.seq) { st.range = {seq: true, start: d0, end: d1, d0: d0, d1: d1}; return; }
-    const t0 = trajTimeAtDisplay(d0), t1 = trajTimeAtDisplay(d1);
-    if (t0 == null || t1 == null) return;
-    st.range = {seq: false, start: Math.min(t0, t1), end: Math.max(t0, t1), d0: d0, d1: d1};
+    const ids = (st.spans || []).filter(sp => sp.ds <= d1 && sp.de >= d0).map(sp => sp.id);
+    st.range = {d0: d0, d1: d1, ids: ids};
   };
   el.trajTimeline.addEventListener("mousedown", event => {
     const d = displayAt(event.clientX);
@@ -2281,21 +2313,27 @@ function selectTrajRecord(id) {
 })();
 el.tabChat.addEventListener("click", () => switchViewTab("chat"));
 el.tabTraj.addEventListener("click", () => switchViewTab("traj"));
-// 工具栏按钮高亮：时长为平铺视图选中态，轮次/调用为分组选中态，真实耗时投影单独一个开关
+// 工具栏三个按钮都是开关：亮 = 开启。「时长」控概览投影（与分组互不影响）；
+// 「轮次」「调用」控分组且两者互斥，都关闭时逐条平铺显示
 function trajSyncViewButtons() {
   const st = state.traj;
   Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), other => {
-    other.classList.toggle("active", other.getAttribute("data-traj-view") === st.view);
+    const view = other.getAttribute("data-traj-view");
+    const on = view === st.view;
+    other.classList.toggle("active", on);
+    other.setAttribute("aria-pressed", String(on));
+    const name = view === "turn" ? "轮次分组（每轮带用户消息）" : "模型调用分组";
+    other.title = on ? `正在按${name}显示；点击切回平铺` : `点击按${name}显示`;
   });
   const metric = document.querySelector("[data-traj-metric]");
   if (metric) {
     const on = !!st.actualDuration;
     metric.classList.toggle("active", on);
     metric.setAttribute("aria-pressed", String(on));
-    metric.title = on ? "当前按真实耗时展示（空转间隔已折叠）；点击切回按操作数等宽" : "当前按操作数等宽展示；点击按真实耗时展示";
+    metric.title = on ? "正在按实际时长展示（条长=各步耗时，空转已折叠）；点击切到等宽操作" : "正在按等宽操作展示；点击切到实际时长";
   }
 }
-// 概览投影开关：等宽操作数（默认）↔ 真实耗时；换投影后旧选区不再对应，清掉
+// 「时长」开关：关 = 真实时间轴（真实耗时）；开 = 按时长对比（折叠空转）。换投影后旧选区不再对应，清掉
 document.querySelector("[data-traj-metric]").addEventListener("click", () => {
   const st = state.traj;
   st.actualDuration = !st.actualDuration;
@@ -2307,33 +2345,18 @@ Array.prototype.forEach.call(document.querySelectorAll("[data-traj-view]"), butt
   button.addEventListener("click", () => {
     const view = button.getAttribute("data-traj-view");
     const st = state.traj;
-    if (view === "duration") {
-      // 时长 = 平铺（不分组）视图；泳道与行内耗时条由「真实耗时」开关单独控制
-      if (st.view === "duration") return;
-      st.view = "duration";
-      trajSyncViewButtons();
-      renderTrajectory();
-      return;
-    }
-    if (st.view === view) {
-      // 再点已激活的分组视图按钮：在全部折叠 / 全部展开间切换
-      const keys = trajAllGroupKeys(view, st.records);
-      const allCollapsed = keys.length > 0 && keys.every(key => st.collapsed[key]);
-      keys.forEach(key => { if (allCollapsed) delete st.collapsed[key]; else st.collapsed[key] = true; });
-      renderTrajectory();
-      return;
-    }
-    st.view = view;
-    // 进入分组视图默认全部折叠（每轮/每请求一行摘要）
+    // 开关语义：再点已开启的分组按钮即关闭，回到逐条平铺显示
+    st.view = st.view === view ? "" : view;
+    // 进入分组视图默认全部折叠（每轮/每请求一行摘要）；平铺时无分组可折叠
     st.collapsed = {};
-    trajAllGroupKeys(view, st.records).forEach(key => { st.collapsed[key] = true; });
+    trajAllGroupKeys(st.view, st.records).forEach(key => { st.collapsed[key] = true; });
     trajSyncViewButtons();
     renderTrajectory();
   });
 });
 el.trajSearch.addEventListener("input", () => { state.traj.query = el.trajSearch.value; renderTrajectory(); });
 el.trajLedger.addEventListener("click", event => {
-  const group = event.target.closest(".traj-group");
+  const group = event.target.closest(".traj-group, .traj-summary");
   if (group) {
     const key = group.getAttribute("data-group");
     if (state.traj.collapsed[key]) delete state.traj.collapsed[key];
@@ -2359,7 +2382,7 @@ document.addEventListener("click", event => {
   const target = event.target;
   if (!target || !target.closest) return;
   if (el.trajInspector.contains(target) || el.trajTimeline.contains(target)
-    || target.closest(".traj-row") || target.closest(".traj-group") || target.closest(".traj-span")) return;
+    || target.closest(".traj-row") || target.closest(".traj-group") || target.closest(".traj-summary") || target.closest(".traj-span")) return;
   st.selected = null;
   const sel = el.trajLedger.querySelector(".traj-row.selected");
   if (sel) sel.classList.remove("selected");
