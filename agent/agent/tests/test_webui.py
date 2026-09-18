@@ -107,11 +107,18 @@ def test_webui_uses_in_page_dialogs_instead_of_native_blocks():
 
 def test_webui_approval_card_renders_editable_params_from_schema():
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
 
+    # 审批参数按工具 schema 展开成可编辑条目，与工具参数询问共用输入框上方的浮层卡
     assert "function coerceSchemaValue(" in script
     assert "event.schema && event.schema.properties" in script
-    assert "approval-param-" in script
-    assert 'className = "approval-card"' in script
+    assert "function approvalEntries(" in script
+    assert "function openApprovalOverlay(" in script
+    assert "function queueApproval(" in script
+    assert "else if (type === \"tool_approval_required\") { queueApproval(id, event); }" in script
+    # 审批不再在对话流里单独成卡
+    assert 'className = "approval-card"' not in script
+    assert ".choice-card.approval" in stylesheet
 
 
 def test_webui_model_listbox_has_static_provider_groups():
@@ -278,16 +285,16 @@ def test_webui_per_session_stream_state_and_badges():
     for cls in (".session-badge.running", ".session-badge.done", ".session-badge.stopped", ".session-badge.error", ".session-badge.waiting"):
         assert cls in stylesheet
     assert "@keyframes badgePulse" in stylesheet
-    # 待确认：选项卡片/工具参数面板收尾或审批卡片挂起时进入 waiting
+    # 待确认：选项卡片/工具参数面板收尾或审批浮层挂起时进入 waiting
     assert 'session.waiting ? "waiting"' in script
     assert "message.awaitingInput" in script
     assert "stream.awaiting = true" in script
     assert 'setStatus(id, "waiting")' in script
-    assert "renderApproval(event, assistant.node, id)" in script
+    assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=61" in index
-    assert "style.css?v=49" in index
+    assert "app.js?v=62" in index
+    assert "style.css?v=53" in index
 
 
 def test_webui_voice_input_contract():
@@ -301,8 +308,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=49" in index
-    assert "app.js?v=61" in index
+    assert "style.css?v=53" in index
+    assert "app.js?v=62" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

@@ -598,15 +598,16 @@ function finishAssistant(message, deferred = false) {
   const parsed = structuredBlocks(message.text);
   message.body.innerHTML = basicMarkdown(parsed.visible);
   parsed.found.forEach(data => renderStructured(data, message.node));
-  // 文本兜底的 options 块也算一次待作答询问，与 ask_user_question 工具共用浮层
-  const fallback = parsed.found.filter(data => Array.isArray(data.options) && data.options.length).pop();
-  if (fallback && !message.pendingAsk) message.pendingAsk = fallback;
-  // 本轮以询问浮层或工具参数面板收尾 → 会话进入「待确认」，等用户操作
-  message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams))
-    || Boolean(message.pendingAsk);
+  // 文本兜底的 options / tool_params 块也算一次待作答询问，与 ask_user_question 工具共用浮层。
+  // 取最后一个候选块：参数编辑与选项合并进同一张浮层卡片，对话流里不再单独成卡
+  const ask = parsed.found.slice().reverse()
+    .find(data => Boolean(data.tool_params || data.toolparams) || (Array.isArray(data.options) && data.options.length));
+  if (ask && !message.pendingAsk) message.pendingAsk = ask;
+  // 本轮以询问浮层收尾 → 会话进入「待确认」，等用户操作
+  message.awaitingInput = Boolean(message.pendingAsk);
   // 只有思考过程没有正文时也要留住这一轮：停止在思考阶段是常见操作，丢掉节点等于
   // 把这段内容从实时视图和重渲染后的历史里一起抹掉
-  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".proc-row,.approval-card")) message.node.remove();
+  if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".proc-row")) message.node.remove();
   // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下；
   // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
   if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
@@ -627,8 +628,7 @@ function appendReasoning(message, delta) {
 
 function renderStructured(data, parent) {
   if (data.phase_plan) renderPhase(data.phase_plan);
-  if (data.tool_params || data.toolparams) renderToolParams(data.tool_params || data.toolparams, data.options || [], parent);
-  // 纯 options 块不落进对话流：待作答的询问统一由输入框上方的浮层承载
+  // tool_params 与 options 合并到输入框上方的浮层（见 renderChoiceCard），对话流里不再单独成卡
   if (data.workflow) renderWorkflowProposal(data.workflow, parent);
 }
 const ASK_USER_TOOL = "ask_user_question";
@@ -654,18 +654,29 @@ function closeChoiceOverlay() {
   clearTimeout(choiceTimer);
   choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; }, 240);
 }
-// 模型询问用户：可单选、也能用序号提交的选项卡片（挂在浮层里）
+// 模型询问用户：可单选、也能用序号提交的选项卡片（挂在浮层里）。
+// 工具参数询问与后端审批共用这一张卡：参数表 + 选项，一次提交同时回执参数与选择
 function renderChoiceCard(payload, parent) {
+  const approval = payload && payload.approval;
+  const toolParams = payload && !approval && (payload.tool_params || payload.toolparams);
+  const params = approval ? approvalEntries(approval.event) : toolParamEntries(toolParams);
   const raw = payload && Array.isArray(payload.options) ? payload.options : [];
-  const options = raw.filter(item => item && (item.label != null || item.value != null));
+  let options = raw.filter(item => item && (item.label != null || item.value != null));
+  // 审批只有批准/拒绝；参数块没有选项时补上默认的确认/取消，参数表始终有落脚的按钮
+  if (approval) options = [{label: "批准", value: "approve", style: "primary"}, {label: "拒绝", value: "deny", style: "danger"}];
+  else if (!options.length && params.length) options = [{label: "确认执行", value: "confirm", style: "primary"}, {label: "取消", value: "cancel", style: "danger"}];
   if (!options.length) return;
+  const title = (payload && payload.title)
+    || (approval ? `审批工具 · ${approval.event.name || ""}` : toolParams ? `确认工具参数 · ${toolParams.tool || ""}` : "请选择下一步");
   const card = document.createElement("section");
   card.className = "choice-card";
+  if (approval) card.classList.add("approval");
   card.innerHTML = '<div class="choice-head" role="button" tabindex="0" aria-expanded="true">'
-    + `<span class="choice-title">${escapeHtml(payload.title || "请选择下一步")}</span>`
+    + `<span class="choice-title">${escapeHtml(title)}</span>`
     + '<span class="choice-chevron" aria-hidden="true">⌄</span>'
     + '<button class="choice-close" type="button" title="收起" aria-label="收起">×</button></div>'
     + '<div class="choice-question"></div>'
+    + '<div class="choice-params params"></div>'
     + '<div class="choice-list" role="radiogroup" aria-label="候选选项"></div>'
     + '<div class="choice-foot"><div class="choice-answer">'
     + '<input class="choice-input" type="text" autocomplete="off" placeholder="点击「其他」后在此输入答案" aria-label="输入自定义答案" disabled>'
@@ -674,6 +685,26 @@ function renderChoiceCard(payload, parent) {
   const question = $(".choice-question", card);
   question.textContent = payload.question || "";
   if (!payload.question) question.classList.add("hidden");
+  const paramHost = $(".choice-params", card);
+  const paramInputs = [];
+  if (!params.length) paramHost.classList.add("hidden");
+  params.forEach((entry, index) => {
+    const row = document.createElement("div"); row.className = "param-row";
+    row.innerHTML = `<label for="choice-param-${index}"><b>${escapeHtml(entry.name)}${entry.required ? " *" : ""}</b>${escapeHtml(entry.desc || "")}</label>`;
+    // 审批参数常带 object/array（如分布参数），这类改用多行输入
+    const structured = entry.type === "object" || entry.type === "array";
+    const field = document.createElement(structured ? "textarea" : "input");
+    field.id = `choice-param-${index}`;
+    if (structured) { field.rows = 3; field.style.font = "11px/1.4 Consolas,monospace"; } else field.type = "text";
+    field.value = valueForInput(entry.value);
+    row.append(field); paramHost.append(row); paramInputs.push(field);
+  });
+  // 参数值随提交一起回填：按条目类型还原数字/布尔/对象的原始形态
+  const paramValues = () => {
+    const values = {};
+    params.forEach((entry, index) => { values[entry.name] = coerceSchemaValue(paramInputs[index].value, entry.type); });
+    return values;
+  };
   const list = $(".choice-list", card);
   const entries = options.map(option => {
     const label = option.label != null ? String(option.label) : String(option.value);
@@ -689,8 +720,8 @@ function renderChoiceCard(payload, parent) {
     list.append(item);
     return {item, option, label, other: false};
   });
-  // 末尾固定补一个「其他」：模型没给自由项时也能自己写答案
-  if (!entries.some(entry => /^(其他|其它|other)$/i.test(entry.label.trim()))) {
+  // 末尾固定补一个「其他」：模型没给自由项时也能自己写答案；审批是二选一，不补
+  if (!approval && !entries.some(entry => /^(其他|其它|other)$/i.test(entry.label.trim()))) {
     const item = document.createElement("div");
     item.className = "choice-item";
     item.setAttribute("role", "radio");
@@ -720,6 +751,28 @@ function renderChoiceCard(payload, parent) {
     input.classList.remove("invalid");
     input.focus();
   };
+  // 审批走接口回执：批准时连同编辑后的参数一起提交，拒绝只置否；后端在等结果，成功即收卡
+  const resolve = async (info, approved) => {
+    if (submitted) return;
+    submitted = true;
+    card.classList.add("submitted");
+    paramInputs.forEach(field => field.disabled = true);
+    entries.forEach(entry => entry.item.classList.add("locked"));
+    const sid = info.sessionId || (state.session && state.session.meta.id);
+    try {
+      await request(`/sessions/${encodeURIComponent(sid)}/tool-approvals/${encodeURIComponent(info.event.call_id)}`, {method:"POST",body:JSON.stringify({approved,args: approved ? paramValues() : (info.event.args || {})})});
+      const stream = state.streams.get(sid); if (stream) delete stream.approval;
+      // 审批已解决，流还在跑就把徽标从「待确认」恢复「进行中」
+      if (sid && state.controllers.has(sid)) setStatus(sid, "running");
+      closeChoiceOverlay();
+    } catch (error) {
+      showToast(error.message);
+      submitted = false;
+      card.classList.remove("submitted");
+      paramInputs.forEach(field => field.disabled = false);
+      entries.forEach(entry => entry.item.classList.remove("locked"));
+    }
+  };
   const submit = () => {
     if (submitted) return;
     // 未选中不发消息，只提示
@@ -733,12 +786,18 @@ function renderChoiceCard(payload, parent) {
     } else if (chosen.option && chosen.option.value != null) {
       value = String(chosen.option.value);
     }
+    if (approval) { resolve(approval, value === "approve"); return; }
     submitted = true;
     card.classList.add("submitted");
     input.disabled = true;
     submitBtn.disabled = true;
+    paramInputs.forEach(field => field.disabled = true);
     entries.forEach(entry => entry.item.classList.add("locked"));
-    sendMessage(value, chosen.other ? value : chosen.label);
+    // 参数块把编辑后的参数与所选选项打包成一次确认回填；走「其他」时自由文本一并带上
+    const payloadText = toolParams
+      ? `<structured_interaction>${JSON.stringify({type:"tool_params_confirmed",tool:toolParams.tool,confirmed:value==="confirm",params:paramValues()})}</structured_interaction>`
+      : value;
+    sendMessage(toolParams && chosen.other ? `${payloadText}\n\n${value}` : payloadText, chosen.other ? value : chosen.label);
     closeChoiceOverlay();
   };
   entries.forEach((entry, index) => {
@@ -761,36 +820,11 @@ function renderChoiceCard(payload, parent) {
   parent.append(card);
 }
 function valueForInput(value) { return typeof value === "object" ? JSON.stringify(value) : String(value == null ? "" : value); }
-function coerceValue(value, original) {
-  if (typeof original === "number") { const number = Number(value); return Number.isNaN(number) ? value : number; }
-  if (typeof original === "boolean") return value === "true";
-  if (typeof original === "object") { try { return JSON.parse(value); } catch (_) { return value; } }
-  return value;
-}
-function renderToolParams(toolParams, options, parent) {
-  if (!toolParams || typeof toolParams !== "object") return;
-  const card = document.createElement("section"); card.className = "structured params-card";
-  card.innerHTML = `<div class="structured-title">确认工具参数 · ${escapeHtml(toolParams.tool || "")}</div><div class="params"></div><div class="options"></div>`;
-  const params = Array.isArray(toolParams.params) ? toolParams.params : [];
-  params.forEach((param, index) => {
-    const row = document.createElement("div"); row.className = "param-row";
-    row.innerHTML = `<label for="param-${index}"><b>${escapeHtml(param.name)}</b>${escapeHtml(param.description || "")}</label>`;
-    const input = document.createElement("input"); input.id = `param-${index}`; input.value = valueForInput(param.value); input.dataset.index = index;
-    row.append(input); $(".params", card).append(row);
-  });
-  const actions = options.length ? options : [{label:"确认执行",value:"confirm",style:"primary"},{label:"取消",value:"cancel",style:"danger"}];
-  actions.forEach(option => {
-    const button = document.createElement("button"); button.className = `option-button ${option.style || ""}`; button.textContent = option.label || option.value; button.type = "button";
-    button.onclick = () => {
-      card.querySelectorAll("button,input").forEach(item => item.disabled = true);
-      const values = {};
-      params.forEach((param, index) => { values[param.name] = coerceValue(card.querySelector(`[data-index="${index}"]`).value, param.value); });
-      const payload = `<structured_interaction>${JSON.stringify({type:"tool_params_confirmed",tool:toolParams.tool,confirmed:String(option.value)==="confirm",params:values})}</structured_interaction>`;
-      sendMessage(payload, option.label || option.value);
-    };
-    $(".options", card).append(button);
-  });
-  parent.append(card);
+function inferValueType(value) { return typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : (value !== null && typeof value === "object" ? "object" : "string"); }
+// 浮层卡的参数条目统一成 {name, desc, value, type, required}，工具参数与审批共用同一套渲染
+function toolParamEntries(toolParams) {
+  const list = toolParams && Array.isArray(toolParams.params) ? toolParams.params : [];
+  return list.map(param => ({name: param.name, desc: param.description || "", value: param.value, type: inferValueType(param.value), required: false}));
 }
 function renderWorkflowProposal(workflow, parent) {
   const steps = Array.isArray(workflow && workflow.steps) ? workflow.steps : [];
@@ -993,56 +1027,27 @@ function coerceSchemaValue(raw, type) {
   if (type === "object" || type === "array") { try { return JSON.parse(text); } catch (_) { return text; } }
   return raw;
 }
-function renderApproval(event, parent, sessionId) {
-  const card = document.createElement("section"); card.className = "approval-card";
-  card.innerHTML = `<div class="card-head"><strong>审批工具 · ${escapeHtml(event.name)}</strong><span class="status">等待操作</span></div>`;
+// 审批参数按工具 schema 展开：必填打星、object/array 用多行输入
+function approvalEntries(event) {
   const args = event.args && typeof event.args === "object" && !Array.isArray(event.args) ? event.args : {};
   const schemaProps = event.schema && event.schema.properties && typeof event.schema.properties === "object" ? event.schema.properties : null;
   const required = event.schema && Array.isArray(event.schema.required) ? event.schema.required : [];
-  const inferType = value => typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : (value !== null && typeof value === "object" ? "object" : "string");
   const entries = schemaProps
-    ? Object.entries(schemaProps).map(([name, def]) => ({name, type: (def && def.type) || inferType(args[name]), desc: (def && def.description) || "", value: args[name]}))
-    : Object.keys(args).map(name => ({name, type: inferType(args[name]), desc: "", value: args[name]}));
-  if (schemaProps) Object.keys(args).filter(name => !(name in schemaProps)).forEach(name => entries.push({name, type: inferType(args[name]), desc: "", value: args[name]}));
-  if (entries.length) {
-    const wrap = document.createElement("div"); wrap.className = "params";
-    entries.forEach((entry, index) => {
-      const row = document.createElement("div"); row.className = "param-row";
-      const mark = required.includes(entry.name) ? " *" : "";
-      row.innerHTML = `<label for="approval-param-${index}"><b>${escapeHtml(entry.name + mark)}</b>${escapeHtml(entry.desc || "")}</label>`;
-      const structured = entry.type === "object" || entry.type === "array";
-      const input = document.createElement(structured ? "textarea" : "input");
-      input.id = `approval-param-${index}`; input.dataset.index = index; input.value = valueForInput(entry.value);
-      if (structured) { input.rows = 3; input.style.font = "11px/1.4 Consolas,monospace"; }
-      row.append(input); wrap.append(row);
-    });
-    card.append(wrap);
-  } else {
-    card.insertAdjacentHTML("beforeend", `<div class="approval-args"><textarea aria-label="工具参数">${escapeHtml(JSON.stringify(event.args || {}, null, 2))}</textarea></div>`);
-  }
-  card.insertAdjacentHTML("beforeend", `<div class="approval-actions"><button class="action-button approve" type="button">批准</button><button class="action-button deny" type="button">拒绝</button></div>`);
-  const setDisabled = disabled => card.querySelectorAll("button,input,textarea").forEach(item => item.disabled = disabled);
-  const resolve = async approved => {
-    setDisabled(true);
-    let args = event.args || {};
-    if (approved) {
-      try {
-        if (entries.length) {
-          const values = {};
-          entries.forEach((entry, index) => { values[entry.name] = coerceSchemaValue(card.querySelector(`[data-index="${index}"]`).value, entry.type); });
-          args = values;
-        } else args = JSON.parse($(".approval-args textarea", card).value);
-      } catch (_) { showToast("工具参数不是有效 JSON"); setDisabled(false); return; }
-    }
-    try {
-      const sid = sessionId || (state.session && state.session.meta.id);
-      await request(`/sessions/${encodeURIComponent(sid)}/tool-approvals/${encodeURIComponent(event.call_id)}`, {method:"POST",body:JSON.stringify({approved,args})});
-      const status = $(".status", card); status.textContent = approved ? "已批准" : "已拒绝"; status.className = `status ${approved ? "succeeded" : "cancelled"}`;
-      // 审批已解决，若该会话的流还在跑，徽标从「待确认」恢复「进行中」
-      if (sid && state.controllers.has(sid)) setStatus(sid, "running");
-    } catch (error) { showToast(error.message); setDisabled(false); }
-  };
-  $(".approve", card).onclick = () => resolve(true); $(".deny", card).onclick = () => resolve(false); parent.append(card); scrollMessages();
+    ? Object.entries(schemaProps).map(([name, def]) => ({name, desc: (def && def.description) || "", value: args[name], type: (def && def.type) || inferValueType(args[name]), required: required.includes(name)}))
+    : Object.keys(args).map(name => ({name, desc: "", value: args[name], type: inferValueType(args[name]), required: required.includes(name)}));
+  if (schemaProps) Object.keys(args).filter(name => !(name in schemaProps)).forEach(name => entries.push({name, desc: "", value: args[name], type: inferValueType(args[name]), required: false}));
+  return entries;
+}
+// 审批复用输入框上方那张参数卡：后端阻塞等回执，所以卡上只给批准/拒绝，不留关闭入口
+function openApprovalOverlay(event, sessionId) {
+  openChoiceOverlay({approval: {event, sessionId}});
+}
+// 审批到达：与参数询问一样弹浮层；后台会话先挂在流上，切回时再补弹，避免盖到别的会话头上
+function queueApproval(id, event) {
+  const stream = state.streams.get(id);
+  if (stream) stream.approval = {event, sessionId: id};
+  if (!hiddenFor(id)) openApprovalOverlay(event, id);
+  setStatus(id, "waiting");
 }
 function renderWorkflowEvent(event) {
   if (!state.workflow || event.type === "workflow_started") {
@@ -1156,7 +1161,11 @@ function restoreView(id) {
   if (!fragment) return false;
   state.stashed.delete(id); el.messages.append(fragment);
   const stream = state.streams.get(id);
-  if (stream) stream.hidden = false;
+  if (stream) {
+    stream.hidden = false;
+    // 后台挂起的审批切回来要补弹浮层，否则用户看不到也批不了
+    if (stream.approval) openApprovalOverlay(stream.approval.event, id);
+  }
   return true;
 }
 // 流在后台结束时产生的收尾气泡（已停止/失败）要挂回暂存 DOM，别落在用户正在看的会话里
@@ -1299,7 +1308,7 @@ function handleStreamEvent(id, type, event, assistant) {
   else if (type === "tool_call") { settleThink(assistant); if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node); }
   else if (type === "tool_result") { if (event.name !== ASK_USER_TOOL) renderToolResult(event,assistant.node); }
   else if (type === "options_offered") { assistant.pendingAsk = event; }
-  else if (type === "tool_approval_required") { renderApproval(event, assistant.node, id); setStatus(id, "waiting"); }
+  else if (type === "tool_approval_required") { queueApproval(id, event); }
   else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
   else if (type === "notice") showToast(event.message || "附件处理提示");
   else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
@@ -1444,7 +1453,7 @@ async function runWorkflow(steps) {
   syncComposer();
   try {
     const response = await fetch("/workflows/run", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,steps,selected_skills:el.skill.value?[{id:el.skill.value,params:{}}]:[]})});
-    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") { renderApproval(event, state.workflow.message.node, sessionId); setStatus(sessionId, "waiting"); } else if (type === "error") throw streamFailure(event, "工作流失败"); }, controller);
+    await consumeSse(response, async (type,event) => { event.type = type; if (["workflow_started","workflow_step","workflow_done"].includes(type)) renderWorkflowEvent(event); else if (type === "tool_approval_required") { queueApproval(sessionId, event); } else if (type === "error") throw streamFailure(event, "工作流失败"); }, controller);
     await refreshSessions();
     setStatus(sessionId, "done");
   } catch (error) {
@@ -1596,12 +1605,14 @@ el.input.oninput = () => { autoGrowInput(); updateSendState(); };
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
-// Esc 收起询问浮层，露出被盖住的输入框；设置弹窗打开时交给弹窗自己处理
+// Esc 收起询问浮层，露出被盖住的输入框；设置弹窗打开时交给弹窗自己处理。
+// 审批卡要等后端回执，Esc 收掉就等于把这次审批漏掉，所以不放行
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
   const modal = $("#settings-modal");
   if (modal && !modal.classList.contains("hidden")) return;
   if (!el.choiceOverlay || el.choiceOverlay.classList.contains("hidden")) return;
+  if (el.choiceOverlay.querySelector(".choice-card.approval")) return;
   event.preventDefault();
   closeChoiceOverlay();
 });
