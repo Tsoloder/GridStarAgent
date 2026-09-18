@@ -407,6 +407,17 @@ def _load_base_prompt() -> str:
     return ""
 
 
+def _last_recorded_system_prompt(session: Session) -> str:
+    """轨迹里最后一条系统提示词；从未记录过时返回空串。
+
+    系统提示词按会话状态记（首次 + 内容变化），不随每轮请求重复落盘。
+    """
+    for event in reversed(session.read_trajectory()):
+        if event.get("type") == "traj_system_prompt":
+            return str(event.get("content", ""))
+    return ""
+
+
 async def run_agent_loop(
     session: Session,
     user_message: str,
@@ -548,7 +559,9 @@ async def run_agent_loop(
     system_prompt = "\n\n".join(system_parts)
     # 轨迹：turn 以用户消息序号计（本次消息为第 N 条 user）
     _traj_turn = sum(1 for m in session.messages if m.get("role") == "user")
-    yield {"type": "traj_system_prompt", "turn": _traj_turn, "content": system_prompt}
+    # 系统提示词只在首次或内容真变化时落盘，避免每轮重复一条（账本里只看得到一条）
+    if _last_recorded_system_prompt(session) != system_prompt:
+        yield {"type": "traj_system_prompt", "turn": _traj_turn, "content": system_prompt}
     turn = 0
     format_retry = 0
     MAX_FORMAT_RETRIES = 1
