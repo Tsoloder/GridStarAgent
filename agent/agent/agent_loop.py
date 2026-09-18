@@ -221,9 +221,75 @@ ENABLE_TOOL_GROUP_TOOL = RuntimeTool(
     },
 )
 
+ASK_USER_TOOL_NAME = "ask_user_question"
+
+ASK_USER_TOOL = RuntimeTool(
+    name=ASK_USER_TOOL_NAME,
+    description=(
+        "向用户提问并给出候选选项。调用后本轮立即结束，前端展示选择卡片，"
+        "等用户选择后再继续。缺少无法推导的必填信息、或删除/覆盖/导出等不可逆操作"
+        "需要用户拍板时调用。整体阶段规划仍用 update_plan，不要用本工具代替。"
+        "调用本工具时不要再同时调用其他工具。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "卡片标题，如「下一步」"},
+            "question": {"type": "string", "description": "要用户回答的问题，一句话"},
+            "options": {
+                "type": "array",
+                "description": "2-6 个候选选项，用户从中选一个",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": {"type": "string", "description": "选项标题，简短"},
+                        "description": {"type": "string", "description": "选项说明，一句话"},
+                        "value": {"type": "string", "description": "用户选中后回传的取值"},
+                        "style": {"type": "string", "description": "留空 / primary / danger"},
+                    },
+                    "required": ["label", "value"],
+                },
+            },
+        },
+        "required": ["question", "options"],
+    },
+)
+
+
+def normalize_ask_user_args(args) -> tuple:
+    """校验 ask_user_question 参数：返回 (payload, error)，payload 为 None 表示非法。"""
+    if not isinstance(args, dict):
+        return None, "ask_user_question 失败：参数必须是对象。"
+    question = str(args.get("question") or "").strip()
+    raw_options = args.get("options")
+    if not question:
+        return None, "ask_user_question 失败：缺少 question。"
+    if not isinstance(raw_options, list) or len(raw_options) < 2:
+        return None, "ask_user_question 失败：options 至少需要 2 项。"
+    options = []
+    for index, item in enumerate(raw_options[:6], 1):
+        if not isinstance(item, dict):
+            return None, "ask_user_question 失败：options[%d] 必须是对象。" % index
+        label = str(item.get("label") or "").strip()
+        value = item.get("value")
+        if not label or value is None or not str(value).strip():
+            return None, "ask_user_question 失败：options[%d] 必须同时提供 label 与 value。" % index
+        options.append({
+            "label": label,
+            "description": str(item.get("description") or "").strip(),
+            "value": str(value),
+            "style": str(item.get("style") or "").strip(),
+        })
+    return {
+        "title": str(args.get("title") or "").strip() or "请选择下一步",
+        "question": question,
+        "options": options,
+    }, None
+
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
-                   UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME}
+                   UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME}
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -258,19 +324,60 @@ def _only_readonly_calls(tool_calls) -> bool:
     )
 
 
-def _auto_plan_waits_for_choice(text: str, ledger) -> bool:
-    """台账计划未完成（有 pending/in_progress 阶段）且输出 options 时返回 True。
-
-    auto 模式下计划未完成应继续执行工具，而不是停下等用户选择。
-    """
+def _plan_has_open_phases(ledger) -> bool:
+    """台账计划是否仍有 pending/in_progress 阶段；无计划视为未阻塞。"""
     if ledger is None or not getattr(ledger, "plan", None):
-        return False
-    if '"options"' not in (text or ""):
         return False
     return any(
         str(phase.get("status", "pending")) in {"pending", "in_progress"}
         for phase in ledger.plan.get("phases", []) if isinstance(phase, dict)
     )
+
+
+def _auto_plan_waits_for_choice(text: str, ledger) -> bool:
+    """台账计划未完成（有 pending/in_progress 阶段）且输出 options 时返回 True。
+
+    auto 模式下计划未完成应继续执行工具，而不是停下等用户选择。
+    """
+    if '"options"' not in (text or ""):
+        return False
+    return _plan_has_open_phases(ledger)
+
+
+def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id):
+    """汇总本轮 token 用量，返回 (total, usage_record, done 事件的用量字段)。
+
+    实时 usage 缺失时回落到本地估算，保证气泡与 done 事件仍能显示 token 量。
+    """
+    estimated = not (usage_totals["total"] or usage_totals["input"] or usage_totals["output"])
+    if estimated:
+        usage_totals["input"] = estimated_totals["input"]
+        usage_totals["output"] = estimated_totals["output"]
+        usage_totals["total"] = usage_totals["input"] + usage_totals["output"]
+    total = usage_totals["total"] or (usage_totals["input"] + usage_totals["output"])
+    record = None
+    if total or usage_totals["input"] or usage_totals["output"]:
+        record = {
+            "input": usage_totals["input"],
+            "output": usage_totals["output"],
+            "total": total,
+            "estimated": estimated,
+            "cache_read": usage_totals["cache_read"],
+            "cache_write": usage_totals["cache_write"],
+            "reasoning": usage_totals["reasoning"],
+            "model": model_id,
+        }
+    fields = {
+        "tokens": total,
+        "tokens_input": usage_totals["input"],
+        "tokens_output": usage_totals["output"],
+        "tokens_estimated": estimated,
+        "cache_read_tokens": usage_totals["cache_read"],
+        "cache_write_tokens": usage_totals["cache_write"],
+        "reasoning_tokens": usage_totals["reasoning"],
+        "model": model_id,
+    }
+    return total, record, fields
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
@@ -391,8 +498,11 @@ async def run_agent_loop(
         )
     _fmt_parts = [
         "<output_format_reminder>\n",
-        "重要：每次回复末尾必须包含结构化 JSON 块（用 ```json 代码块包裹），禁止用 Markdown 表格或列表替代。\n",
-        "- 工具执行完成后，必须用 options JSON 块列出下一步选择。\n",
+        "重要：需要用户确认或选择时，必须给出结构化结果（优先调用 ask_user_question 工具，"
+        "或用 ```json 代码块包裹），禁止用 Markdown 表格或列表替代。\n",
+        "- 需要用户拍板下一步时，优先调用 ask_user_question 工具：它会结束本轮并展示选择卡片，"
+        "每个选项都要给一句 description，调用时不要再同时调用其他工具。\n",
+        "- 未使用该工具时，仍要在回复末尾用 options JSON 块列出下一步选择作为兜底。\n",
     ]
     if interaction_mode != "auto":
         if is_structured_continuation:
@@ -603,7 +713,7 @@ async def run_agent_loop(
                 all_external_tools, group_index, exposed_group_ids,
                 loaded_skills, skill_registry,
             )
-            runtime_tools = skill_registry.internal_tools() + [UPDATE_PLAN_TOOL]
+            runtime_tools = skill_registry.internal_tools() + [UPDATE_PLAN_TOOL, ASK_USER_TOOL]
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
             if model_runtime is None:
@@ -878,7 +988,8 @@ async def run_agent_loop(
             session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
-                                               UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME}
+                                               UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,
+                                               ASK_USER_TOOL_NAME}
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -895,6 +1006,60 @@ async def run_agent_loop(
                 _tool_ok = True
                 _tool_t0 = _time.monotonic()
                 try:
+                    if tc["name"] == ASK_USER_TOOL_NAME:
+                        # 内置询问工具：不走 MCP、不走审批。参数合法则本轮到此为止，等用户选择
+                        payload, error = normalize_ask_user_args(tc.get("args"))
+                        if error:
+                            result = error
+                        elif interaction_mode == "auto" and _plan_has_open_phases(ledger):
+                            result = (
+                                "ask_user_question 不可用：auto 模式当前计划仍有 pending 或 "
+                                "in_progress 阶段，不能停下等用户选择。请先调用 update_plan "
+                                "更新阶段状态，或直接调用下一阶段所需工具。"
+                            )
+                        else:
+                            result = "已向用户发出选择，等待用户回答。"
+                            session.append_tool_result(tc["id"], result, tc["name"])
+                            # 同轮其余工具不再执行，但要补上配对的 tool_result，
+                            # 否则下一轮请求里 assistant 的 tool_call 没有响应会报错
+                            for _pending in tool_calls[_step_idx:]:
+                                session.append_tool_result(
+                                    _pending["id"],
+                                    "本轮已向用户发起选择，该工具调用未执行；"
+                                    "请等用户回答后再重新发起。",
+                                    _pending["name"],
+                                )
+                            yield {
+                                "type": "tool_result",
+                                "call_id": tc["id"],
+                                "name": tc["name"],
+                                "result": result,
+                                "internal": True,
+                                "turn": _traj_turn,
+                                "request": turn,
+                                "step": _step_idx,
+                                "duration_ms": int(round((_time.monotonic() - _tool_t0) * 1000)),
+                            }
+                            yield {"type": "options_offered", "id": tc["id"], **payload}
+                            _total_tokens, _usage_record, _usage_fields = _summarize_turn_usage(
+                                _usage_totals, _estimated_totals, call_model_id
+                            )
+                            _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
+                            _ttft_ms = _ttft_ms_total or None
+                            _tps = (round(_usage_totals["output"] * 1000.0 / _gen_ms_total, 1)
+                                    if _gen_ms_total > 0 else None)
+                            logger.info("[ask user] session=%s options=%d",
+                                        session.id, len(payload["options"]))
+                            yield {
+                                "type": "done",
+                                "session_id": session.id,
+                                **_usage_fields,
+                                "elapsed_ms": _elapsed_ms,
+                                "think_ms": _think_ms_total,
+                                "ttft_ms": _ttft_ms,
+                                "tps": _tps,
+                            }
+                            return
                     if tc["name"] == UPDATE_PLAN_TOOL_NAME:
                         # 内置计划工具：不走 MCP、不走审批。写台账 + 发结构化事件
                         if ledger is None:
@@ -1050,10 +1215,13 @@ async def run_agent_loop(
                 _reminder_example = ""
                 _pending_reminders.append(
                     "<format_reminder>\n"
-                    "你的上一条回复没有包含任何结构化 JSON 块。\n"
-                    "支持的结构化块类型：%s。\n"
-                    "请只输出一个合适的 JSON 块，不要重复之前的回复内容。\n"
-                    "用 ```json 代码块包裹，格式如：\n"
+                    "你的上一条回复既没有调用 ask_user_question 工具，"
+                    "也没有包含任何结构化 JSON 块。\n"
+                    "需要用户选择下一步时请调用 ask_user_question 工具"
+                    "（question / options[].label / options[].value，可带 title 与 description）；"
+                    "需要确认工具参数或提交工作流时改用 ```json 代码块，支持的类型：%s。\n"
+                    "请只给出一个合适的结构化结果，不要重复之前的回复内容。\n"
+                    "JSON 块格式如：\n"
                     "```json\n"
                     "{\"options\": [{\"label\": \"...\", \"value\": \"...\", "
                     "\"style\": \"primary\"}]}\n"
@@ -1087,28 +1255,9 @@ async def run_agent_loop(
                 )
                 continue
 
-            _usage_estimated = not (
-                _usage_totals["total"] or _usage_totals["input"] or _usage_totals["output"]
+            _total_tokens, _usage_record, _usage_fields = _summarize_turn_usage(
+                _usage_totals, _estimated_totals, call_model_id
             )
-            if _usage_estimated:
-                _usage_totals["input"] = _estimated_totals["input"]
-                _usage_totals["output"] = _estimated_totals["output"]
-                _usage_totals["total"] = _usage_totals["input"] + _usage_totals["output"]
-            _total_tokens = _usage_totals["total"] or (
-                _usage_totals["input"] + _usage_totals["output"]
-            )
-            _usage_record = None
-            if _total_tokens or _usage_totals["input"] or _usage_totals["output"]:
-                _usage_record = {
-                    "input": _usage_totals["input"],
-                    "output": _usage_totals["output"],
-                    "total": _total_tokens,
-                    "estimated": _usage_estimated,
-                    "cache_read": _usage_totals["cache_read"],
-                    "cache_write": _usage_totals["cache_write"],
-                    "reasoning": _usage_totals["reasoning"],
-                    "model": call_model_id,
-                }
             _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
             _ttft_ms = _ttft_ms_total or None
             _tps = round(_usage_totals["output"] * 1000.0 / _gen_ms_total, 1) if _gen_ms_total > 0 else None
@@ -1125,14 +1274,7 @@ async def run_agent_loop(
             yield {
                 "type": "done",
                 "session_id": session.id,
-                "tokens": _total_tokens,
-                "tokens_input": _usage_totals["input"],
-                "tokens_output": _usage_totals["output"],
-                "tokens_estimated": _usage_estimated,
-                "cache_read_tokens": _usage_totals["cache_read"],
-                "cache_write_tokens": _usage_totals["cache_write"],
-                "reasoning_tokens": _usage_totals["reasoning"],
-                "model": call_model_id,
+                **_usage_fields,
                 "elapsed_ms": _elapsed_ms,
                 "think_ms": _think_ms_total,
                 "ttft_ms": _ttft_ms,

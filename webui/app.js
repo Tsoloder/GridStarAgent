@@ -31,7 +31,7 @@ const el = {
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
-  input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"),
+  input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
@@ -181,7 +181,7 @@ function syncComposer() {
   el.send.title = busy ? "停止接收" : "发送";
   el.send.setAttribute("aria-label", el.send.title);
   el.input.disabled = busy;
-  el.busyLabel.textContent = busy ? "Agent 正在处理…" : "Enter 发送 · Shift+Enter 换行";
+  el.busyLabel.textContent = busy ? "Agent 正在处理…" : "";
   updateSendState();
 }
 // 点「停止」：断开 SSE 之外还要取消后端任务，否则 agent 会继续跑、继续消耗 token
@@ -571,7 +571,7 @@ function setBubbleUsage(message, usage) {
     row.querySelector("b").textContent = rows[key];
   });
 }
-function finishAssistant(message) {
+function finishAssistant(message, deferred = false) {
   if (!message || message.finished) return;
   message.finished = true;
   // 流结束（done/停止/出错）统一停掉实时「已用时」计时器
@@ -579,11 +579,18 @@ function finishAssistant(message) {
   const parsed = structuredBlocks(message.text);
   message.body.innerHTML = basicMarkdown(parsed.visible);
   parsed.found.forEach(data => renderStructured(data, message.node));
-  // 本轮以选项卡片或工具参数面板收尾 → 会话进入「待确认」，等用户点击
-  message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams || (Array.isArray(data.options) && data.options.length)));
+  // 文本兜底的 options 块也算一次待作答询问，与 ask_user_question 工具共用浮层
+  const fallback = parsed.found.filter(data => Array.isArray(data.options) && data.options.length).pop();
+  if (fallback && !message.pendingAsk) message.pendingAsk = fallback;
+  // 本轮以询问浮层或工具参数面板收尾 → 会话进入「待确认」，等用户操作
+  message.awaitingInput = parsed.found.some(data => Boolean(data.tool_params || data.toolparams))
+    || Boolean(message.pendingAsk);
   // 只有思考过程没有正文时也要留住气泡：停止在思考阶段是常见操作，丢掉节点等于
   // 把这段内容从实时视图和重渲染后的历史里一起抹掉
   if (!parsed.visible && !parsed.found.length && !message.node.querySelector(".tool-group,.approval-card,.reasoning")) message.node.remove();
+  // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下；
+  // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
+  if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
   scrollMessages();
 }
 function appendReasoning(message, delta) {
@@ -601,20 +608,109 @@ function appendReasoning(message, delta) {
 function renderStructured(data, parent) {
   if (data.phase_plan) renderPhase(data.phase_plan);
   if (data.tool_params || data.toolparams) renderToolParams(data.tool_params || data.toolparams, data.options || [], parent);
-  else if (data.options) renderOptions(data.options, parent);
+  // 纯 options 块不落进对话流：待作答的询问统一由输入框上方的浮层承载
   if (data.workflow) renderWorkflowProposal(data.workflow, parent);
 }
-function renderOptions(options, parent) {
-  if (!Array.isArray(options) || !options.length) return;
-  const card = document.createElement("section"); card.className = "structured";
-  card.innerHTML = '<div class="structured-title">请选择下一步</div><div class="options"></div>';
-  options.forEach(option => {
-    const button = document.createElement("button");
-    button.className = `option-button ${option.style || ""}`; button.type = "button";
-    button.textContent = option.label || option.value || "选择";
-    button.onclick = () => { card.querySelectorAll("button").forEach(item => item.disabled = true); sendMessage(String(option.value != null ? option.value : (option.label != null ? option.label : "")), button.textContent); };
-    $(".options", card).append(button);
+const ASK_USER_TOOL = "ask_user_question";
+let choiceTimer = null;
+// 待作答的询问浮在输入框上方、把输入框盖住；关闭时向下压扁淡出，像缩回输入框一样
+function openChoiceOverlay(payload) {
+  const host = el.choiceOverlay;
+  if (!host || !payload) return;
+  clearTimeout(choiceTimer);
+  host.innerHTML = "";
+  host.classList.remove("hidden", "open");
+  renderChoiceCard(payload, host);
+  if (!host.firstElementChild) return;
+  requestAnimationFrame(() => host.classList.add("open"));
+}
+function closeChoiceOverlay() {
+  const host = el.choiceOverlay;
+  if (!host || host.classList.contains("hidden")) return;
+  host.classList.remove("open");
+  clearTimeout(choiceTimer);
+  choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; }, 240);
+}
+// 模型询问用户：可单选、也能用序号提交的选项卡片（挂在浮层里）
+function renderChoiceCard(payload, parent) {
+  const raw = payload && Array.isArray(payload.options) ? payload.options : [];
+  const options = raw.filter(item => item && (item.label != null || item.value != null));
+  if (!options.length) return;
+  const card = document.createElement("section");
+  card.className = "choice-card";
+  card.innerHTML = '<div class="choice-head" role="button" tabindex="0" aria-expanded="true">'
+    + `<span class="choice-title">${escapeHtml(payload.title || "请选择下一步")}</span>`
+    + '<span class="choice-chevron" aria-hidden="true">⌄</span>'
+    + '<button class="choice-close" type="button" title="收起" aria-label="收起">×</button></div>'
+    + '<div class="choice-question"></div>'
+    + '<div class="choice-list" role="radiogroup" aria-label="候选选项"></div>'
+    + '<div class="choice-foot"><input class="choice-input" type="text" inputmode="numeric" autocomplete="off" placeholder="提交答案" aria-label="输入选项序号">'
+    + '<span class="choice-hint">按 Esc 取消</span></div>';
+  const question = $(".choice-question", card);
+  question.textContent = payload.question || "";
+  if (!payload.question) question.classList.add("hidden");
+  const list = $(".choice-list", card);
+  const entries = options.map(option => {
+    const label = option.label != null ? String(option.label) : String(option.value);
+    const item = document.createElement("div");
+    item.className = "choice-item";
+    item.setAttribute("role", "radio");
+    item.setAttribute("aria-checked", "false");
+    item.tabIndex = 0;
+    item.innerHTML = '<span class="choice-dot" aria-hidden="true"></span><span class="choice-text">'
+      + `<strong>${escapeHtml(label)}</strong>`
+      + (option.description ? `<small>${escapeHtml(String(option.description))}</small>` : "")
+      + '</span>';
+    list.append(item);
+    return {item, option, label};
   });
+  const input = $(".choice-input", card);
+  let selected = -1;
+  let submitted = false;
+  const paint = index => {
+    selected = index;
+    entries.forEach((entry, position) => {
+      entry.item.classList.toggle("selected", position === index);
+      entry.item.setAttribute("aria-checked", String(position === index));
+    });
+  };
+  const pick = index => {
+    if (submitted) return;
+    paint(index); input.value = String(index + 1); input.classList.remove("invalid");
+  };
+  const submit = () => {
+    if (submitted) return;
+    // 未选中不发消息，只提示输入框
+    if (selected < 0) { input.classList.add("invalid"); input.focus(); return; }
+    submitted = true;
+    card.classList.add("submitted");
+    input.disabled = true;
+    entries.forEach(entry => entry.item.classList.add("locked"));
+    const chosen = entries[selected];
+    sendMessage(chosen.option.value != null ? String(chosen.option.value) : chosen.label, chosen.label);
+    closeChoiceOverlay();
+  };
+  entries.forEach((entry, index) => {
+    entry.item.onclick = () => pick(index);
+    entry.item.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); pick(index); } };
+  });
+  input.oninput = () => {
+    if (submitted) return;
+    const digits = input.value.replace(/\D/g, "");
+    if (digits !== input.value) input.value = digits;
+    const index = Number(digits) - 1;
+    if (digits && index >= 0 && index < entries.length) { paint(index); input.classList.remove("invalid"); }
+    else paint(-1);
+  };
+  input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };
+  const head = $(".choice-head", card);
+  const toggleCollapse = () => {
+    const collapsed = card.classList.toggle("collapsed");
+    head.setAttribute("aria-expanded", String(!collapsed));
+  };
+  head.onclick = event => { if (!event.target.closest(".choice-close")) toggleCollapse(); };
+  head.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse(); } };
+  $(".choice-close", card).onclick = event => { event.stopPropagation(); closeChoiceOverlay(); };
   parent.append(card);
 }
 function valueForInput(value) { return typeof value === "object" ? JSON.stringify(value) : String(value == null ? "" : value); }
@@ -858,7 +954,13 @@ function renderHistoryMessage(message, turn) {
     // 与实时流顺序一致：先把持久化的工具调用挂到消息节点，收尾留给 finishHistoryTurn。
     // 否则 finishAssistant 会把"无正文、仅工具调用"的消息（自动模式常见）当空气泡移除，
     // 后续 tool 结果找不到对应 call-id，退化为独立 TOOL RESULT 气泡。
-    (message.tool_calls || []).forEach(call => { let args = {}; try { args = JSON.parse((call.function && call.function.arguments) || "{}"); } catch (_) {} renderToolCall({id:call.id,name:call.function && call.function.name,args}, item.node); });
+    (message.tool_calls || []).forEach(call => {
+      let args = {}; try { args = JSON.parse((call.function && call.function.arguments) || "{}"); } catch (_) {}
+      const name = call.function && call.function.name;
+      // 询问类调用不落成工具条目：末尾待作答时由输入框上方的浮层弹出
+      if (name === ASK_USER_TOOL) { item.pendingAsk = args; return; }
+      renderToolCall({id:call.id,name,args}, item.node);
+    });
     if (message.usage) item.usage = message.usage;
     // 本轮可能由多条 assistant 消息合并，取最后一条的 ts/elapsed_ms（即完成时刻与总耗时）
     if (message.ts) item.ts = message.ts;
@@ -869,6 +971,7 @@ function renderHistoryMessage(message, turn) {
     return item;
   }
   if (message.role === "tool") {
+    if (message.tool_name === ASK_USER_TOOL) return turn;
     const selector = `[data-call-id="${CSS.escape(message.tool_call_id || "")}"]`;
     const existing = (turn && turn.node.querySelector(selector)) || document.querySelector(selector);
     // 结果回填到本轮气泡里的工具项；调用没落盘时才退化为独立 TOOL RESULT 气泡
@@ -883,7 +986,8 @@ function renderHistoryMessage(message, turn) {
 }
 function finishHistoryTurn(turn) {
   if (!turn) return null;
-  finishAssistant(turn);
+  // 历史重放：询问浮层留到整段重放完再弹，避免中途的旧询问闪动
+  finishAssistant(turn, true);
   const usage = turn.usage;
   if (usage) setBubbleUsage(turn, {total: usage.total, input: usage.input, output: usage.output, estimated: !!usage.estimated, cache_read: usage.cache_read, reasoning: usage.reasoning, model: usage.model});
   // 历史气泡：时间取本轮最后一条消息的 ts（老会话无 ts 则清空默认值），用时取落盘 elapsed_ms
@@ -899,8 +1003,11 @@ function renderHistory(messages) {
     if (message.role === "assistant" || message.role === "tool") { turn = renderHistoryMessage(message, turn) || turn; return; }
     turn = finishHistoryTurn(turn); renderHistoryMessage(message, null);
   });
+  const last = turn;
   finishHistoryTurn(turn);
-  return Boolean(turn && turn.awaitingInput);
+  // 只有最后一轮仍停在未作答的询问上才弹浮层；已作答/更早的卡片不再出现在历史里
+  if (last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);
+  return Boolean(last && last.awaitingInput);
 }
 function showWelcome() { el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>'; el.welcome = $("#welcome"); }
 // 切离正在流式输出的会话：摘下当前消息 DOM 暂存，回复继续在后台跑，切回时原样挂回
@@ -935,7 +1042,7 @@ async function loadSession(id) {
     state.session = await request(`/sessions/${encodeURIComponent(id)}`);
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
-    el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null;
+    el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
     if (!restoreView(id)) {
       if (!state.session.messages.length) showWelcome();
@@ -1053,8 +1160,9 @@ function handleStreamEvent(id, type, event, assistant) {
   if (type === "text_chunk") { assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
   else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
   else if (type === "plan_updated") { if (!hidden) renderPhase(event.plan); }
-  else if (type === "tool_call") renderToolCall(event,assistant.node);
-  else if (type === "tool_result") renderToolResult(event,assistant.node);
+  else if (type === "tool_call") { if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node); }
+  else if (type === "tool_result") { if (event.name !== ASK_USER_TOOL) renderToolResult(event,assistant.node); }
+  else if (type === "options_offered") { assistant.pendingAsk = event; }
   else if (type === "tool_approval_required") { renderApproval(event, assistant.node, id); setStatus(id, "waiting"); }
   else if (type === "skill_loaded") { const label = assistant.bubble.querySelector(".message-label"); if (label) label.remove(); assistant.bubble.insertAdjacentHTML("afterbegin",`<div class="message-label">SKILL LOADED · ${escapeHtml(event.skill_id)}</div>`); }
   else if (type === "notice") showToast(event.message || "附件处理提示");
@@ -1352,6 +1460,15 @@ el.input.oninput = () => { autoGrowInput(); updateSendState(); };
 el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
+// Esc 收起询问浮层，露出被盖住的输入框；设置弹窗打开时交给弹窗自己处理
+document.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  const modal = $("#settings-modal");
+  if (modal && !modal.classList.contains("hidden")) return;
+  if (!el.choiceOverlay || el.choiceOverlay.classList.contains("hidden")) return;
+  event.preventDefault();
+  closeChoiceOverlay();
+});
 // --- 附件交互：选择按钮、文件 input、芯片移除、全局拖拽 ---
 if (el.attachBtn) el.attachBtn.onclick = () => { if (el.fileInput) el.fileInput.click(); };
 if (el.fileInput) el.fileInput.onchange = () => { addFiles(el.fileInput.files); el.fileInput.value = ""; };

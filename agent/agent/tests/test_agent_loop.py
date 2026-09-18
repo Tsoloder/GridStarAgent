@@ -691,3 +691,44 @@ async def test_cancel_before_first_token_writes_no_empty_reply(tmp_path, monkeyp
     ends = [e for e in session.read_trajectory() if e["type"] == "traj_request_end"]
     assert [e["status"] for e in ends] == ["interrupted"]
 
+
+def test_ask_user_tool_contract():
+    """询问工具与 update_plan 同类：校验参数、限制选项数量、非法输入回错误而不抛异常。"""
+    import agent_loop
+
+    assert agent_loop.ASK_USER_TOOL_NAME == "ask_user_question"
+    assert agent_loop.ASK_USER_TOOL_NAME in agent_loop._NON_EXEC_TOOLS
+
+    payload, error = agent_loop.normalize_ask_user_args({
+        "title": "下一步",
+        "question": "接下来做什么？",
+        "options": [
+            {"label": "跑测试", "value": "run_tests", "description": "执行 WebUI 测试"},
+            {"label": "提交改动", "value": "commit", "style": "primary"},
+        ],
+    })
+    assert error is None
+    assert payload["title"] == "下一步"
+    assert payload["question"] == "接下来做什么？"
+    assert payload["options"][0] == {"label": "跑测试", "description": "执行 WebUI 测试",
+                                     "value": "run_tests", "style": ""}
+    assert payload["options"][1]["style"] == "primary"
+
+    # 标题缺省时回落默认值，选项超过上限按 6 项截断
+    payload, error = agent_loop.normalize_ask_user_args({
+        "question": "选一个",
+        "options": [{"label": "选项%d" % index, "value": "v%d" % index} for index in range(8)],
+    })
+    assert error is None
+    assert payload["title"] == "请选择下一步"
+    assert len(payload["options"]) == 6
+
+    # 非法参数只回错误文案，交给模型自纠
+    for bad in (None, {},
+                {"question": "选一个", "options": []},
+                {"question": "选一个", "options": [{"label": "只有一个", "value": "a"}]},
+                {"question": "选一个", "options": [{"label": "a", "value": "a"}, {"value": "b"}]},
+                {"options": [{"label": "a", "value": "a"}, {"label": "b", "value": "b"}]}):
+        payload, error = agent_loop.normalize_ask_user_args(bad)
+        assert payload is None and error
+

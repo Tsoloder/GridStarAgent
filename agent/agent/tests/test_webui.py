@@ -191,7 +191,7 @@ def test_webui_history_render_matches_live_stream():
     # 后续 tool 结果找不到 call-id，退化为独立 TOOL RESULT 气泡
     assert "(message.tool_calls || []).forEach" in render
     assert "finishAssistant(" not in render
-    assert "finishAssistant(turn)" in close
+    assert "finishAssistant(turn, true)" in close
     assert "setBubbleUsage(turn" in close
     # 实时流里一轮对话只有一个气泡，而持久化会按迭代拆成多条 assistant/tool 消息，
     # 历史渲染必须按轮次合并，否则重开会话后变成"一条消息一个工具调用"
@@ -287,8 +287,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "renderApproval(event, assistant.node, id)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=48" in index
-    assert "style.css?v=38" in index
+    assert "app.js?v=51" in index
+    assert "style.css?v=42" in index
 
 
 def test_webui_voice_input_contract():
@@ -302,8 +302,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=38" in index
-    assert "app.js?v=48" in index
+    assert "style.css?v=42" in index
+    assert "app.js?v=51" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -346,5 +346,47 @@ def test_webui_attachment_drag_and_upload_contract():
 
     # 附件相关样式（芯片条、拖拽遮罩、气泡内附件）
     for rule in (".attach-bar{", ".attach-chip{", ".drop-overlay{", ".bubble-attachments{"):
+        assert rule in stylesheet
+
+
+def test_webui_choice_card_contract():
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 待作答的询问浮在输入框上方、把输入框盖住；卡片不落进对话流
+    assert '<div id="choice-overlay" class="choice-overlay hidden"' in index
+    assert ".choice-overlay{position:absolute;" in stylesheet
+    assert ".choice-overlay.open{" in stylesheet
+    assert ".choice-overlay .choice-card{width:100%;margin:0}" in stylesheet
+    assert "function openChoiceOverlay(payload)" in script
+    assert "function closeChoiceOverlay()" in script
+    assert 'requestAnimationFrame(() => host.classList.add("open"))' in script
+    assert 'host.classList.remove("open");' in script
+
+    # 模型询问：ask_user_question 工具事件与旧 options 文本块都走同一套浮层
+    assert 'const ASK_USER_TOOL = "ask_user_question"' in script
+    assert "function renderChoiceCard(payload, parent)" in script
+    assert 'else if (type === "options_offered") { assistant.pendingAsk = event; }' in script
+    assert 'if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);' in script
+    assert "if (last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);" in script
+    assert "finishAssistant(turn, true);" in script
+    # 询问类调用不落成工具条目：实时流与历史重放保持一致
+    assert 'if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node);' in script
+    assert 'if (name === ASK_USER_TOOL) { item.pendingAsk = args; return; }' in script
+    assert 'if (message.tool_name === ASK_USER_TOOL) return turn;' in script
+    # 交互契约：序号输入与选项双向同步、未选中不发、Enter 提交、折叠、关闭、Esc 收起
+    assert 'placeholder="提交答案"' in script
+    assert "input.oninput = () => {" in script
+    assert 'input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };' in script
+    assert 'card.classList.toggle("collapsed")' in script
+    assert '$(".choice-close", card).onclick = event => { event.stopPropagation(); closeChoiceOverlay(); };' in script
+    assert "按 Esc 取消" in script
+    # Esc 只在浮层打开时响应，且让位给设置弹窗
+    assert 'if (!el.choiceOverlay || el.choiceOverlay.classList.contains("hidden")) return;' in script
+    # 卡片样式（三主题共用变量）
+    for rule in (".choice-card{", ".choice-head{", ".choice-close{", ".choice-item{",
+                 ".choice-item.selected .choice-dot:after{", ".choice-input:focus{",
+                 ".choice-input.invalid{", ".choice-hint{"):
         assert rule in stylesheet
 
