@@ -5,7 +5,7 @@ aliases: [机翼各向异性, 各向异性处理, wing anisotropy, 前缘分布,
 tags: [CFD, 网格, 各向异性, 机翼, 前缘, MAC]
 category: CFD
 version: 1.0.0
-author: QtChatWidget
+author: GridStarAgent
 allowed-tools: []
 ---
 

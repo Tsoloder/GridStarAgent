@@ -5,7 +5,7 @@ aliases: [CFD网格, 网格生成, 导入模型, 部件分割, 表面网格, 空
 tags: [CFD, CAD, 网格, 工业软件, 质量检查, 边界条件, 气动弦长, 各向异性, 附面层]
 category: CFD
 version: 2.1.0
-author: QtChatWidget
+author: GridStarAgent
 allowed-tools: []
 ---
 

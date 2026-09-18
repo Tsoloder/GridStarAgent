@@ -5,7 +5,7 @@ aliases: [后缘面处理, 后缘网格, trailing edge, 后缘分布, 翼梢交�
 tags: [CFD, 网格, 后缘面, 机翼]
 category: CFD
 version: 1.0.0
-author: QtChatWidget
+author: GridStarAgent
 allowed-tools: []
 ---
 
