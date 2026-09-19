@@ -2,6 +2,7 @@
 #include "theme.h"
 
 #include <QEvent>
+#include <QFile>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QHash>
@@ -10,9 +11,12 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QResizeEvent>
 #include <QStyle>
 #include <QSvgRenderer>
+#include <QTimer>
+#include <QtMath>
 
 namespace gs {
 
@@ -142,7 +146,7 @@ void Chevron::paintEvent(QPaintEvent *)
     const int side = qRound(qMin(width(), height()) * 1.4);
     const QPixmap pm = iconPixmap(m_open ? QStringLiteral("chevron-down")
                                          : QStringLiteral("chevron-right"),
-                                  QColor("#718894"), side);
+                                  gs::palette().muted2, side);
     QPainter p(this);
     p.drawPixmap((width() - pm.width()) / 2, (height() - pm.height()) / 2, pm);
 }
@@ -166,11 +170,11 @@ void StatusDot::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
-    QColor core = Orange;
+    QColor core = gs::palette().orange;
     if (m_state == QLatin1String("succeeded") || m_state == QLatin1String("done"))
-        core = Green;
+        core = gs::palette().green;
     else if (m_state == QLatin1String("failed"))
-        core = Red;
+        core = gs::palette().red;
 
     if (m_state == QLatin1String("running")) {
         QColor glow = core;
@@ -205,11 +209,11 @@ void ConnectionButton::setState(const QString &state, const QString &label)
 
 void ConnectionButton::paintEvent(QPaintEvent *)
 {
-    QColor color = Orange;
+    QColor color = gs::palette().orange;
     if (m_state == QLatin1String("online"))
-        color = Green;
+        color = gs::palette().green;
     else if (m_state == QLatin1String("offline"))
-        color = Red;
+        color = gs::palette().red;
 
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
@@ -261,7 +265,7 @@ ComboTrigger::ComboTrigger(QWidget *parent) : QWidget(parent)
     setClass(m_chevron, QStringLiteral("comboText"));
     m_chevron->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_chevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"),
-                                    QColor(QStringLiteral("#afc0c9")), scaledPx(10)));
+                                    gs::palette().muted, scaledPx(10)));
 
     layout->addWidget(m_text, 1);
     layout->addWidget(m_chevron, 0);
@@ -280,7 +284,7 @@ void ComboTrigger::setOpen(bool open)
     m_open = open;
     m_chevron->setPixmap(iconPixmap(open ? QStringLiteral("chevron-up")
                                          : QStringLiteral("chevron-down"),
-                                    QColor(QStringLiteral("#afc0c9")), scaledPx(10)));
+                                    gs::palette().muted, scaledPx(10)));
 }
 
 void ComboTrigger::setText(const QString &text)
@@ -329,12 +333,32 @@ ProgressLine::ProgressLine(QWidget *parent) : QWidget(parent)
 {
     setFixedHeight(2);
     setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_animation = new QPropertyAnimation(this, "animatedPercent", this);
+    m_animation->setDuration(450); // CSS transition: width .45s ease
+    m_animation->setEasingCurve(QEasingCurve::OutCubic);
 }
 
 void ProgressLine::setPercent(int percent)
 {
     m_percent = qBound(0, percent, 100);
     update();
+}
+
+void ProgressLine::setAnimatedPercent(int percent)
+{
+    m_percent = qBound(0, percent, 100);
+    update();
+}
+
+void ProgressLine::animateTo(int percent)
+{
+    const int target = qBound(0, percent, 100);
+    if (m_percent == target)
+        return;
+    m_animation->stop();
+    m_animation->setStartValue(m_percent);
+    m_animation->setEndValue(target);
+    m_animation->start();
 }
 
 void ProgressLine::paintEvent(QPaintEvent *)
@@ -344,41 +368,116 @@ void ProgressLine::paintEvent(QPaintEvent *)
     QPainter p(this);
     const qreal w = width() * (m_percent / 100.0);
 
-    QColor glow = Cyan;
+    QColor glow = gs::palette().cyan;
     glow.setAlpha(70);
     p.setPen(Qt::NoPen);
     p.setBrush(glow);
     p.drawRect(QRectF(0, 0, w, height() + 1));
 
     QLinearGradient gradient(0, 0, qMax<qreal>(w, 1), 0);
-    gradient.setColorAt(0.0, QColor("#2b86ab"));
-    gradient.setColorAt(0.5, Cyan);
-    gradient.setColorAt(1.0, QColor("#8fdcf7"));
+    gradient.setColorAt(0.0, gs::palette().cyanMid);
+    gradient.setColorAt(0.5, gs::palette().cyan);
+    gradient.setColorAt(1.0, gs::palette().cyan.lighter(130));
     p.setBrush(gradient);
     p.drawRect(QRectF(0, 0, w, height()));
 }
 
+// ---------------------------------------------------------------- ElidedLabel
+
+ElidedLabel::ElidedLabel(QWidget *parent) : QLabel(parent)
+{
+    setTextInteractionFlags(Qt::NoTextInteraction);
+}
+
+void ElidedLabel::setFullText(const QString &text)
+{
+    m_full = text;
+    setToolTip(text);
+    updateElide();
+}
+
+QSize ElidedLabel::sizeHint() const
+{
+    const QFontMetrics fm(font());
+    return QSize(fm.horizontalAdvance(m_full), fm.height());
+}
+
+QSize ElidedLabel::minimumSizeHint() const
+{
+    return QSize(0, QLabel::minimumSizeHint().height());
+}
+
+void ElidedLabel::resizeEvent(QResizeEvent *event)
+{
+    QLabel::resizeEvent(event);
+    updateElide();
+}
+
+void ElidedLabel::updateElide()
+{
+    if (width() <= 0)
+        return;
+    const QString elided = elidedText(m_full, fontMetrics(), width());
+    if (text() != elided) // 幂等：setText 可能再触发一次 resize，比较后提前返回避免来回
+        setText(elided);
+}
+
 // ---------------------------------------------------------------- AttachChip
 
-AttachChip::AttachChip(const QString &name, qint64 bytes, const QString &ext, bool uploading,
-                       QWidget *parent)
+AttachChip::AttachChip(const QVariantMap &item, QWidget *parent)
     : QFrame(parent)
 {
     setClass(this, QStringLiteral("attachChip"));
     setAttribute(Qt::WA_StyledBackground, true);
     setFixedHeight(24);
 
+    const QString name = item.value(QStringLiteral("name")).toString();
+    const QString ext = item.value(QStringLiteral("ext")).toString();
+    const bool uploading = item.value(QStringLiteral("uploading")).toBool();
+    m_bytes = item.value(QStringLiteral("size")).toLongLong();
+
+    // 宿主没给 kind 时按扩展名推断（webui attachKind）：否则拖进一张图片不会出缩略图
+    QString kind = item.value(QStringLiteral("kind")).toString();
+    if (kind.isEmpty()) {
+        static const QStringList imageExts{ QStringLiteral("png"), QStringLiteral("jpg"),
+                                            QStringLiteral("jpeg"), QStringLiteral("gif"),
+                                            QStringLiteral("webp"), QStringLiteral("bmp") };
+        const int dot = name.lastIndexOf(QLatin1Char('.'));
+        const QString fromName = dot > 0 ? name.mid(dot + 1).toLower() : QString();
+        if (imageExts.contains(fromName))
+            kind = QStringLiteral("image");
+    }
+
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(4, 2, 4, 2);
     layout->setSpacing(5);
 
-    auto *extLabel = makeLabel(QStringLiteral("attachExt"), ext.toUpper(), this);
+    // 图片给 22×22 缩略图，其余给扩展名标签（webui .attach-chip img / .attach-ext）
+    QString preview = item.value(QStringLiteral("path")).toString();
+    if (preview.isEmpty())
+        preview = item.value(QStringLiteral("url")).toString();
+    QPixmap pixmap;
+    if (kind == QLatin1String("image") && !preview.isEmpty() && QFile::exists(preview))
+        pixmap = QPixmap(preview);
+    if (!pixmap.isNull()) {
+        auto *thumb = new QLabel(this);
+        setClass(thumb, QStringLiteral("attachChipThumb"));
+        thumb->setFixedSize(22, 22);
+        thumb->setPixmap(pixmap.scaled(22, 22, Qt::KeepAspectRatioByExpanding,
+                                       Qt::SmoothTransformation));
+        layout->addWidget(thumb);
+    } else {
+        QString label = ext.isEmpty() ? QStringLiteral("file") : ext;
+        layout->addWidget(makeLabel(QStringLiteral("attachExt"), label.toUpper(), this));
+    }
+
     m_name = makeLabel(QStringLiteral("attachName"), name, this);
     m_name->setMaximumWidth(140);
     QFontMetrics fm(m_name->font());
     m_name->setText(elidedText(name, fm, 140));
     m_name->setToolTip(name);
-    m_size = makeLabel(QStringLiteral("attachSize"), fileSizeLabel(bytes), this);
+    m_size = makeLabel(QStringLiteral("attachSize"),
+                       uploading ? QStringLiteral("上传中…") : fileSizeLabel(m_bytes), this);
 
     auto *remove = new IconPushButton(this);
     setClass(remove, QStringLiteral("attachRemove"));
@@ -390,7 +489,6 @@ AttachChip::AttachChip(const QString &name, qint64 bytes, const QString &ext, bo
     remove->setIconName(QStringLiteral("x"), 9);
     connect(remove, &QPushButton::clicked, this, &AttachChip::removeClicked);
 
-    layout->addWidget(extLabel);
     layout->addWidget(m_name);
     layout->addWidget(m_size);
     layout->addWidget(remove);
@@ -410,6 +508,9 @@ void AttachChip::setUploading(bool uploading)
     } else if (effect) {
         effect->setOpacity(1.0);
     }
+    // CSS .attach-chip 的上传态文案：大小位改显示「上传中…」
+    if (m_size)
+        m_size->setText(uploading ? QStringLiteral("上传中…") : fileSizeLabel(m_bytes));
 }
 
 // ------------------------------------------------------------- IconPushButton
@@ -471,6 +572,190 @@ bool IconPushButton::event(QEvent *event)
         break;
     }
     return QPushButton::event(event);
+}
+
+// ------------------------------------------------------------------ PulseDot
+
+PulseDot::PulseDot(QWidget *parent) : QWidget(parent)
+{
+    m_color = gs::palette().cyan;
+    setFixedSize(6, 6);
+    m_timer = new QTimer(this);
+    m_timer->setInterval(60);
+    connect(m_timer, &QTimer::timeout, this, [this] {
+        m_phase += 0.06;
+        if (m_phase > 1.0)
+            m_phase -= 1.0;
+        update();
+    });
+}
+
+void PulseDot::setColor(const QColor &color)
+{
+    m_color = color;
+    update();
+}
+
+void PulseDot::setActive(bool active)
+{
+    if (m_active == active)
+        return;
+    m_active = active;
+    if (active)
+        m_timer->start();
+    else
+        m_timer->stop();
+    update();
+}
+
+void PulseDot::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(Qt::NoPen);
+    QColor color = m_color;
+    if (m_active) {
+        // CSS @keyframes badgePulse：1.4s 内 1 → .45 → 1
+        const qreal wave = 0.5 + 0.5 * qCos(m_phase * 6.28318530717958647692);
+        color.setAlphaF(0.45 + 0.55 * wave);
+    }
+    p.setBrush(color);
+    p.drawEllipse(QPointF(rect().center()), 3.0, 3.0);
+}
+
+// --------------------------------------------------------------- ThemeSwatch
+
+ThemeSwatch::ThemeSwatch(const QString &themeId, int sizePx, bool withBorder, QWidget *parent)
+    : QWidget(parent), m_themeId(themeId), m_size(sizePx), m_border(withBorder)
+{
+    setFixedSize(sizePx, sizePx);
+    setAttribute(Qt::WA_TransparentForMouseEvents, true);
+}
+
+void ThemeSwatch::paintEvent(QPaintEvent *)
+{
+    // .sw-dark/.sw-silver/.sw-blue：135° 双色各占一半
+    QColor first(QStringLiteral("#18242e"));
+    QColor second(QStringLiteral("#50badf"));
+    if (m_themeId == QLatin1String("silver")) {
+        first = QColor(QStringLiteral("#f1f3f5"));
+        second = QColor(QStringLiteral("#0e7ca6"));
+    } else if (m_themeId == QLatin1String("blue")) {
+        first = QColor(QStringLiteral("#dce7f3"));
+        second = QColor(QStringLiteral("#1b84a8"));
+    }
+
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF box = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    QLinearGradient gradient(box.topLeft(), box.bottomRight());
+    gradient.setColorAt(0.0, first);
+    gradient.setColorAt(0.499, first);
+    gradient.setColorAt(0.5, second);
+    gradient.setColorAt(1.0, second);
+    p.setBrush(gradient);
+    if (m_border) {
+        p.setPen(gs::palette().lineStrong);
+    } else {
+        p.setPen(Qt::NoPen);
+    }
+    p.drawEllipse(box);
+}
+
+// -------------------------------------------------------------- TurnRailDot
+
+TurnRailDot::TurnRailDot(int turn, QWidget *parent) : QWidget(parent), m_turn(turn)
+{
+    setFixedSize(12, 12);
+    setCursor(Qt::PointingHandCursor);
+    setAttribute(Qt::WA_Hover, true);
+}
+
+void TurnRailDot::setActive(bool active)
+{
+    if (m_active == active)
+        return;
+    m_active = active;
+    update();
+}
+
+void TurnRailDot::enterEvent(QEvent *event)
+{
+    m_hover = true;
+    update();
+    emit hovered(m_turn);
+    QWidget::enterEvent(event);
+}
+
+void TurnRailDot::leaveEvent(QEvent *event)
+{
+    m_hover = false;
+    update();
+    emit unhovered();
+    QWidget::leaveEvent(event);
+}
+
+void TurnRailDot::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton)
+        emit activated(m_turn);
+    QWidget::mouseReleaseEvent(event);
+}
+
+void TurnRailDot::paintEvent(QPaintEvent *)
+{
+    // .turn-rail-dot:before：5px 圆点，常态 opacity .3，悬浮 .7，当前 1（放大 1.4 + 光晕）
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QColor color = gs::palette().textBright;
+    color.setAlphaF(m_active ? 1.0 : (m_hover ? 0.7 : 0.3));
+    p.setPen(Qt::NoPen);
+    if (m_active) {
+        QColor glow = gs::palette().textBright;
+        glow.setAlphaF(0.35);
+        p.setBrush(glow);
+        p.drawEllipse(QPointF(rect().center()), 6.0, 6.0);
+    }
+    p.setBrush(color);
+    p.drawEllipse(QPointF(rect().center()), m_active ? 3.5 : 2.5, m_active ? 3.5 : 2.5);
+}
+
+// ------------------------------------------------------------------- MiniBar
+
+MiniBar::MiniBar(QWidget *parent) : QWidget(parent)
+{
+    m_fill = gs::palette().cyan;
+    setFixedHeight(7);
+    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+}
+
+void MiniBar::setRatio(qreal ratio)
+{
+    m_ratio = ratio;
+    update();
+}
+
+void MiniBar::setFill(const QColor &color)
+{
+    m_fill = color;
+    update();
+}
+
+void MiniBar::paintEvent(QPaintEvent *)
+{
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const QRectF box = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+    p.setPen(gs::palette().line);
+    p.setBrush(gs::palette().inset);
+    p.drawRoundedRect(box, height() / 2.0, height() / 2.0);
+    if (m_ratio <= 0.0)
+        return;
+    const qreal w = qMax<qreal>(2.0, box.width() * qMin<qreal>(m_ratio, 1.0));
+    p.setPen(Qt::NoPen);
+    p.setBrush(m_fill);
+    p.drawRoundedRect(QRectF(box.left(), box.top(), w, box.height()),
+                      height() / 2.0, height() / 2.0);
 }
 
 // ------------------------------------------------------------------- helpers

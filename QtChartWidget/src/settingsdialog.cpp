@@ -57,7 +57,7 @@ QPushButton *styledButton(const QString &text, const QString &variant, QWidget *
     if (!variant.isEmpty())
         b->setProperty("variant", variant);
     b->setCursor(Qt::PointingHandCursor);
-    b->setFocusPolicy(Qt::NoFocus);
+    b->setFocusPolicy(Qt::TabFocus); // webui 的 button 可聚焦；TabFocus 不留点击焦点环
     return b;
 }
 
@@ -83,7 +83,7 @@ QComboBox *settingsCombo()
     auto *c = new QComboBox;
     setClass(c, QStringLiteral("settingsInput"));
     c->setFixedHeight(32);
-    c->setFocusPolicy(Qt::NoFocus);
+    c->setFocusPolicy(Qt::TabFocus); // 下拉框也要能 Tab 到（webui 的 select 是可聚焦元素）
     return c;
 }
 
@@ -267,7 +267,7 @@ void SettingsDialog::buildUi()
     auto *closeButton = new IconPushButton(this);
     closeButton->setProperty("variant", QStringLiteral("icon"));
     closeButton->setCursor(Qt::PointingHandCursor);
-    closeButton->setFocusPolicy(Qt::NoFocus);
+    closeButton->setFocusPolicy(Qt::TabFocus);
     closeButton->setFixedSize(30, 30);
     closeButton->setIconColors(QColor(QStringLiteral("#d7e2e8")),
                                QColor(QStringLiteral("#50badf")));
@@ -292,7 +292,7 @@ void SettingsDialog::buildUi()
         setClass(button, QStringLiteral("settingsTab"));
         button->setFixedHeight(42);
         button->setCursor(Qt::PointingHandCursor);
-        button->setFocusPolicy(Qt::NoFocus);
+        button->setFocusPolicy(Qt::TabFocus);
         *tabPtrs[i] = button;
         tl->addWidget(button);
     }
@@ -377,7 +377,7 @@ QWidget *SettingsDialog::buildProviderSidebar()
     add->setObjectName(QStringLiteral("addProvider"));
     add->setMinimumHeight(28);
     add->setCursor(Qt::PointingHandCursor);
-    add->setFocusPolicy(Qt::NoFocus);
+    add->setFocusPolicy(Qt::TabFocus);
     add->setText(QStringLiteral("添加供应商"));
     add->setIconColors(QColor(QStringLiteral("#d7e2e8")),
                        QColor(QStringLiteral("#d7e2e8")));
@@ -996,7 +996,7 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
     setClass(remove, QStringLiteral("modelDelete"));
     remove->setFixedSize(22, 22);
     remove->setCursor(Qt::PointingHandCursor);
-    remove->setFocusPolicy(Qt::NoFocus);
+    remove->setFocusPolicy(Qt::TabFocus);
     remove->setIconColors(QColor(QStringLiteral("#8da0a9")),
                           QColor(QStringLiteral("#e36c6c")));
     remove->setIconName(QStringLiteral("x"), 12);
@@ -1138,7 +1138,7 @@ void SettingsDialog::renderCandidates()
         setClass(button, QStringLiteral("candidateItem"));
         button->setEnabled(!exists);
         button->setCursor(Qt::PointingHandCursor);
-        button->setFocusPolicy(Qt::NoFocus);
+        button->setFocusPolicy(Qt::TabFocus);
         auto *bl = new QHBoxLayout(button);
         bl->setContentsMargins(6, 6, 6, 6);
         bl->setSpacing(6);
@@ -1522,29 +1522,36 @@ bool SettingsDialog::validateSettings()
     return errors.isEmpty();
 }
 
+// 未保存修改的二次确认（关闭按钮 / 窗口关闭 / Esc 三条路径共用）
+bool SettingsDialog::confirmDiscard()
+{
+    if (!m_dirty)
+        return true;
+    return ConfirmDialog::ask(this, QStringLiteral("放弃未保存的设置"),
+                              QStringLiteral("模型设置尚未保存，确定要关闭吗？"),
+                              QStringLiteral("放弃更改"), true);
+}
+
 void SettingsDialog::attemptClose()
 {
-    if (m_dirty) {
-        const bool ok = ConfirmDialog::ask(this, QStringLiteral("放弃未保存的设置"),
-                                           QStringLiteral("模型设置尚未保存，确定要关闭吗？"),
-                                           QStringLiteral("放弃更改"), true);
-        if (!ok)
-            return;
-    }
+    if (!confirmDiscard())
+        return;
     m_saveButton->setEnabled(true);
     done(QDialog::Rejected);
 }
 
+void SettingsDialog::reject()
+{
+    // QDialog 按 Esc 会走 reject()，不经过 closeEvent——脏检查必须在这里也走一遍，
+    // 否则未保存的修改会被无声丢弃
+    attemptClose();
+}
+
 void SettingsDialog::closeEvent(QCloseEvent *event)
 {
-    if (m_dirty) {
-        const bool ok = ConfirmDialog::ask(this, QStringLiteral("放弃未保存的设置"),
-                                           QStringLiteral("模型设置尚未保存，确定要关闭吗？"),
-                                           QStringLiteral("放弃更改"), true);
-        if (!ok) {
-            event->ignore();
-            return;
-        }
+    if (!confirmDiscard()) {
+        event->ignore();
+        return;
     }
     m_saveButton->setEnabled(true);
     event->accept();

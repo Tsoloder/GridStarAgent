@@ -83,6 +83,8 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    // Esc 走 reject()，脏检查要在两条路径上都生效
+    void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -111,6 +113,8 @@ private:
     void addModel(const QString &rawId, const QString &name);
     bool validateSettings();
     void attemptClose();
+    // 未保存修改的二次确认（关闭按钮 / 窗口关闭 / Esc 共用）
+    bool confirmDiscard();
 
     // 草稿状态（state.settings）
     QVariantMap m_extra;             // version 等其余字段

@@ -127,10 +127,13 @@ class Toast : public QLabel
 public:
     explicit Toast(QWidget *parent = nullptr);
     void showMessage(const QString &text);
-    void layoutIn(const QSize &host);
+    // bottomInset 为距底部的距离：宿主传输入区高度，让 Toast 始终浮在输入区之上
+    void layoutIn(const QSize &host, int bottomInset = 125);
+    int bottomInset() const { return m_bottomInset; }
 
 private:
     QTimer *m_timer = nullptr;
+    int m_bottomInset = 125;
 };
 
 // 拖拽遮罩（#drop-overlay）
@@ -141,6 +144,23 @@ public:
     explicit DropOverlay(QWidget *parent = nullptr);
     void setActive(bool active);
     void layoutIn(const QSize &host);
+};
+
+// 皮肤下拉（.theme-listbox）：三种皮肤各一枚色片 + 名称，选中项高亮
+class ThemeListPopup : public QFrame
+{
+    Q_OBJECT
+public:
+    explicit ThemeListPopup(QWidget *parent = nullptr);
+    void setCurrent(const QString &id);
+    void openBelow(QWidget *anchor);
+
+signals:
+    void themeChosen(const QString &id);
+
+private:
+    struct Entry { QString id; QPushButton *button = nullptr; };
+    QList<Entry> m_entries;
 };
 
 // 确认 / 输入对话框（app.js showDialog）

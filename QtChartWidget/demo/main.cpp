@@ -336,6 +336,8 @@ public:
 
     void populate();
     void loadHistory();
+    // 轨迹视图示例数据（宿主从 /sessions/{id}/trajectory 拉到的 events）
+    void loadTrajectory();
 
 private:
     void wire();
@@ -386,6 +388,17 @@ void DemoHost::wire()
                      [this](const QString &message, const QString &display,
                             const QVariantList &attachments) {
                          m_chart->setInputText(QString());
+                         // 工具参数确认按 webui 口径以 <structured_interaction> 消息回传（真实后端
+                         // 识别该标记并回填参数）；demo 没有后端，这里就地给一条回执，
+                         // 免得把标记当成普通提问走一遍假流式
+                         if (message.startsWith(QStringLiteral("<structured_interaction>"))) {
+                             m_chart->appendUserMessage(display.isEmpty()
+                                                            ? QStringLiteral("已确认参数")
+                                                            : display);
+                             m_chart->appendAssistantMessage(
+                                 QStringLiteral("已按确认后的参数下发指令（演示）。"));
+                             return;
+                         }
                          startTurn(message, display, attachments);
                      });
     QObject::connect(c, &ChartWidget::retryRequested, c,
@@ -451,14 +464,6 @@ void DemoHost::wire()
                      [this](const QString &value, const QString &label) {
                          startTurn(value, label, QVariantList());
                      });
-    QObject::connect(c, &ChartWidget::toolParamsConfirmed, c,
-                     [this](const QString &tool, bool confirmed, const QVariantMap &params,
-                            const QString &label) {
-                         qDebug() << "[demo] tool_params" << tool << confirmed << params << label;
-                         m_chart->appendAssistantMessage(
-                             confirmed ? QStringLiteral("已确认 **%1** 参数，开始执行。").arg(tool)
-                                       : QStringLiteral("已取消 **%1**。").arg(tool));
-                     });
     QObject::connect(c, &ChartWidget::approvalDecided, c,
                      [this](const QString &callId, bool approved, const QVariantMap &args) {
                          qDebug() << "[demo] approval" << callId << approved << args;
@@ -469,9 +474,6 @@ void DemoHost::wire()
                                                          : QStringLiteral("已拒绝该操作"));
                          });
                      });
-    QObject::connect(c, &ChartWidget::approvalJsonInvalid, c, [this] {
-        qDebug() << "[demo] approval json invalid";
-    });
     QObject::connect(c, &ChartWidget::workflowRunRequested, c,
                      [this](const QVariantList &steps) {
                          m_chart->setBusy(true);
@@ -749,15 +751,83 @@ bool DemoHost::runCommand(const QString &text, const QVariantList &attachments)
 
 // ------------------------------------------------------------ main
 
+// 轨迹视图示例数据：与后端 /sessions/{id}/trajectory 的 events 同构
+void DemoHost::loadTrajectory()
+{
+    const QString t1 = QStringLiteral("2026-09-06T09:04:00");
+    const QString t2 = QStringLiteral("2026-09-06T09:04:06");
+    const QString t3 = QStringLiteral("2026-09-06T09:04:21");
+    const QString t4 = QStringLiteral("2026-09-06T09:04:38");
+
+    QVariantList events;
+    events << obj({ { "type", "user" }, { "turn", 1 }, { "ts", t1 },
+                    { "content", "城南线 10kV 馈线跳闸，生成处置方案" },
+                    { "display_content", "城南线 10kV 馈线跳闸，生成处置方案" } })
+           << obj({ { "type", "traj_system_prompt" }, { "turn", 1 }, { "ts", t1 },
+                    { "content", "你是电网调度 Agent，按台账与潮流校核结果给出处置建议。" } })
+           << obj({ { "type", "traj_context" }, { "turn", 1 }, { "request", 1 },
+                    { "kind", "ledger_snapshot" }, { "ts", t1 },
+                    { "content", "台账：城南线（lk07）联络开关可用；#3 主变负载 78%。" } })
+           << obj({ { "type", "traj_request_start" }, { "turn", 1 }, { "request", 1 },
+                    { "model", "gridstar/gs-pro-32k" }, { "start", t1 }, { "ts", t1 } })
+           << obj({ { "type", "tool_call" }, { "id", "call_91" }, { "name", "scada_snapshot" },
+                    { "args", obj({ { "feeder", "城南线" }, { "ts", t2 } }) },
+                    { "turn", 1 }, { "request", 1 }, { "step", 1 }, { "ts", t2 } })
+           << obj({ { "type", "tool_result" }, { "call_id", "call_91" }, { "name", "scada_snapshot" },
+                    { "result", "{\"breaker\":\"open\",\"I_A\":1820,\"U_pu\":0.94,\"lk07\":\"available\"}" },
+                    { "duration_ms", 420 }, { "turn", 1 }, { "request", 1 }, { "step", 1 }, { "ts", t2 } })
+           << obj({ { "type", "tool_call" }, { "id", "call_92" }, { "name", "power_flow" },
+                    { "args", obj({ { "case", "城南线转供" }, { "topology", "lk07_closed" } }) },
+                    { "turn", 1 }, { "request", 1 }, { "step", 2 }, { "ts", t3 } })
+           << obj({ { "type", "tool_result" }, { "call_id", "call_92" }, { "name", "power_flow" },
+                    { "result", "Tool error: 转供后 #3 主变负载 107% 越限" },
+                    { "duration_ms", 2680 }, { "turn", 1 }, { "request", 1 }, { "step", 2 }, { "ts", t3 } })
+           << obj({ { "type", "traj_request_end" }, { "turn", 1 }, { "request", 1 },
+                    { "model", "gridstar/gs-pro-32k" }, { "status", "completed" }, { "ts", t3 },
+                    { "content", "城南线跳闸后建议先合上 lk07 由邻线转供，但需先降 #3 主变负载。" },
+                    { "reasoning", "先取断面确认开关位置，再做转供潮流校核；越限则先降载。" },
+                    { "tool_calls", QVariant(QVariantList{
+                          obj({ { "id", "call_91" }, { "name", "scada_snapshot" },
+                                { "args", obj({ { "feeder", "城南线" } }) } }),
+                          obj({ { "id", "call_92" }, { "name", "power_flow" },
+                                { "args", obj({ { "case", "城南线转供" } }) } }) }) },
+                    { "timing", obj({ { "start", t1 }, { "total_ms", 21400 },
+                                      { "ttft_ms", 1300 }, { "gen_ms", 20100 },
+                                      { "tok_per_s", 22.4 } }) },
+                    { "usage", obj({ { "input", 3120 }, { "output", 456 }, { "total", 3576 } }) } })
+           << obj({ { "type", "user" }, { "turn", 2 }, { "ts", t4 },
+                    { "content", "改按甩负荷方案处理" },
+                    { "display_content", "改按甩负荷方案处理" } })
+           << obj({ { "type", "traj_request_start" }, { "turn", 2 }, { "request", 1 },
+                    { "model", "gridstar/gs-pro-32k" }, { "start", t4 }, { "ts", t4 } })
+           << obj({ { "type", "traj_request_end" }, { "turn", 2 }, { "request", 1 },
+                    { "model", "gridstar/gs-pro-32k" }, { "status", "completed" },
+                    { "ts", QStringLiteral("2026-09-06T09:04:52") },
+                    { "content", "改为按甩负荷方案：先切 #3 主变可中断负荷 12MW，再合 lk07。" },
+                    { "reasoning", "甩负荷后重算潮流，越限消除。" },
+                    { "timing", obj({ { "start", t4 }, { "total_ms", 14200 },
+                                      { "ttft_ms", 980 }, { "gen_ms", 13220 },
+                                      { "tok_per_s", 26.1 } }) },
+                    { "usage", obj({ { "input", 3980 }, { "output", 288 }, { "total", 4268 } }) } });
+
+    m_chart->setTrajectoryEvents(events);
+}
+
 int main(int argc, char *argv[])
 {
     QString shotPath;
     bool emptyShot = false;
+    QString theme;
+    QString tab;
     QStringList rest;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--shot") && i + 1 < argc) {
             shotPath = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--theme") && i + 1 < argc) {
+            theme = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--tab") && i + 1 < argc) {
+            tab = QString::fromLocal8Bit(argv[++i]);
         } else if (arg == QLatin1String("--empty")) {
             emptyShot = true;
         } else {
@@ -774,12 +844,18 @@ int main(int argc, char *argv[])
     auto *chart = new ChartWidget;
     chart->setWindowTitle(QStringLiteral("GridStar AI · QtChartWidget"));
     chart->resize(460, 820);
+    if (!theme.isEmpty())
+        chart->setTheme(theme); // dark / silver / blue
 
     // 宿主对象与界面同生命周期，进程退出即释放
     auto *host = new DemoHost(chart);
     host->populate();
     if (!emptyShot)
         host->loadHistory();
+    if (tab == QLatin1String("traj")) {
+        host->loadTrajectory();
+        chart->setViewTab(QStringLiteral("traj"));
+    }
 
     chart->show();
     chart->focusInput();

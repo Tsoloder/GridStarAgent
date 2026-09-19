@@ -14,8 +14,10 @@ QT_END_NAMESPACE
 namespace gs {
 
 class ProgressLine;
+class PulseDot;
 
-// 单个阶段步骤（.phase-step）：全自绘 —— 状态圆圈字形、连接线、标题/备注省略
+// 单个阶段步骤（.phase-step）：全自绘 —— 状态圆圈字形、连接线、标题/备注省略。
+// 当前执行项不再用左侧竖条，改为整行背景色 + 圆圈内的呼吸圆点。
 class PhaseStep : public QWidget
 {
 public:
@@ -34,12 +36,15 @@ protected:
     bool event(QEvent *event) override;
 
 private:
+    void syncPulse();
+
     QString m_title;
     QString m_note;
     QString m_status = QStringLiteral("pending");
     bool m_connectorTop = false;
     bool m_connectorBottom = false;
     bool m_hover = false;
+    PulseDot *m_pulse = nullptr;
 };
 
 // 阶段计划面板（.phase-panel）：标题 + completed/total 徽章 + 折叠箭头 + 底部渐变进度条

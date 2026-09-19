@@ -4,6 +4,7 @@
 
 #include <QEvent>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPainter>
@@ -24,6 +25,21 @@ PhaseStep::PhaseStep(const QString &title, const QString &note, const QString &s
         setToolTip(note);
     else if (!title.isEmpty())
         setToolTip(title);
+
+    // 运行态的呼吸圆点：叠在状态圆圈中心，非运行态隐藏
+    m_pulse = new PulseDot(this);
+    m_pulse->setColor(gs::palette().cyan);
+    m_pulse->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    m_pulse->move(8 + 9 - 3, 6 + 9 - 3);
+    syncPulse();
+}
+
+void PhaseStep::syncPulse()
+{
+    const bool running = m_status == QLatin1String("active") || m_status == QLatin1String("running")
+                         || m_status == QLatin1String("in_progress");
+    m_pulse->setVisible(running);
+    m_pulse->setActive(running);
 }
 
 void PhaseStep::setStatus(const QString &status)
@@ -31,6 +47,7 @@ void PhaseStep::setStatus(const QString &status)
     if (m_status == status)
         return;
     m_status = status;
+    syncPulse();
     update();
 }
 
@@ -66,48 +83,47 @@ void PhaseStep::paintEvent(QPaintEvent *)
     const bool failed = st == QLatin1String("failed");
     const bool skipped = st == QLatin1String("skipped");
 
-    QColor text(QStringLiteral("#9db3bf"));
-    QColor glyph(QStringLiteral("#5f7a89"));
-    QColor circleBorder(QStringLiteral("#34505f"));
-    QColor circleBg(QStringLiteral("#16252f"));
+    const Palette &pal = gs::palette();
+    QColor text = pal.muted;
+    QColor glyph = pal.muted2;
+    QColor circleBorder = pal.line;
+    QColor circleBg = pal.inset;
     QString markIcon = QStringLiteral("circle");
     if (done) {
-        text = QColor(QStringLiteral("#8fd0af"));
+        text = pal.okText;
         markIcon = QStringLiteral("check");
-        circleBorder = QColor(QStringLiteral("#2f604b"));
-        circleBg = QColor(QStringLiteral("#14281f"));
-        glyph = Green;
+        circleBorder = pal.okLine;
+        circleBg = pal.okTint;
+        glyph = pal.green;
     } else if (running) {
-        text = QColor(QStringLiteral("#d2f0fc"));
-        markIcon = QStringLiteral("dot");
-        circleBorder = QColor(QStringLiteral("#2e7fa0"));
-        circleBg = QColor(QStringLiteral("#12303d"));
-        glyph = Cyan;
+        text = pal.textBright;
+        markIcon.clear(); // 运行态用呼吸圆点，不再画字形
+        circleBorder = pal.cyanMid;
+        circleBg = pal.accentTint;
+        glyph = pal.cyan;
     } else if (failed) {
-        text = QColor(QStringLiteral("#f2a6a6"));
+        text = pal.errText;
         markIcon = QStringLiteral("x");
-        circleBorder = QColor(QStringLiteral("#7a3a3d"));
-        circleBg = QColor(QStringLiteral("#2a1a1c"));
-        glyph = Red;
+        circleBorder = pal.errLine;
+        circleBg = pal.errTint;
+        glyph = pal.red;
     } else if (skipped) {
         markIcon = QStringLiteral("chevrons-right");
     }
 
     p.setOpacity(skipped ? 0.55 : 1.0); // CSS .phase-step.skipped { opacity: .55 }
 
-    // 背景：running 高亮 #1c3543；hover #1c2f3b；圆角 4px
+    // 背景：当前执行项整行铺背景色（不再画左侧竖条）；hover 同样给淡底
     QPainterPath bg;
     bg.addRoundedRect(QRectF(0.5, 0.5, width() - 1.0, height() - 1.0), 4, 4);
     if (running)
-        p.fillPath(bg, QColor(QStringLiteral("#1c3543")));
+        p.fillPath(bg, pal.accentTint);
     else if (m_hover)
-        p.fillPath(bg, QColor(QStringLiteral("#1c2f3b")));
-    if (running)
-        p.fillRect(QRectF(0, 0, 2, height()), Cyan); // inset box-shadow 2px 0 0 cyan
+        p.fillPath(bg, pal.accentTint);
 
-    // 步骤间连接线：left 16.5px（padding 8 + 圆心 8.5），宽 1px，色 #2a4150
+    // 步骤间连接线：left 16.5px（padding 8 + 圆心 8.5），宽 1px
     p.setPen(Qt::NoPen);
-    p.setBrush(QColor(QStringLiteral("#2a4150")));
+    p.setBrush(pal.line);
     if (m_connectorTop)
         p.drawRect(QRectF(16.5, 0, 1, 6));
     if (m_connectorBottom)
@@ -122,8 +138,9 @@ void PhaseStep::paintEvent(QPaintEvent *)
     p.setPen(circlePen);
     p.setBrush(circleBg);
     p.drawEllipse(circle);
-    // 状态图标 9×9，居中于圆圈（圆心 17,15）
-    p.drawPixmap(12.5, 10.5, iconPixmap(markIcon, glyph, 9));
+    // 状态图标 9×9，居中于圆圈（圆心 17,15）；运行态的呼吸圆点由 PulseDot 子控件承担
+    if (!markIcon.isEmpty())
+        p.drawPixmap(12.5, 10.5, iconPixmap(markIcon, glyph, 9));
 
     // 标题（11px, weight 500）+ 备注（10px, 55% 透明度）
     const int textLeft = 8 + 18 + 9; // marker + margin-right 9px
@@ -175,6 +192,8 @@ PhasePanel::PhasePanel(QWidget *parent) : QFrame(parent)
     m_head->setAttribute(Qt::WA_StyledBackground, true);
     m_head->setCursor(Qt::PointingHandCursor);
     m_head->setToolTip(QStringLiteral("点击展开/收起进度"));
+    // webui 的 .phase-head 是 role="button" tabindex="0"
+    m_head->setFocusPolicy(Qt::TabFocus);
     m_head->installEventFilter(this);
 
     auto *hl = new QHBoxLayout(m_head);
@@ -188,7 +207,7 @@ PhasePanel::PhasePanel(QWidget *parent) : QFrame(parent)
     m_chevron = new QLabel(m_head);
     setClass(m_chevron, QStringLiteral("phaseChevron"));
     m_chevron->setPixmap(iconPixmap(QStringLiteral("chevron-up"),
-                                    QColor(QStringLiteral("#718894")), 10));
+                                    gs::palette().muted2, 10));
     hl->addWidget(m_title, 1);
     hl->addSpacing(8); // CSS margin-left 8px
     hl->addWidget(m_count, 0);
@@ -243,7 +262,7 @@ void PhasePanel::setPlan(const QVariantMap &plan)
 
     m_title->setText(title);
     m_count->setText(QStringLiteral("%1/%2").arg(completed).arg(phases.size()));
-    m_progress->setPercent(qRound(completed * 100.0 / phases.size()));
+    m_progress->animateTo(qRound(completed * 100.0 / phases.size()));
 
     while (QLayoutItem *item = m_innerLayout->takeAt(0)) {
         if (QWidget *w = item->widget())
@@ -281,8 +300,8 @@ void PhasePanel::setExpanded(bool expanded)
     m_chevron->setProperty("expanded", expanded);
     m_chevron->setPixmap(iconPixmap(expanded ? QStringLiteral("chevron-down")
                                              : QStringLiteral("chevron-up"),
-                                    expanded ? QColor(QStringLiteral("#50badf"))
-                                             : QColor(QStringLiteral("#718894")), 10));
+                                    expanded ? gs::palette().cyan
+                                             : gs::palette().muted2, 10));
     restyle(m_head);
     restyle(m_chevron);
     m_steps->setVisible(expanded);
@@ -303,6 +322,13 @@ bool PhasePanel::eventFilter(QObject *watched, QEvent *event)
             if (me->button() == Qt::LeftButton)
                 setExpanded(!m_expanded);
             return true;
+        }
+        if (event->type() == QEvent::KeyPress) {
+            const int key = static_cast<QKeyEvent *>(event)->key();
+            if (key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Space) {
+                setExpanded(!m_expanded);
+                return true;
+            }
         }
         if (event->type() == QEvent::Resize)
             layoutProgress();

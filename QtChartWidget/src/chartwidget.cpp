@@ -8,8 +8,10 @@
 #include "popups.h"
 #include "settingsdialog.h"
 #include "theme.h"
+#include "trajectoryview.h"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
 #include <QDragMoveEvent>
@@ -30,6 +32,7 @@
 #include <QScrollBar>
 #include <QShortcut>
 #include <QStringList>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -37,28 +40,45 @@
 namespace gs {
 namespace {
 
-// app.js skillLabel：技能名列表用「 · 」连接
-QString joinSkills(const QVariantList &skills)
+// app.js ASK_USER_TOOL：询问类工具调用不落成工具条目，改由输入框上方的浮层承担
+const char kAskUserTool[] = "ask_user_question";
+
+// app.js usageModelLabel：后端回传的是 provider ID（如 custom），这里换成用户配置的供应商名称
+QString usageModelLabel(const QVariantList &models, const QString &raw)
 {
-    QStringList names;
-    for (const QVariant &item : skills)
-        names << item.toString();
-    return names.join(QStringLiteral(" · "));
+    const QString key = raw.trimmed();
+    if (key.isEmpty())
+        return QString();
+    const int slash = key.indexOf(QLatin1Char('/'));
+    const QString providerId = slash > 0 ? key.left(slash) : QString();
+    const QString modelId = slash > 0 ? key.mid(slash + 1) : key;
+    if (providerId.isEmpty())
+        return modelId;
+    for (const QVariant &item : models) {
+        const QVariantMap map = item.toMap();
+        if (map.value(QStringLiteral("provider")).toString() != providerId)
+            continue;
+        const QString name = map.value(QStringLiteral("provider_name")).toString();
+        return (name.isEmpty() ? providerId : name) + QStringLiteral(" / ") + modelId;
+    }
+    return providerId + QStringLiteral(" / ") + modelId;
 }
 
-// app.js sendMessage 里 assistant 气泡的标签：skill.name || skill.id
-QString skillLabelOf(const QVariantList &skills, const QString &id)
+// app.js renderStructured：结构化块里的询问载荷（取最后一个候选块）
+QVariantMap askPayloadOf(const QVariantMap &data)
 {
-    if (id.isEmpty())
-        return QString();
-    for (const QVariant &item : skills) {
-        const QVariantMap skill = item.toMap();
-        if (skill.value(QStringLiteral("id")).toString() != id)
-            continue;
-        const QString name = skill.value(QStringLiteral("name")).toString();
-        return name.isEmpty() ? id : name;
-    }
-    return id;
+    QVariantMap toolParams = data.value(QStringLiteral("tool_params")).toMap();
+    if (toolParams.isEmpty())
+        toolParams = data.value(QStringLiteral("toolparams")).toMap();
+    const QVariantList options = data.value(QStringLiteral("options")).toList();
+    if (toolParams.isEmpty() && options.isEmpty())
+        return QVariantMap();
+    QVariantMap payload;
+    if (!toolParams.isEmpty())
+        payload.insert(QStringLiteral("tool_params"), toolParams);
+    if (!options.isEmpty())
+        payload.insert(QStringLiteral("options"), options);
+    return payload;
 }
 
 bool isSelfOrChildOf(QWidget *widget, QWidget *ancestor)
@@ -69,36 +89,15 @@ bool isSelfOrChildOf(QWidget *widget, QWidget *ancestor)
     return false;
 }
 
-// app.js finishAssistant：正文与结构化块都为空、又没有工具组/审批卡时移除空气泡
-bool hasToolOrApproval(MessageWidget *message)
+// 控件自身或其祖先是否带某个 class（QSS 的 .class 动态属性）
+bool hasClassOrAncestor(QWidget *widget, const char *cls)
 {
-    return message->findChild<ToolGroupWidget *>() != nullptr
-           || message->findChild<ApprovalCard *>() != nullptr;
-}
-
-// app.js renderToolResult 的状态判定与汇总刷新
-void applyToolResult(ToolItemWidget *item, const QString &result)
-{
-    const bool failed = result.toLower().contains(QLatin1String("error"))
-                        || result.contains(QLatin1String("denied"));
-    item->setState(failed ? QStringLiteral("failed") : QStringLiteral("succeeded"));
-    item->setResult(result);
-    // addToolCall 把 item 挂在组内的 tool-list 上，需沿 parentWidget() 链找 ToolGroupWidget
-    for (QWidget *w = item->parentWidget(); w; w = w->parentWidget()) {
-        if (auto *group = qobject_cast<ToolGroupWidget *>(w)) {
-            group->updateSummary();
-            break;
-        }
+    const QString target = QLatin1String(cls);
+    for (QWidget *w = widget; w; w = w->parentWidget()) {
+        if (w->property("class").toString().split(QLatin1Char(' ')).contains(target))
+            return true;
     }
-}
-
-// 从 ToolItemWidget 反查它所属的消息气泡
-MessageWidget *ownerMessage(QWidget *widget)
-{
-    for (QWidget *w = widget->parentWidget(); w; w = w->parentWidget())
-        if (auto *message = qobject_cast<MessageWidget *>(w))
-            return message;
-    return nullptr;
+    return false;
 }
 
 // app.js extractPhase
@@ -120,7 +119,74 @@ QVariantMap extractPhase(const QVariant &value)
     return QVariantMap();
 }
 
+// 气泡工具结果的失败判定与工具组摘要刷新（app.js renderToolResult / updateToolGroup）
+void applyToolResult(ToolItemWidget *item, const QString &result)
+{
+    const bool failed = result.toLower().contains(QLatin1String("error"))
+                        || result.contains(QLatin1String("denied"));
+    item->setState(failed ? QStringLiteral("failed") : QStringLiteral("succeeded"));
+    item->setResult(result);
+    for (QWidget *w = item->parentWidget(); w; w = w->parentWidget()) {
+        if (auto *message = qobject_cast<MessageWidget *>(w)) {
+            message->updateToolSummary();
+            break;
+        }
+    }
+}
+
+// 从 ToolItemWidget 反查它所属的消息气泡
+MessageWidget *ownerMessage(QWidget *widget)
+{
+    for (QWidget *w = widget->parentWidget(); w; w = w->parentWidget())
+        if (auto *message = qobject_cast<MessageWidget *>(w))
+            return message;
+    return nullptr;
+}
+
+bool hasToolItems(MessageWidget *message)
+{
+    return message && !message->findChildren<ToolItemWidget *>().isEmpty();
+}
+
+bool hasProcRows(MessageWidget *message)
+{
+    return message && !message->findChildren<ProcRow *>().isEmpty();
+}
+
+// 设置对话框是独立顶级窗口，里面不少容器是「先无父创建、之后才挂进来」的
+// （providerSidebar / providerEditor / skillsPanel …）：它们作为临时顶级窗口时就已经被
+// polish 过了，之后再也等不到我们的事件过滤器，字距与无障碍属性会整块漏掉。
+// 打开对话框时补一次整棵子树。
+void applyDeferredStyleDetails(QWidget *root)
+{
+    applyLetterSpacing(root);
+    applyAccessibility(root);
+    const QList<QWidget *> all = root->findChildren<QWidget *>();
+    for (QWidget *widget : all) {
+        applyLetterSpacing(widget);
+        applyAccessibility(widget);
+    }
+}
+
+// sessions 数组里"当前会话"的可选 status 字段由 popups.cpp 的会话面板读取
 } // namespace
+
+// ------------------------------------------------------------ 线程契约
+
+// 公开 API 必须在 GUI 线程调用：内部直接操作 QWidget / QSS，Qt 的部件体系没有跨线程保护。
+// 契约全文见 README「线程模型」；下面这些「宿主收到网络 / 流式回调后推数据」的入口最容易
+// 被误放到工作线程上，所以在运行期兜一层：开发期断言直接暴露，发布期 qWarning + 忽略本次
+// 调用（好过静默的内存与绘制损坏）。
+bool ChartWidget::assertGuiThread(const char *entry) const
+{
+    if (QThread::currentThread() == thread())
+        return true;
+    qWarning("ChartWidget::%s() 被非 GUI 线程调用（当前线程 %p，对象线程 %p）：本次调用被忽略，"
+             "请改用信号槽或 QMetaObject::invokeMethod(Qt::QueuedConnection) 切回 GUI 线程",
+             entry, QThread::currentThread(), thread());
+    Q_ASSERT_X(false, "ChartWidget", "公开 API 被非 GUI 线程调用");
+    return false;
+}
 
 // ------------------------------------------------------------ 构造
 
@@ -143,11 +209,14 @@ ChartWidget::ChartWidget(QWidget *parent)
                                          QKeySequence(QStringLiteral("Ctrl++"))};
     for (const QKeySequence &seq : zoomInKeys) {
         auto *shortcut = new QShortcut(seq, this);
+        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
         connect(shortcut, &QShortcut::activated, this, &ChartWidget::zoomIn);
     }
     auto *zoomOutShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+-")), this);
+    zoomOutShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(zoomOutShortcut, &QShortcut::activated, this, &ChartWidget::zoomOut);
     auto *zoomResetShortcut = new QShortcut(QKeySequence(QStringLiteral("Ctrl+0")), this);
+    zoomResetShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(zoomResetShortcut, &QShortcut::activated, this, &ChartWidget::zoomReset);
 
     m_root = new QVBoxLayout(this);
@@ -156,7 +225,14 @@ ChartWidget::ChartWidget(QWidget *parent)
 
     buildTopbar();
     buildSessionbar();
+    buildViewTabs();
     buildMessages();
+    buildTurnRail();
+
+    // 轨迹视图与消息区互斥（.trajectory-view / #messages）
+    m_trajView = new TrajectoryView(this);
+    m_trajView->setVisible(false);
+    m_root->addWidget(m_trajView, 1);
 
     // .phase-panel { margin: 0 9px 8px }
     m_phaseWrap = new QWidget(this);
@@ -175,6 +251,7 @@ ChartWidget::ChartWidget(QWidget *parent)
     m_sessionPanel = new SessionPanel(this);
     m_toast = new Toast(this);
     m_dropOverlay = new DropOverlay(this);
+    m_themePopup = new ThemeListPopup(this);
 
     m_settings = new SettingsDialog(this);
     m_settings->setModal(true);
@@ -192,10 +269,15 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_sessionPanel, &SessionPanel::sessionDeleted, this, &ChartWidget::sessionDeleted);
     connect(m_sessionPanel, &SessionPanel::closeRequested, this, &ChartWidget::closeSessionPanel);
 
-    connect(m_composer, &Composer::sendMessage, this,
-            [this](const QString &text, const QVariantList &attachments) {
-                emit sendMessage(text, text, attachments);
-            });
+    connect(m_themePopup, &ThemeListPopup::themeChosen, this, [this](const QString &id) {
+        applyTheme(id);
+        emit themeChanged(id);
+    });
+
+    connect(m_tabChat, &QPushButton::clicked, this, [this] { setViewTab(QStringLiteral("chat")); });
+    connect(m_tabTraj, &QPushButton::clicked, this, [this] { setViewTab(QStringLiteral("traj")); });
+
+    connect(m_composer, &Composer::sendMessage, this, &ChartWidget::sendMessage);
     connect(m_composer, &Composer::stopRequested, this, &ChartWidget::stopRequested);
     connect(m_composer, &Composer::modeChanged, this, &ChartWidget::modeChanged);
     connect(m_composer, &Composer::modelSelected, this, &ChartWidget::modelSelected);
@@ -204,6 +286,16 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_composer, &Composer::attachRequested, this, &ChartWidget::attachRequested);
     connect(m_composer, &Composer::voiceRequested, this, &ChartWidget::voiceRequested);
     connect(m_composer, &Composer::attachmentRemoved, this, &ChartWidget::attachmentRemoved);
+    connect(m_composer, &Composer::optionChosen, this, &ChartWidget::optionChosen);
+    connect(m_composer, &Composer::approvalDecided, this, &ChartWidget::approvalDecided);
+    connect(m_composer, &Composer::choiceOpenChanged, this, [this](bool open) {
+        syncPhaseLift();
+        emit choiceOpenChanged(open);
+    });
+    connect(m_composer, &Composer::choiceResized, this, &ChartWidget::syncPhaseLift);
+
+    connect(m_trajView, &TrajectoryView::reloadRequested, this,
+            &ChartWidget::trajectoryReloadRequested);
 
     connect(m_settings, &SettingsDialog::saveRequested, this, &ChartWidget::settingsSaveRequested);
     connect(m_settings, &SettingsDialog::testProviderRequested, this,
@@ -215,10 +307,17 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_settings, &SettingsDialog::refreshMcpRequested, this,
             &ChartWidget::refreshMcpRequested);
 
-    // 会话触发器不是 QPushButton（要放省略号标题 + ⌄），点击由 app 级过滤器统一接管：
-    // app filter 先于目标部件执行，且鼠标事件会沿 parentWidget() 链每层重走一次过滤器，
-    // 所以在触发器子树上命中即 return true，避免冒泡导致重复开合。
+    // 消息区滚动：贴底才跟随；离开底部即交出滚动控制权，同时刷新导航轨高亮
+    connect(m_messages->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
+        m_followBottom = atBottom();
+        updateTurnRailActive();
+    });
+
+    // 会话触发器/皮肤触发器都不是 QPushButton（要放省略号标题 + 图标），点击由 app 级
+    // 过滤器统一接管：app filter 先于目标部件执行，且鼠标事件会沿 parentWidget() 链每层
+    // 重走一次过滤器，所以在触发器子树上命中即 return true，避免冒泡导致重复开合。
     m_currentTitle->installEventFilter(this);
+    m_composer->installEventFilter(this); // 输入区高度变化时重排 Toast / 导航轨
     qApp->installEventFilter(this);
 }
 
@@ -239,23 +338,48 @@ void ChartWidget::buildTopbar()
     topbar->setFixedHeight(48);
     auto *layout = new QHBoxLayout(topbar);
     layout->setContentsMargins(12, 0, 12, 0);
-    layout->setSpacing(8); // .brand>*+* { margin-left:8px }
+    layout->setSpacing(8);
 
-    auto *mark = new QLabel(QStringLiteral("GS"), topbar);
+    auto *mark = new QLabel(topbar);
     mark->setObjectName(QStringLiteral("brandMark"));
     mark->setAttribute(Qt::WA_StyledBackground, true);
     mark->setAlignment(Qt::AlignCenter);
     mark->setFixedSize(24, 24);
+    const QPixmap logo(QStringLiteral(":/icons/Logo.ico"));
+    if (!logo.isNull())
+        mark->setPixmap(logo.scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 
-    auto *brand = new QLabel(QStringLiteral("GRIDSTAR AI"), topbar);
+    auto *brand = new QLabel(QStringLiteral("GridStar Agent"), topbar);
     brand->setObjectName(QStringLiteral("brandText"));
 
     m_connection = new ConnectionButton(topbar);
+
+    // 皮肤切换（.theme-switch）：幽灵触发器 + 下拉
+    m_themeTrigger = new QWidget(topbar);
+    m_themeTrigger->setObjectName(QStringLiteral("themeTrigger"));
+    m_themeTrigger->setAttribute(Qt::WA_StyledBackground, true);
+    m_themeTrigger->setFixedHeight(28);
+    m_themeTrigger->setCursor(Qt::PointingHandCursor);
+    m_themeTrigger->setToolTip(QStringLiteral("切换皮肤"));
+    auto *themeLayout = new QHBoxLayout(m_themeTrigger);
+    themeLayout->setContentsMargins(8, 0, 8, 0);
+    themeLayout->setSpacing(6);
+    m_themeSwatch = new ThemeSwatch(themeId(), 12, true, m_themeTrigger);
+    m_themeLabel = new QLabel(themeName(), m_themeTrigger);
+    m_themeLabel->setObjectName(QStringLiteral("themeLabel"));
+    m_themeLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    auto *themeChevron = new QLabel(m_themeTrigger);
+    setClass(themeChevron, QStringLiteral("chevronGlyph"));
+    themeChevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"), gs::palette().muted, 12));
+    themeLayout->addWidget(m_themeSwatch, 0);
+    themeLayout->addWidget(m_themeLabel, 0);
+    themeLayout->addWidget(themeChevron, 0);
 
     layout->addWidget(mark);
     layout->addWidget(brand);
     layout->addStretch(1); // .connection { margin-left:auto }
     layout->addWidget(m_connection);
+    layout->addWidget(m_themeTrigger);
     m_root->addWidget(topbar);
 }
 
@@ -272,13 +396,11 @@ void ChartWidget::buildSessionbar()
 
     auto *newSession = new IconPushButton(bar);
     newSession->setObjectName(QStringLiteral("newSession"));
-    newSession->setProperty("variant", QStringLiteral("primary"));
     newSession->setFixedHeight(30); // .compact { height:30px }
     newSession->setCursor(Qt::PointingHandCursor);
     newSession->setText(QStringLiteral("新对话"));
-    newSession->setIconColors(QColor(QStringLiteral("#f4fbfe")),
-                              QColor(QStringLiteral("#f4fbfe")));
-    newSession->setIconName(QStringLiteral("plus"), 12);
+    newSession->setIconColors(gs::palette().muted, gs::palette().cyan);
+    newSession->setIconName(QStringLiteral("plus"), 14);
     m_newSession = newSession;
     layout->addWidget(m_newSession);
 
@@ -301,13 +423,41 @@ void ChartWidget::buildSessionbar()
 
     m_sessionChevron = new QLabel(m_sessionTrigger);
     setClass(m_sessionChevron, QStringLiteral("chevronGlyph"));
-    m_sessionChevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"),
-                                           QColor(QStringLiteral("#a8bbc6")), 12));
+    m_sessionChevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"), gs::palette().muted, 12));
 
     triggerLayout->addWidget(m_currentTitle, 1);
     triggerLayout->addWidget(m_sessionChevron);
     layout->addWidget(m_sessionTrigger, 1);
     m_root->addWidget(bar);
+}
+
+void ChartWidget::buildViewTabs()
+{
+    // .view-tabs { height:34px; display:flex; border-bottom:1px solid line }
+    m_viewTabs = new QWidget(this);
+    m_viewTabs->setObjectName(QStringLiteral("viewTabs"));
+    m_viewTabs->setAttribute(Qt::WA_StyledBackground, true);
+    m_viewTabs->setFixedHeight(34);
+    auto *layout = new QHBoxLayout(m_viewTabs);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    m_tabChat = new QPushButton(QStringLiteral("对话"), m_viewTabs);
+    setClass(m_tabChat, QStringLiteral("viewTab"));
+    m_tabChat->setProperty("active", true);
+    m_tabChat->setCursor(Qt::PointingHandCursor);
+    m_tabChat->setFocusPolicy(Qt::TabFocus); // webui 的 .view-tab 是 button：可 Tab、不留点击焦点环
+
+    m_tabTraj = new QPushButton(QStringLiteral("轨迹"), m_viewTabs);
+    setClass(m_tabTraj, QStringLiteral("viewTab"));
+    m_tabTraj->setProperty("active", false);
+    m_tabTraj->setCursor(Qt::PointingHandCursor);
+    m_tabTraj->setFocusPolicy(Qt::TabFocus);
+
+    layout->addWidget(m_tabChat);
+    layout->addWidget(m_tabTraj);
+    layout->addStretch(1);
+    m_root->addWidget(m_viewTabs);
 }
 
 void ChartWidget::buildMessages()
@@ -334,6 +484,32 @@ void ChartWidget::buildMessages()
     m_root->addWidget(m_messages, 1);
 }
 
+void ChartWidget::buildTurnRail()
+{
+    // .turn-rail：固定在视口左侧，竖排白点，一轮一个（不足一轮时隐藏）
+    m_turnRail = new QWidget(this);
+    m_turnRail->setObjectName(QStringLiteral("turnRail"));
+    m_turnRail->setAttribute(Qt::WA_StyledBackground, true);
+    auto *layout = new QVBoxLayout(m_turnRail);
+    layout->setContentsMargins(0, 6, 0, 6);
+    layout->setSpacing(6);
+    layout->setAlignment(Qt::AlignHCenter);
+    m_turnRail->setVisible(false);
+
+    m_turnRailTip = new QFrame(this);
+    m_turnRailTip->setObjectName(QStringLiteral("turnRailTip"));
+    m_turnRailTip->setAttribute(Qt::WA_StyledBackground, true);
+    m_turnRailTip->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    auto *tipLayout = new QVBoxLayout(m_turnRailTip);
+    tipLayout->setContentsMargins(9, 7, 9, 7);
+    m_turnRailTipText = new QLabel(m_turnRailTip);
+    m_turnRailTipText->setObjectName(QStringLiteral("turnRailTipText"));
+    m_turnRailTipText->setWordWrap(true);
+    m_turnRailTipText->setTextInteractionFlags(Qt::NoTextInteraction);
+    tipLayout->addWidget(m_turnRailTipText);
+    m_turnRailTip->setVisible(false);
+}
+
 QWidget *ChartWidget::createEmptyState()
 {
     // .empty-state { flex:1; column; center; text-align:center; padding:30px }
@@ -349,8 +525,7 @@ QWidget *ChartWidget::createEmptyState()
     symbol->setAttribute(Qt::WA_StyledBackground, true);
     symbol->setAlignment(Qt::AlignCenter);
     symbol->setFixedSize(40, 40);
-    symbol->setPixmap(iconPixmap(QStringLiteral("zap"),
-                                 QColor(QStringLiteral("#50badf")), 22));
+    symbol->setPixmap(iconPixmap(QStringLiteral("zap"), gs::palette().cyan, 22));
     symbol->setContentsMargins(0, 0, 0, 12); // .empty-symbol { margin-bottom:12px }
 
     auto *title = new QLabel(QStringLiteral("对话已就绪"), box);
@@ -422,32 +597,254 @@ void ChartWidget::layoutOverlays()
 {
     const QSize host = size();
     m_sessionPanel->layoutIn(host);
-    m_toast->layoutIn(host);
+    // Toast 浮在输入区之上（输入区高度随控件行换行变化，不能用固定底距）
+    m_toast->layoutIn(host, m_composer ? m_composer->height() + 12 : 125);
     m_dropOverlay->layoutIn(host);
     updateTitleElide();
+
+    // 轮次导航轨：左边缘、垂直居中，最高占视口 62%
+    if (m_turnRail) {
+        const int dotsHeight = m_railDots.size() * 18 + 12;
+        const int railHeight = qMin(dotsHeight, qRound(host.height() * 0.62));
+        const int top = qMax(0, (host.height() - railHeight) / 2);
+        m_turnRail->setGeometry(0, top, 12, railHeight);
+    }
+    if (m_turnRailTip && m_turnRailTip->isVisible())
+        showTurnRailTip(m_railActive);
 }
 
-void ChartWidget::scrollToEnd()
+void ChartWidget::scrollToEnd(bool force)
 {
+    if (m_scrollLocked)
+        return;
+    if (force)
+        m_followBottom = true;
+    else if (!m_followBottom)
+        return; // 贴底才跟随
     QScrollBar *bar = m_messages->verticalScrollBar();
     QTimer::singleShot(0, this, [bar] { bar->setValue(bar->maximum()); });
+}
+
+bool ChartWidget::atBottom() const
+{
+    // app.js BOTTOM_SLACK = 24
+    QScrollBar *bar = m_messages->verticalScrollBar();
+    return bar->maximum() - bar->value() <= 24;
+}
+
+// ------------------------------------------------------------ 轮次导航轨
+
+void ChartWidget::rebuildTurnRail()
+{
+    if (!m_turnRail)
+        return;
+    QList<MessageWidget *> turns;
+    if (m_viewTab == QLatin1String("chat")) {
+        for (int i = 0; i < m_messageLayout->count(); ++i) {
+            auto *message = qobject_cast<MessageWidget *>(m_messageLayout->itemAt(i)->widget());
+            if (message && message->role() == QLatin1String("user"))
+                turns.append(message);
+        }
+    }
+
+    bool same = turns.size() == m_railTurns.size();
+    if (same) {
+        for (int i = 0; i < turns.size(); ++i) {
+            if (m_railTurns.at(i).data() != turns.at(i)) {
+                same = false;
+                break;
+            }
+        }
+    }
+    if (!same) {
+        hideTurnRailTip();
+        m_railTurns.clear();
+        m_railDots.clear();
+        // 清空轨道上的旧点
+        if (QLayout *layout = m_turnRail->layout()) {
+            while (QLayoutItem *item = layout->takeAt(0)) {
+                if (QWidget *w = item->widget())
+                    w->deleteLater();
+                delete item;
+            }
+        }
+        for (int i = 0; i < turns.size(); ++i) {
+            auto *dot = new TurnRailDot(i, m_turnRail);
+            connect(dot, &TurnRailDot::activated, this, &ChartWidget::focusTurn);
+            connect(dot, &TurnRailDot::hovered, this, &ChartWidget::showTurnRailTip);
+            connect(dot, &TurnRailDot::unhovered, this, &ChartWidget::hideTurnRailTip);
+            if (auto *layout = qobject_cast<QVBoxLayout *>(m_turnRail->layout()))
+                layout->addWidget(dot, 0, Qt::AlignHCenter);
+            m_railTurns.append(turns.at(i));
+            m_railDots.append(dot);
+        }
+    }
+    m_turnRail->setVisible(!turns.isEmpty());
+    if (m_turnRail->isVisible())
+        layoutOverlays();
+    updateTurnRailActive();
+}
+
+void ChartWidget::updateTurnRailActive()
+{
+    if (m_railTurns.isEmpty())
+        return;
+    const int mid = m_messages->viewport()->height() / 2;
+    int active = 0;
+    for (int i = 0; i < m_railTurns.size() && i < m_railDots.size(); ++i) {
+        MessageWidget *message = m_railTurns.at(i).data();
+        if (!message)
+            continue;
+        const int top = message->mapTo(m_messages->viewport(), QPoint(0, 0)).y();
+        if (top <= mid)
+            active = i;
+    }
+    m_railActive = active;
+    for (int i = 0; i < m_railDots.size(); ++i)
+        m_railDots.at(i)->setActive(i == active);
+}
+
+void ChartWidget::showTurnRailTip(int turn)
+{
+    if (!m_turnRailTip || turn < 0 || turn >= m_railTurns.size())
+        return;
+    MessageWidget *message = m_railTurns.at(turn).data();
+    if (!message)
+        return;
+    const QString text = message->property("copyText").toString().simplified();
+    m_turnRailTipText->setText(text.isEmpty() ? QStringLiteral("（本轮无文本内容）") : text);
+    m_turnRailTip->adjustSize();
+    const int maxWidth = qMax(120, width() / 3);
+    if (m_turnRailTip->width() > maxWidth)
+        m_turnRailTip->setFixedWidth(maxWidth);
+    const int dotY = m_turnRail->y() + 6 + turn * 18;
+    int top = dotY + 6 - m_turnRailTip->height() / 2;
+    top = qBound(8, top, qMax(8, height() - m_turnRailTip->height() - 8));
+    m_turnRailTip->move(22, top);
+    m_turnRailTip->raise();
+    m_turnRailTip->setVisible(true);
+}
+
+void ChartWidget::hideTurnRailTip()
+{
+    if (m_turnRailTip)
+        m_turnRailTip->setVisible(false);
+}
+
+void ChartWidget::focusTurn(int turn)
+{
+    if (turn < 0 || turn >= m_railTurns.size())
+        return;
+    MessageWidget *message = m_railTurns.at(turn).data();
+    if (!message)
+        return;
+    // 定位到该轮顶部（block:"start"）
+    const int top = message->mapTo(m_messageList, QPoint(0, 0)).y();
+    m_messages->verticalScrollBar()->setValue(qMax(0, top - 13));
+}
+
+// ------------------------------------------------------------ 视图页签
+
+void ChartWidget::setViewTab(const QString &tab)
+{
+    if (m_viewTab == tab)
+        return;
+    m_viewTab = tab;
+    const bool traj = tab == QLatin1String("traj");
+    m_tabChat->setProperty("active", !traj);
+    m_tabTraj->setProperty("active", traj);
+    restyle(m_tabChat);
+    restyle(m_tabTraj);
+    m_trajView->setVisible(traj);
+    m_messages->setVisible(!traj);
+    m_composer->setVisible(!traj);
+    if (traj) {
+        m_phaseWrap->setVisible(false);
+    } else if (!m_phasePanel->isHidden()) {
+        // 用 isHidden 而不是 isVisible：切到轨迹时计划窗口是被父级隐藏的，
+        // isVisible() 此时为假，会导致切回对话后再也恢复不出来
+        m_phaseWrap->setVisible(true);
+        scrollToEnd(true);
+    }
+    rebuildTurnRail();
+    layoutOverlays();
+    emit viewTabChanged(tab);
+}
+
+// ------------------------------------------------------------ 皮肤
+
+void ChartWidget::setTheme(const QString &id)
+{
+    applyTheme(id);
+    emit themeChanged(gs::themeId());
+}
+
+QString ChartWidget::theme() const
+{
+    return gs::themeId();
+}
+
+void ChartWidget::applyTheme(const QString &id)
+{
+    gs::setTheme(id);
+    setStyleSheet(appStyleSheet());
+    // 皮肤切换后已按旧色着色的图标要重建
+    m_sessionChevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"), gs::palette().muted, 12));
+    m_connection->update();
+
+    const QList<ThemeSwatch *> swatches = findChildren<ThemeSwatch *>();
+    for (ThemeSwatch *swatch : swatches)
+        swatch->update();
+
+    // 图标按钮的着色需显式重设（QSS 的 color 不作用于 QIcon）
+    for (IconPushButton *button : findChildren<IconPushButton *>()) {
+        const QString cls = button->property("class").toString();
+        const QString name = button->objectName();
+        if (name == QLatin1String("sendButton"))
+            continue;
+        if (name == QLatin1String("newSession"))
+            button->setIconColors(gs::palette().muted, gs::palette().cyan);
+        else if (cls.contains(QLatin1String("sessionAction")))
+            button->setIconColors(gs::palette().muted,
+                                  button->property("danger").toBool() ? gs::palette().red
+                                                                      : gs::palette().cyan);
+        else
+            button->setIconColors(gs::palette().muted2, gs::palette().cyan);
+    }
+
+    if (m_themeSwatch)
+        m_themeSwatch->update();
+    if (m_themeLabel)
+        m_themeLabel->setText(themeName());
+    if (m_themePopup)
+        m_themePopup->setCurrent(gs::themeId());
+
+    // 自绘控件（连接状态点、阶段项、进度条、导航轨…）重绘即可
+    for (QWidget *w : findChildren<QWidget *>())
+        w->update();
 }
 
 // ------------------------------------------------------------ 顶栏 / 会话栏
 
 void ChartWidget::setConnectionState(const QString &state, const QString &label)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_connection->setState(state, label);
 }
 
 void ChartWidget::setSessions(const QVariantList &sessions)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_sessions = sessions;
     m_sessionPanel->setSessions(sessions);
 }
 
 void ChartWidget::setCurrentSessionTitle(const QString &title)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_currentTitle->setProperty("full", title);
     updateTitleElide();
 }
@@ -475,13 +872,17 @@ void ChartWidget::closeSessionPanel()
 
 // ------------------------------------------------------------ 输入区
 
-void ChartWidget::setModels(const QVariantList &models) { m_composer->setModels(models); }
+void ChartWidget::setModels(const QVariantList &models)
+{
+    m_models = models; // 用量弹层的「提供方 / 模型」按 provider_name 映射（app.js usageModelLabel）
+    m_composer->setModels(models);
+}
 void ChartWidget::setCurrentModel(const QString &key) { m_composer->setCurrentModel(key); }
 QString ChartWidget::currentModel() const { return m_composer->currentModel(); }
 
 void ChartWidget::setSkills(const QVariantList &skills)
 {
-    m_skills = skills; // ensureAssistant 按 currentSkill 查技能名做气泡标签
+    m_skills = skills; // 供宿主查询；气泡不再显示 Skill 名（b12146e）
     m_composer->setSkills(skills);
 }
 void ChartWidget::setCurrentSkill(const QString &id) { m_composer->setCurrentSkill(id); }
@@ -514,6 +915,41 @@ QVariantList ChartWidget::attachments() const { return m_composer->attachments()
 void ChartWidget::setVoiceEnabled(bool enabled) { m_composer->setVoiceEnabled(enabled); }
 void ChartWidget::setVoiceRecording(bool recording) { m_composer->setVoiceRecording(recording); }
 
+// ------------------------------------------------------------ 选择 / 审批
+
+void ChartWidget::showChoice(const QVariantMap &payload)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_composer->showChoice(payload);
+}
+
+void ChartWidget::closeChoice()
+{
+    m_composer->closeChoice();
+}
+
+void ChartWidget::appendApproval(const QVariantMap &event)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    QVariantMap approval;
+    approval.insert(QStringLiteral("event"), event);
+    QVariantMap payload;
+    payload.insert(QStringLiteral("approval"), approval);
+    showChoice(payload);
+}
+
+void ChartWidget::resolveApproval(const QString &callId, bool approved)
+{
+    m_composer->setApprovalResolved(callId, approved);
+}
+
+void ChartWidget::reEnableApproval(const QString &callId)
+{
+    m_composer->reEnableApproval(callId);
+}
+
 // ------------------------------------------------------------ 消息流
 
 MessageWidget *ChartWidget::createMessage(const QString &role, const QString &content,
@@ -525,7 +961,18 @@ MessageWidget *ChartWidget::createMessage(const QString &role, const QString &co
     message->setAttachments(attachments);
     message->body()->setText(content);
     message->setBodyVisible(message->body()->hasVisibleContent());
+    connect(message, &MessageWidget::copyRequested, this, [this](const QString &text) {
+        // app.js 卡片拷贝：无内容时提示，成功/失败各给一条 toast
+        const QString payload = text.isEmpty() ? QString() : text;
+        if (!payload.trimmed().isEmpty()) {
+            QApplication::clipboard()->setText(payload);
+            showToast(QStringLiteral("已复制到剪贴板"));
+        } else {
+            showToast(QStringLiteral("没有可复制的内容"));
+        }
+    });
     scrollToEnd();
+    rebuildTurnRail();
     return message;
 }
 
@@ -533,44 +980,64 @@ MessageWidget *ChartWidget::ensureAssistant()
 {
     if (m_current && !m_currentFinished)
         return m_current;
-    // app.js sendMessage：assistant 气泡标签取当前 Skill 名
-    const QString label = skillLabelOf(m_skills, m_composer->currentSkill());
-    m_current = createMessage(QStringLiteral("assistant"), QString(), label);
+    // 气泡不再显示 Skill 名（b12146e），只保留失败/停止等状态标签
+    m_current = createMessage(QStringLiteral("assistant"), QString());
     m_currentText.clear();
-    m_currentGroup = nullptr;
     m_currentFinished = false;
     return m_current;
 }
 
 void ChartWidget::appendUserMessage(const QString &content, const QVariantList &attachments)
 {
-    createMessage(QStringLiteral("user"), content, QString(), attachments);
+    if (!assertGuiThread(__func__))
+        return;
+    MessageWidget *message = createMessage(QStringLiteral("user"), content, QString(), attachments);
+    message->setProperty("copyText", content);
+    // app.js sendMessage：新一轮提问必须落底并恢复自动跟随，即使上一轮用户上滚停留在历史里
+    scrollToEnd(true);
 }
 
 void ChartWidget::appendAssistantMessage(const QString &content, const QString &label,
                                          const QVariantList &attachments)
 {
+    if (!assertGuiThread(__func__))
+        return;
     MessageWidget *message = createMessage(QStringLiteral("assistant"), content, label, attachments);
     // 一次性追加：正文里的结构化块立即渲染成卡片（等价于 createMessage + finishAssistant）
     const StructuredBlocks parsed = structuredBlocks(content);
     message->body()->setText(parsed.visible);
     message->setBodyVisible(message->body()->hasVisibleContent());
-    for (const QVariant &item : parsed.found)
-        renderStructured(item.toMap(), message);
+    message->setCopyText(parsed.visible);
+    QVariantMap ask;
+    for (const QVariant &item : parsed.found) {
+        const QVariantMap data = item.toMap();
+        renderStructured(data, message);
+        const QVariantMap candidate = askPayloadOf(data);
+        if (!candidate.isEmpty())
+            ask = candidate;
+    }
+    if (!ask.isEmpty())
+        m_composer->showChoice(ask);
     scrollToEnd();
 }
 
 void ChartWidget::appendAssistantText(const QString &delta)
 {
+    if (!assertGuiThread(__func__))
+        return;
     MessageWidget *message = ensureAssistant();
     m_currentText += delta;
     message->body()->setText(m_currentText);
     message->setBodyVisible(message->body()->hasVisibleContent());
+    message->setCopyText(m_currentText);
+    message->settleThink();
     scrollToEnd();
 }
 
 void ChartWidget::appendReasoning(const QString &delta)
 {
+    if (!assertGuiThread(__func__))
+        return;
     MessageWidget *message = ensureAssistant();
     message->appendReasoning(delta);
     scrollToEnd();
@@ -578,27 +1045,74 @@ void ChartWidget::appendReasoning(const QString &delta)
 
 void ChartWidget::finishAssistant()
 {
+    if (!assertGuiThread(__func__))
+        return;
+    finishAssistantInternal(false);
+}
+
+void ChartWidget::finishAssistantInternal(bool deferred)
+{
     MessageWidget *message = m_current;
     if (!message || m_currentFinished)
         return;
     m_currentFinished = true;
 
+    message->stopLiveTiming();
+    message->settleProcess();
+
     const StructuredBlocks parsed = structuredBlocks(m_currentText);
     message->body()->setText(parsed.visible);
     message->setBodyVisible(message->body()->hasVisibleContent());
-    for (const QVariant &item : parsed.found)
-        renderStructured(item.toMap(), message);
+    message->setCopyText(parsed.visible);
 
+    // 文本兜底的 options / tool_params 块也算一次待作答询问，取最后一个候选块
+    QVariantMap ask;
+    for (const QVariant &item : parsed.found) {
+        const QVariantMap data = item.toMap();
+        renderStructured(data, message);
+        const QVariantMap candidate = askPayloadOf(data);
+        if (!candidate.isEmpty())
+            ask = candidate;
+    }
+    m_lastTurnAwaiting = !ask.isEmpty();
+
+    // 只有思考过程/工具调用、没有正文时也要留住这一轮
     if (parsed.visible.trimmed().isEmpty() && parsed.found.isEmpty()
-        && !hasToolOrApproval(message)) {
+        && !hasToolItems(message) && !hasProcRows(message)) {
         if (m_current.data() == message)
             m_current = nullptr;
         message->deleteLater();
+        rebuildTurnRail();
+        return;
     }
+
+    // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下
+    if (!deferred && !ask.isEmpty())
+        m_composer->showChoice(ask);
+
+    // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起
+    if (planComplete(m_phasePlanData))
+        m_phaseWrap->setVisible(false);
+
     m_currentText.clear();
-    m_currentGroup = nullptr;
     updateEmptyState();
+    rebuildTurnRail();
+    syncPhaseLift();
     scrollToEnd();
+}
+
+bool ChartWidget::planComplete(const QVariantMap &plan)
+{
+    const QVariantList phases = plan.value(QStringLiteral("phases")).toList();
+    if (phases.isEmpty())
+        return false;
+    static const QStringList doneStatuses{ QStringLiteral("done"), QStringLiteral("succeeded"),
+                                           QStringLiteral("completed"), QStringLiteral("skipped") };
+    for (const QVariant &item : phases) {
+        if (!doneStatuses.contains(item.toMap().value(QStringLiteral("status")).toString()))
+            return false;
+    }
+    return true;
 }
 
 void ChartWidget::renderStructured(const QVariantMap &data, MessageWidget *message)
@@ -609,25 +1123,7 @@ void ChartWidget::renderStructured(const QVariantMap &data, MessageWidget *messa
     if (data.contains(QStringLiteral("phase_plan")))
         setPhasePlan(data.value(QStringLiteral("phase_plan")));
 
-    QVariantMap toolParams = data.value(QStringLiteral("tool_params")).toMap();
-    if (toolParams.isEmpty())
-        toolParams = data.value(QStringLiteral("toolparams")).toMap();
-    const QVariantList options = data.value(QStringLiteral("options")).toList();
-
-    if (!toolParams.isEmpty()) {
-        const QString tool = toolParams.value(QStringLiteral("tool")).toString();
-        auto *card = new ToolParamsCard(toolParams, options, message);
-        connect(card, &ToolParamsCard::decided, this,
-                [this, tool](bool confirmed, const QVariantMap &params, const QString &label) {
-                    emit toolParamsConfirmed(tool, confirmed, params, label);
-                });
-        message->stack()->addWidget(card);
-    } else if (!options.isEmpty()) {
-        auto *card = new OptionsCard(options, message);
-        connect(card, &OptionsCard::optionChosen, this, &ChartWidget::optionChosen);
-        message->stack()->addWidget(card);
-    }
-
+    // tool_params / options 合并到输入框上方的浮层（见 ChoiceOverlay），对话流里不再单独成卡
     if (data.contains(QStringLiteral("workflow"))) {
         const QVariantList steps =
             data.value(QStringLiteral("workflow")).toMap().value(QStringLiteral("steps")).toList();
@@ -638,29 +1134,18 @@ void ChartWidget::renderStructured(const QVariantMap &data, MessageWidget *messa
     }
 }
 
-ToolGroupWidget *ChartWidget::toolGroup(MessageWidget *message)
-{
-    if (!message)
-        return nullptr;
-    if (m_currentGroup && m_currentGroup->parentWidget() == message)
-        return m_currentGroup;
-    QVBoxLayout *stack = message->stack();
-    for (int i = 0; i < stack->count(); ++i)
-        if (auto *group = qobject_cast<ToolGroupWidget *>(stack->itemAt(i)->widget()))
-            return group;
-    auto *group = new ToolGroupWidget(message);
-    stack->addWidget(group);
-    if (m_current.data() == message)
-        m_currentGroup = group;
-    return group;
-}
-
 void ChartWidget::appendToolCall(const QString &callId, const QString &name, const QVariant &args)
 {
-    ToolGroupWidget *group = toolGroup(ensureAssistant());
-    if (!group)
+    if (!assertGuiThread(__func__))
         return;
-    ToolItemWidget *item = group->addToolCall(callId, name, prettyJson(args));
+    MessageWidget *message = ensureAssistant();
+    if (!message)
+        return;
+    message->settleThink();
+    // app.js handleStreamEvent：询问类调用先落定思考，但不渲染工具条目
+    if (name == QLatin1String(kAskUserTool))
+        return;
+    ToolItemWidget *item = message->addToolCall(callId, name, args);
     if (item && !callId.isEmpty())
         m_toolItems.insert(callId, item);
     scrollToEnd();
@@ -669,13 +1154,18 @@ void ChartWidget::appendToolCall(const QString &callId, const QString &name, con
 void ChartWidget::appendToolResult(const QString &callId, const QString &name,
                                    const QString &result)
 {
+    if (!assertGuiThread(__func__))
+        return;
+    // app.js handleStreamEvent：询问类调用的结果同样不落成工具条目
+    if (name == QLatin1String(kAskUserTool))
+        return;
     ToolItemWidget *item = m_toolItems.value(callId, nullptr);
     if (!item) {
         // app.js renderToolResult：调用项不存在时先补一条 running 的调用
-        ToolGroupWidget *group = toolGroup(ensureAssistant());
-        if (!group)
+        MessageWidget *message = ensureAssistant();
+        if (!message)
             return;
-        item = group->addToolCall(callId, name, QStringLiteral("{}"));
+        item = message->addToolCall(callId, name, QVariantMap());
         if (item && !callId.isEmpty())
             m_toolItems.insert(callId, item);
     }
@@ -685,41 +1175,10 @@ void ChartWidget::appendToolResult(const QString &callId, const QString &name,
     scrollToEnd();
 }
 
-void ChartWidget::appendApproval(const QVariantMap &event)
-{
-    MessageWidget *message = ensureAssistant();
-    const QString callId = event.value(QStringLiteral("call_id")).toString();
-    auto *card = new ApprovalCard(event, message);
-    if (!callId.isEmpty())
-        m_approvals.insert(callId, card);
-    // app.js resolve()：POST 成功后才改状态，这里只把决定交给宿主，
-    // 宿主成功后调 resolveApproval（失败时 reEnableApproval）
-    connect(card, &ApprovalCard::decided, this,
-            [this, callId](bool approved, const QVariantMap &args) {
-                emit approvalDecided(callId, approved, args);
-            });
-    connect(card, &ApprovalCard::jsonInvalid, this, [this] {
-        showToast(QStringLiteral("工具参数不是有效 JSON"));
-        emit approvalJsonInvalid();
-    });
-    message->stack()->addWidget(card);
-    scrollToEnd();
-}
-
-void ChartWidget::resolveApproval(const QString &callId, bool approved)
-{
-    if (ApprovalCard *card = m_approvals.value(callId))
-        card->setResolved(approved);
-}
-
-void ChartWidget::reEnableApproval(const QString &callId)
-{
-    if (ApprovalCard *card = m_approvals.value(callId))
-        card->reEnable();
-}
-
 void ChartWidget::appendWorkflowEvent(const QVariantMap &event)
 {
+    if (!assertGuiThread(__func__))
+        return;
     const QString type = event.value(QStringLiteral("type")).toString();
     if (!m_workflow || type == QLatin1String("workflow_started")) {
         MessageWidget *message =
@@ -750,19 +1209,56 @@ void ChartWidget::appendWorkflowEvent(const QVariantMap &event)
 
 void ChartWidget::setTokenUsage(qint64 total, qint64 input, qint64 output, bool estimated)
 {
-    if (m_current)
-        m_current->setTokenUsage(total, input, output, estimated);
+    QVariantMap usage;
+    usage.insert(QStringLiteral("total"), total);
+    usage.insert(QStringLiteral("input"), input);
+    usage.insert(QStringLiteral("output"), output);
+    usage.insert(QStringLiteral("estimated"), estimated);
+    setTokenUsageDetail(usage);
+}
+
+void ChartWidget::setTokenUsageDetail(const QVariantMap &usage)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    if (!m_current)
+        return;
+    QVariantMap detail = usage;
+    // 宿主没给 model_label 时按 usage.model 自动映射供应商名称（用量弹层的「提供方 / 模型」）
+    if (!detail.contains(QStringLiteral("model_label"))) {
+        const QString label =
+            usageModelLabel(m_models, detail.value(QStringLiteral("model")).toString());
+        if (!label.isEmpty())
+            detail.insert(QStringLiteral("model_label"), label);
+    }
+    m_current->setUsage(detail);
+}
+
+void ChartWidget::setTurnTiming(const QVariantMap &timing)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    if (!m_current)
+        return;
+    m_current->setTiming(timing);
+}
+
+void ChartWidget::startLiveTiming(qint64 startMs)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    if (!m_current)
+        return;
+    m_current->startLiveTiming(startMs);
 }
 
 void ChartWidget::appendToolResultMessage(const QString &content)
 {
-    // 工具结果找不到对应调用时的退化形态（renderHistoryMessage 的 tool 分支）
+    // 工具结果找不到对应调用时的退化形态
     MessageWidget *message =
         createMessage(QStringLiteral("tool"), QString(), QStringLiteral("TOOL RESULT"));
     message->setBodyVisible(false);
-    auto *group = new ToolGroupWidget(message);
-    message->stack()->addWidget(group);
-    if (ToolItemWidget *item = group->addToolCall(QString(), QString(), QStringLiteral("{}")))
+    if (ToolItemWidget *item = message->addToolCall(QString(), QString(), QVariantMap()))
         applyToolResult(item, content);
     scrollToEnd();
 }
@@ -770,22 +1266,22 @@ void ChartWidget::appendToolResultMessage(const QString &content)
 void ChartWidget::appendFailure(const QString &text, bool retryable, const QString &retryMessage,
                                 const QString &retryDisplay, const QVariantList &retryAttachments)
 {
+    if (!assertGuiThread(__func__))
+        return;
     MessageWidget *notice = createMessage(QStringLiteral("assistant"), text,
                                           retryable ? QStringLiteral("RETRY")
                                                     : QStringLiteral("ERROR"));
-    QFrame *bubble = notice->findChild<QFrame *>(QStringLiteral("bubble"));
-    if (bubble) {
-        bubble->setProperty("error", true); // QFrame#bubble[error="true"] { border-color: red }
-        restyle(bubble);
-    }
-    if (!retryable || !bubble)
+    notice->setCardError(true); // app.js renderFailure：错误卡整圈红边
+    if (!retryable)
         return;
 
-    auto *button = new QPushButton(QStringLiteral("重发这条消息"), bubble);
+    auto *button = new QPushButton(QStringLiteral("重发这条消息"), notice);
     setClass(button, QStringLiteral("actionButton"));
     button->setProperty("retry", true);
     button->setCursor(Qt::PointingHandCursor);
-    if (auto *bubbleLayout = qobject_cast<QVBoxLayout *>(bubble->layout())) {
+    QVBoxLayout *bubbleLayout =
+        qobject_cast<QVBoxLayout *>(notice->findChild<QFrame *>(QStringLiteral("bubble"))->layout());
+    if (bubbleLayout) {
         bubbleLayout->addSpacing(10); // button.style.marginTop = "10px"
         bubbleLayout->addWidget(button);
     }
@@ -800,25 +1296,67 @@ void ChartWidget::appendFailure(const QString &text, bool retryable, const QStri
             });
 }
 
+void ChartWidget::markCurrentStopped()
+{
+    if (m_current)
+        m_current->markStopped();
+}
+
 void ChartWidget::setPhasePlan(const QVariant &value)
 {
+    if (!assertGuiThread(__func__))
+        return;
     QVariantMap phase = extractPhase(value);
     if (phase.isEmpty())
         phase = value.toMap(); // app.js renderPhase: extractPhase(value) || value
     const QVariantList phases = phase.value(QStringLiteral("phases")).toList();
     if (phases.isEmpty())
         return;
+    m_phasePlanData = phase;
     m_phaseWrap->setVisible(true);
     m_phasePanel->setPlan(phase);
+    syncPhaseLift();
 }
 
 void ChartWidget::showToast(const QString &text)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_toast->showMessage(text);
+}
+
+void ChartWidget::syncPhaseLift()
+{
+    // 选择浮层浮在输入框上方，会盖住紧贴其上的计划窗口：浮层出现/变高时把计划窗口顶开
+    if (!m_phaseWrap)
+        return;
+    auto *layout = qobject_cast<QVBoxLayout *>(m_phaseWrap->layout());
+    if (!layout)
+        return;
+    const int lift = m_composer->choiceOpen()
+                         ? qMax(0, m_composer->choiceHeight() + 8 + 12 - m_composer->height())
+                         : 0;
+    layout->setContentsMargins(9, 0, 9, 8 + lift);
+}
+
+void ChartWidget::setTrajectoryEvents(const QVariantList &events)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_trajView->setEvents(events);
+}
+
+void ChartWidget::appendTrajectoryEvents(const QVariantList &events)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_trajView->appendEvents(events);
 }
 
 void ChartWidget::clearMessages()
 {
+    if (!assertGuiThread(__func__))
+        return;
     for (int i = m_messageLayout->count() - 1; i >= 0; --i) {
         QWidget *w = m_messageLayout->itemAt(i)->widget();
         if (!w || w == m_emptyState)
@@ -828,46 +1366,56 @@ void ChartWidget::clearMessages()
     }
     m_current = nullptr;
     m_currentText.clear();
-    m_currentGroup = nullptr;
     m_currentFinished = true;
     m_toolItems.clear();
-    m_approvals.clear();
     m_workflow = nullptr;
     m_workflowMessage = nullptr;
     m_workflowSteps.clear();
+    m_lastTurnAwaiting = false;
+    m_phasePlanData.clear();
     m_phaseWrap->setVisible(false); // loadSession: el.phasePanel.classList.add("hidden")
+    m_composer->closeChoice();
     updateEmptyState();
+    rebuildTurnRail();
 }
 
 void ChartWidget::setHistory(const QVariantList &messages)
 {
+    if (!assertGuiThread(__func__))
+        return;
     clearMessages();
 
     // 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
     QPointer<MessageWidget> turn;
     QString turnText;
-    QVariant turnUsage;
+    QString turnTs;
+    QVariantMap turnUsage;
+    QVariantMap turnTiming;
+    QVariantMap lastAsk;
 
     auto finishTurn = [&]() {
         if (turn) {
             m_current = turn.data();
             m_currentText = turnText;
             m_currentFinished = false;
-            finishAssistant();
-            if (turn && turnUsage.isValid()) {
-                const QVariantMap usage = turnUsage.toMap();
-                turn->setTokenUsage(usage.value(QStringLiteral("total")).toLongLong(),
-                                    usage.value(QStringLiteral("input")).toLongLong(),
-                                    usage.value(QStringLiteral("output")).toLongLong(),
-                                    usage.value(QStringLiteral("estimated")).toBool());
+            finishAssistantInternal(true);
+            if (turn) {
+                if (!turnUsage.isEmpty())
+                    turn->setUsage(turnUsage);
+                turn->setTimeStamp(turnTs);
+                if (!turnTiming.isEmpty())
+                    turn->setTiming(turnTiming);
             }
+            if (turn && turn->property("awaiting").toBool())
+                lastAsk = turn->property("pendingAsk").toMap();
         }
         turn = nullptr;
         turnText.clear();
-        turnUsage = QVariant();
+        turnTs.clear();
+        turnUsage.clear();
+        turnTiming.clear();
         m_current = nullptr;
         m_currentText.clear();
-        m_currentGroup = nullptr;
         m_currentFinished = true;
     };
 
@@ -877,14 +1425,13 @@ void ChartWidget::setHistory(const QVariantList &messages)
 
         if (role == QLatin1String("assistant")) {
             if (!turn) {
-                turn = createMessage(QStringLiteral("assistant"), QString(), QString());
+                turn = createMessage(QStringLiteral("assistant"), QString());
                 m_current = turn.data();
                 m_currentText.clear();
-                m_currentGroup = nullptr;
                 m_currentFinished = false;
             }
-            // 带工具调用的消息不存 active_skills，Skill 标签要等本轮后续消息补上
-            turn->setLabel(joinSkills(message.value(QStringLiteral("active_skills")).toList()));
+            if (message.value(QStringLiteral("interrupted")).toBool())
+                turn->markStopped();
             const QString content = message.value(QStringLiteral("content")).toString();
             if (!content.isEmpty()) {
                 if (!turnText.isEmpty())
@@ -892,6 +1439,7 @@ void ChartWidget::setHistory(const QVariantList &messages)
                 turnText += content;
                 turn->body()->setText(turnText);
                 turn->setBodyVisible(turn->body()->hasVisibleContent());
+                turn->setCopyText(turnText);
             }
             const QString reasoning = message.value(QStringLiteral("reasoning_content")).toString();
             if (!reasoning.isEmpty())
@@ -901,26 +1449,44 @@ void ChartWidget::setHistory(const QVariantList &messages)
                 const QVariantMap call = callVar.toMap();
                 const QVariantMap function = call.value(QStringLiteral("function")).toMap();
                 const QString callId = call.value(QStringLiteral("id")).toString();
+                const QString name = function.value(QStringLiteral("name")).toString();
                 const QString raw = function.value(QStringLiteral("arguments")).toString();
                 const QJsonDocument doc =
                     QJsonDocument::fromJson(raw.isEmpty() ? QByteArray("{}") : raw.toUtf8());
-                const QVariant args =
-                    doc.isObject() ? QVariant(doc.object().toVariantMap()) : QVariant(QVariantMap());
-                ToolGroupWidget *group = toolGroup(turn.data());
-                if (!group)
+                const QVariant args = doc.isObject() ? QVariant(doc.object().toVariantMap())
+                                                     : QVariant(QVariantMap());
+                // 询问类调用不落成工具条目：末尾待作答时由输入框上方的浮层弹出
+                if (name == QLatin1String(kAskUserTool)) {
+                    turn->setProperty("awaiting", true);
+                    turn->setProperty("pendingAsk", args);
                     continue;
-                ToolItemWidget *item =
-                    group->addToolCall(callId, function.value(QStringLiteral("name")).toString(),
-                                       prettyJson(args));
+                }
+                ToolItemWidget *item = turn->addToolCall(callId, name, args);
                 if (item && !callId.isEmpty())
                     m_toolItems.insert(callId, item);
             }
             if (message.contains(QStringLiteral("usage")))
-                turnUsage = message.value(QStringLiteral("usage"));
+                turnUsage = message.value(QStringLiteral("usage")).toMap();
+            const QString ts = message.value(QStringLiteral("ts")).toString();
+            if (!ts.isEmpty())
+                turnTs = ts;
+            // 本轮可能由多条 assistant 消息合并，取最后一条的耗时字段
+            if (message.contains(QStringLiteral("elapsed_ms")))
+                turnTiming.insert(QStringLiteral("elapsed"),
+                                  message.value(QStringLiteral("elapsed_ms")));
+            if (message.contains(QStringLiteral("think_ms")))
+                turnTiming.insert(QStringLiteral("think"), message.value(QStringLiteral("think_ms")));
+            if (message.contains(QStringLiteral("ttft_ms")))
+                turnTiming.insert(QStringLiteral("ttft"), message.value(QStringLiteral("ttft_ms")));
+            if (message.contains(QStringLiteral("tps")))
+                turnTiming.insert(QStringLiteral("tps"), message.value(QStringLiteral("tps")));
             continue;
         }
 
         if (role == QLatin1String("tool")) {
+            if (message.value(QStringLiteral("tool_name")).toString()
+                == QLatin1String(kAskUserTool))
+                continue;
             const QString callId = message.value(QStringLiteral("tool_call_id")).toString();
             ToolItemWidget *item = m_toolItems.value(callId, nullptr);
             MessageWidget *parent = item ? ownerMessage(item) : nullptr;
@@ -929,11 +1495,9 @@ void ChartWidget::setHistory(const QVariantList &messages)
                 parent = createMessage(QStringLiteral("tool"), QString(),
                                        QStringLiteral("TOOL RESULT"));
                 parent->setBodyVisible(false);
-                auto *group = new ToolGroupWidget(parent);
-                parent->stack()->addWidget(group);
-                item = group->addToolCall(callId,
-                                          message.value(QStringLiteral("tool_name")).toString(),
-                                          QStringLiteral("{}"));
+                item = parent->addToolCall(callId,
+                                           message.value(QStringLiteral("tool_name")).toString(),
+                                           QVariantMap());
                 if (item && !callId.isEmpty())
                     m_toolItems.insert(callId, item);
             }
@@ -948,8 +1512,10 @@ void ChartWidget::setHistory(const QVariantList &messages)
             QString shown = message.value(QStringLiteral("display_content")).toString();
             if (shown.isEmpty())
                 shown = message.value(QStringLiteral("content")).toString();
-            createMessage(QStringLiteral("user"), shown, QString(),
-                          message.value(QStringLiteral("attachments")).toList());
+            MessageWidget *item = createMessage(QStringLiteral("user"), shown, QString(),
+                                               message.value(QStringLiteral("attachments")).toList());
+            item->setProperty("copyText", shown);
+            item->setTimeStamp(message.value(QStringLiteral("ts")).toString());
         } else if (role == QLatin1String("workflow")) {
             QVariantMap started;
             started.insert(QStringLiteral("type"), QStringLiteral("workflow_started"));
@@ -970,39 +1536,62 @@ void ChartWidget::setHistory(const QVariantList &messages)
         }
     }
     finishTurn();
-    scrollToEnd();
+
+    // 历史最后一轮停在未作答的询问上才弹浮层（供宿主恢复「待确认」徽标）
+    m_lastTurnAwaiting = !lastAsk.isEmpty();
+    if (m_lastTurnAwaiting)
+        m_composer->showChoice(lastAsk);
+    scrollToEnd(true);
+    rebuildTurnRail();
 }
 
 // ------------------------------------------------------------ 设置中心
 
 void ChartWidget::setSettingsDraft(const QVariantMap &config, const QVariant &revision)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_settings->loadConfig(config, revision);
 }
 void ChartWidget::setDiscoveredModels(const QString &providerId, const QVariantList &models)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_settings->setDiscoveredModels(providerId, models);
 }
 void ChartWidget::setProviderBusy(bool testing, bool reading)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_settings->setProviderBusy(testing, reading);
 }
 void ChartWidget::setSettingsSkills(const QVariantList &skills, bool loading, const QString &error)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_settings->setSkills(skills, loading, error);
 }
 void ChartWidget::setMcpTools(const QVariantList &tools, bool connected, bool loading,
                               const QString &error)
 {
+    if (!assertGuiThread(__func__))
+        return;
     m_settings->setMcpTools(tools, connected, loading, error);
 }
-void ChartWidget::setSettingsStatus(const QString &text) { m_settings->setStatus(text); }
+void ChartWidget::setSettingsStatus(const QString &text)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setStatus(text);
+}
 
 void ChartWidget::openSettings(const QString &tab)
 {
     if (!tab.isEmpty())
         m_settings->switchTab(tab);
     m_settings->show();
+    // show() 之后补：QSS 在展示时才生效，字距必须在这之后设才不会被样式覆盖
+    applyDeferredStyleDetails(m_settings);
     m_settings->raise();
     m_settings->activateWindow();
 }
@@ -1086,6 +1675,10 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
         updateTitleElide();
         return false;
     }
+    if (watched == m_composer && event->type() == QEvent::Resize) {
+        layoutOverlays();
+        return false;
+    }
 
     auto *target = qobject_cast<QWidget *>(watched);
     switch (event->type()) {
@@ -1097,19 +1690,47 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
             toggleSessionPanel();
             return true; // 拦住，避免事件沿 parentWidget() 链再触发一次
         }
+        if (isSelfOrChildOf(target, m_themeTrigger)) {
+            m_themePopup->setCurrent(gs::themeId());
+            m_themePopup->openBelow(m_themeTrigger);
+            return true;
+        }
+        // 展开/收起过程行或工具项会把内容顶高：下一帧重判是否仍贴底（webui 同），
+        // 免得紧接着到来的流式分片把用户刚展开的位置拽走
+        if (hasClassOrAncestor(target, "procRowHead")
+            || hasClassOrAncestor(target, "toolItemSummary")) {
+            QTimer::singleShot(0, this, [this] { m_followBottom = atBottom(); });
+        }
         break;
     }
+    case QEvent::Polish:
+        // qApp 过滤器会收到全应用的事件：只处理自己的后代，
+        // 否则会给宿主控件（恰好同名 class）也套上字距 / 放开焦点
+        if (target && isSelfOrChildOf(target, this)) {
+            applyLetterSpacing(target);
+            applyAccessibility(target);
+        }
+        break;
     case QEvent::MouseButtonPress:
         if (m_sessionPanel->isOpen() && target
             && !isSelfOrChildOf(target, m_sessionTrigger)
-            && !isSelfOrChildOf(target, m_sessionPanel))
-            closeSessionPanel(); // 点面板外关闭，但不拦截事件本身
+            && !isSelfOrChildOf(target, m_sessionPanel)
+            && target->window() == window()) // 别的窗口的点击不算「点面板外」
+            closeSessionPanel();             // 点面板外关闭，但不拦截事件本身
         break;
     case QEvent::KeyPress:
-        if (m_sessionPanel->isOpen()
-            && static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape) {
-            closeSessionPanel();
-            return true;
+        // 只处理发生在自己身上的 Esc：否则会把宿主窗口/宿主对话框的 Esc 一起吞掉
+        if (static_cast<QKeyEvent *>(event)->key() == Qt::Key_Escape && target
+            && isSelfOrChildOf(target, this) && !(m_settings && m_settings->isVisible())) {
+            if (m_sessionPanel->isOpen()) {
+                closeSessionPanel();
+                return true;
+            }
+            // Esc 收起询问浮层，露出被盖住的输入框；审批卡要等后端回执，不放行
+            if (m_composer->choiceOpen() && m_composer->approvalCallId().isEmpty()) {
+                closeChoice();
+                return true;
+            }
         }
         break;
     default:
@@ -1171,11 +1792,13 @@ void ChartWidget::applyZoom()
         if (!bold.isValid())
             continue;
         const QString descPart = label->property("paramDesc").toString();
-        QString html = QStringLiteral("<span style=\"color:#d2e0e6;font-size:%1px;font-weight:600;\">%2</span>")
+        QString html = QStringLiteral("<span style=\"color:%1;font-size:%2px;font-weight:600;\">%3</span>")
+                           .arg(cssColor(gs::palette().text))
                            .arg(scaledPx(12))
                            .arg(escapeHtml(bold.toString()));
         if (!descPart.isEmpty())
-            html += QStringLiteral("<br><span style=\"color:#9fb2bd;font-size:%1px;\">%2</span>")
+            html += QStringLiteral("<br><span style=\"color:%1;font-size:%2px;\">%3</span>")
+                        .arg(cssColor(gs::palette().muted))
                         .arg(scaledPx(11))
                         .arg(escapeHtml(descPart));
         label->setText(html);
@@ -1201,7 +1824,7 @@ void ChartWidget::applyZoom()
     for (ComboTrigger *combo : combos)
         combo->refreshZoom();
 
-    // 5) 自绘控件（ConnectionButton / 阶段项）paint 时取 scaledPx，重绘即可
+    // 5) 自绘控件（连接状态点、阶段项、导航轨…）paint 时取 scaledPx，重绘即可
     const QList<QWidget *> all = findChildren<QWidget *>();
     for (QWidget *w : all)
         w->update();
@@ -1217,5 +1840,6 @@ extern "C" QTCHARTWIDGET_EXPORT QWidget *qtchartwidget_create()
 
 extern "C" QTCHARTWIDGET_EXPORT const char *qtchartwidget_version()
 {
-    return "1.0.0";
+    // 2.0.0：公开头有破坏性改动（见 CHANGELOG.md），改这里时同步改 CHANGELOG 与 README
+    return "2.0.0";
 }

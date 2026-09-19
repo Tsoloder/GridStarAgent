@@ -257,20 +257,9 @@ int main(int argc, char *argv[])
     });
 
     // ---- 结构化卡片交互 ----
-    QObject::connect(chart, &ChartWidget::toolParamsConfirmed, chart,
-                     [chart](const QString &tool, bool confirmed, const QVariantMap &params,
-                             const QString &label) {
-                         Q_UNUSED(label);
-                         if (confirmed) {
-                             // 参数确认 → 宿主带 params 调用工具
-                             const QByteArray json = QJsonDocument(
-                                 QJsonObject::fromVariantMap(params)).toJson(QJsonDocument::Compact);
-                             chart->appendAssistantMessage(QStringLiteral("已确认 **%1** 参数：%2")
-                                                               .arg(tool, QString::fromUtf8(json)));
-                         } else {
-                             chart->appendAssistantMessage(QStringLiteral("已取消 **%1**。").arg(tool));
-                         }
-                     });
+    // 说明：工具参数确认没有独立信号，库会按 webui 口径把参数与选择打包成
+    // <structured_interaction>{...}</structured_interaction> 作为一轮消息从 sendMessage 发出，
+    // 宿主的 sendMessage 处理器按普通发消息流程处理即可（后端识别该标记后回填参数）。
     QObject::connect(chart, &ChartWidget::approvalDecided, chart,
                      [chart](const QString &callId, bool approved, const QVariantMap &args) {
                          Q_UNUSED(args);
@@ -281,9 +270,6 @@ int main(int argc, char *argv[])
                                                        : QStringLiteral("已拒绝该操作"));
                          });
                      });
-    QObject::connect(chart, &ChartWidget::approvalJsonInvalid, chart, [chart] {
-        chart->showToast(QStringLiteral("审批参数不是合法 JSON"));
-    });
     QObject::connect(chart, &ChartWidget::workflowRunRequested, chart,
                      [chart](const QVariantList &steps) {
                          chart->setBusy(true);

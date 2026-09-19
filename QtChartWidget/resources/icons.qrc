@@ -4,7 +4,7 @@
         <file alias="mic.svg">icons/mic.svg</file>
         <file alias="settings.svg">icons/settings.svg</file>
         <file alias="arrow-up.svg">icons/arrow-up.svg</file>
-        <file alias="square.svg">icons/square.svg</file>
+        <file alias="stop.svg">icons/stop.svg</file>
         <file alias="plus.svg">icons/plus.svg</file>
         <file alias="chevron-down.svg">icons/chevron-down.svg</file>
         <file alias="chevron-up.svg">icons/chevron-up.svg</file>
@@ -17,5 +17,9 @@
         <file alias="check.svg">icons/check.svg</file>
         <file alias="circle.svg">icons/circle.svg</file>
         <file alias="dot.svg">icons/dot.svg</file>
+        <file alias="copy.svg">icons/copy.svg</file>
+        <file alias="clock.svg">icons/clock.svg</file>
+        <file alias="database.svg">icons/database.svg</file>
+        <file alias="Logo.ico">Logo.ico</file>
     </qresource>
 </RCC>

@@ -8,7 +8,14 @@
 #include <QPixmap>
 #include <QPushButton>
 #include <QStyle>
+#include <QVariant>
 #include <QWidget>
+
+QT_BEGIN_NAMESPACE
+class QPropertyAnimation;
+class QResizeEvent;
+class QTimer;
+QT_END_NAMESPACE
 
 namespace gs {
 
@@ -128,9 +135,12 @@ private:
 class ProgressLine : public QWidget
 {
     Q_OBJECT
+    Q_PROPERTY(int animatedPercent READ percent WRITE setAnimatedPercent)
 public:
     explicit ProgressLine(QWidget *parent = nullptr);
     void setPercent(int percent);
+    // 带过渡地推进（webui .phase-progress { transition: width .45s ease }）
+    void animateTo(int percent);
     int percent() const { return m_percent; }
     QSize sizeHint() const override { return QSize(10, 2); }
     QSize minimumSizeHint() const override { return QSize(10, 2); }
@@ -139,16 +149,41 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    void setAnimatedPercent(int percent);
+
     int m_percent = 0;
+    QPropertyAnimation *m_animation = nullptr;
 };
 
-// 附件芯片（.attach-chip）
+// 单行省略标签：QLabel 没有 text-overflow，长文本在窄屏下只会硬切。
+// sizeHint 按全文宽度给（布局知道"想多宽"），minimumSizeHint 为 0（可压到任意窄）。
+class ElidedLabel : public QLabel
+{
+    Q_OBJECT
+public:
+    explicit ElidedLabel(QWidget *parent = nullptr);
+    // 原文：省略只作用于显示，toolTip 保留完整内容
+    void setFullText(const QString &text);
+    QString fullText() const { return m_full; }
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
+private:
+    void updateElide();
+    QString m_full;
+};
+
+// 附件芯片（.attach-chip）：图片给 22×22 缩略图，其余给扩展名标签；
+// 上传中大小位显示「上传中…」（与 webui renderAttachments 同构）
 class AttachChip : public QFrame
 {
     Q_OBJECT
 public:
-    AttachChip(const QString &name, qint64 bytes, const QString &ext, bool uploading,
-               QWidget *parent = nullptr);
+    // item 与 attachments 的条目同构：{name, size, ext, uploading, kind, path[, url]}
+    explicit AttachChip(const QVariantMap &item, QWidget *parent = nullptr);
     void setUploading(bool uploading);
 
 signals:
@@ -157,6 +192,7 @@ signals:
 private:
     QLabel *m_name = nullptr;
     QLabel *m_size = nullptr;
+    qint64 m_bytes = 0;
 };
 
 // SVG 图标按钮：图标经 iconPixmap 着色后设置，hover/禁用态自动换色。
@@ -182,6 +218,96 @@ private:
     QColor m_hover;
     QColor m_disabled;
     bool m_hovering = false;
+};
+
+// 呼吸圆点（.run-dot / 阶段项 active 指示）：运行态下透明度往复动画
+class PulseDot : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit PulseDot(QWidget *parent = nullptr);
+    void setColor(const QColor &color);
+    void setActive(bool active);
+    bool isActive() const { return m_active; }
+    QSize sizeHint() const override { return QSize(6, 6); }
+    QSize minimumSizeHint() const override { return QSize(6, 6); }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    QColor m_color;
+    bool m_active = false;
+    qreal m_phase = 0.0;
+    QTimer *m_timer = nullptr;
+};
+
+// 皮肤圆形色片（.theme-swatch / .theme-option .sw）：135° 双色渐变
+class ThemeSwatch : public QWidget
+{
+    Q_OBJECT
+public:
+    ThemeSwatch(const QString &themeId, int sizePx = 12, bool withBorder = true,
+                QWidget *parent = nullptr);
+    QSize sizeHint() const override { return QSize(m_size, m_size); }
+    QSize minimumSizeHint() const override { return QSize(m_size, m_size); }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    QString m_themeId;
+    int m_size = 12;
+    bool m_border = true;
+};
+
+// 轮次导航轨上的一个点（.turn-rail-dot）：12px 命中区 + 5px 圆点，悬浮/当前态提亮放大
+class TurnRailDot : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit TurnRailDot(int turn, QWidget *parent = nullptr);
+    int turn() const { return m_turn; }
+    void setActive(bool active);
+    bool isActive() const { return m_active; }
+    QSize sizeHint() const override { return QSize(12, 12); }
+    QSize minimumSizeHint() const override { return QSize(12, 12); }
+
+signals:
+    void activated(int turn);
+    void hovered(int turn);
+    void unhovered();
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void enterEvent(QEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+
+private:
+    int m_turn = 0;
+    bool m_active = false;
+    bool m_hover = false;
+};
+
+// 轨迹行内耗时条（.traj-row-bar）：带边框的胶囊轨道 + 按比例填充
+class MiniBar : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit MiniBar(QWidget *parent = nullptr);
+    // ratio < 0 表示该记录无耗时：只画空轨道，不臆造时长
+    void setRatio(qreal ratio);
+    void setFill(const QColor &color);
+    QSize sizeHint() const override { return QSize(90, 7); }
+    QSize minimumSizeHint() const override { return QSize(40, 7); }
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    qreal m_ratio = -1.0;
+    QColor m_fill;
 };
 
 // 工具函数

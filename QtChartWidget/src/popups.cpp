@@ -5,6 +5,7 @@
 
 #include <QApplication>
 #include <QDesktopWidget>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -402,8 +403,7 @@ SessionPanel::SessionPanel(QWidget *parent)
     close->setFixedSize(30, 30);
     close->setCursor(Qt::PointingHandCursor);
     close->setToolTip(QStringLiteral("关闭"));
-    close->setIconColors(QColor(QStringLiteral("#d7e2e8")),
-                         QColor(QStringLiteral("#50badf")));
+    close->setIconColors(gs::palette().text, gs::palette().cyan);
     close->setIconName(QStringLiteral("x"), 14);
     headLayout->addWidget(m_search, 1);
     headLayout->addWidget(close);
@@ -477,6 +477,9 @@ void SessionPanel::render()
 
         // .session-select：标题 + 更新时间，整块可点
         auto *select = new QWidget(row);
+        setClass(select, QStringLiteral("sessionSelect"));
+        // webui 的 .session-select 带 tabindex="0"：整块可点也要能 Tab 到 + 回车触发
+        select->setFocusPolicy(Qt::TabFocus);
         select->setCursor(Qt::PointingHandCursor);
         auto *selectLayout = new QVBoxLayout(select);
         selectLayout->setContentsMargins(7, 9, 7, 9);
@@ -491,7 +494,33 @@ void SessionPanel::render()
         stamp = stamp.left(16).replace(QLatin1Char('T'), QLatin1Char(' '));
         QLabel *meta = makeLabel(QStringLiteral("sessionMeta"), stamp, select);
         meta->setTextInteractionFlags(Qt::NoTextInteraction);
-        selectLayout->addWidget(titleLabel);
+
+        // 状态徽标（.session-badge）：前端实时状态优先，刷新后靠服务端 active/waiting 兜底
+        QString status = session.value(QStringLiteral("status")).toString();
+        if (status.isEmpty()) {
+            if (session.value(QStringLiteral("waiting")).toBool())
+                status = QStringLiteral("waiting");
+            else if (session.value(QStringLiteral("active")).toBool())
+                status = QStringLiteral("running");
+        }
+        static const QHash<QString, QString> statusText{
+            { QStringLiteral("running"), QStringLiteral("进行中") },
+            { QStringLiteral("done"), QStringLiteral("已完成") },
+            { QStringLiteral("stopped"), QStringLiteral("已停止") },
+            { QStringLiteral("error"), QStringLiteral("异常") },
+            { QStringLiteral("waiting"), QStringLiteral("待确认") },
+        };
+        auto *titleRow = new QWidget(select);
+        auto *titleLayout = new QHBoxLayout(titleRow);
+        titleLayout->setContentsMargins(0, 0, 0, 0);
+        titleLayout->setSpacing(6);
+        QLabel *badge = makeLabel(QStringLiteral("sessionBadge"), statusText.value(status), titleRow);
+        badge->setProperty("status", status);
+        badge->setTextInteractionFlags(Qt::NoTextInteraction);
+        badge->setVisible(!status.isEmpty() && statusText.contains(status));
+        titleLayout->addWidget(titleLabel, 1);
+        titleLayout->addWidget(badge, 0);
+        selectLayout->addWidget(titleRow);
         selectLayout->addWidget(meta);
 
         auto *actions = new QWidget(row);
@@ -511,9 +540,9 @@ void SessionPanel::render()
             button->setToolTip(QString::fromUtf8(def.tip));
             button->setCursor(Qt::PointingHandCursor);
             button->setFixedSize(28, 28);
-            button->setIconColors(QColor(QStringLiteral("#8499a6")),
-                                  def.danger ? QColor(QStringLiteral("#e36c6c"))
-                                             : QColor(QStringLiteral("#50badf")));
+            button->setIconColors(gs::palette().muted,
+                                  def.danger ? gs::palette().red
+                                             : gs::palette().cyan);
             button->setIconName(QString::fromUtf8(def.icon), 13);
             actionsLayout->addWidget(button);
             buttons.append(button);
@@ -540,6 +569,16 @@ bool SessionPanel::eventFilter(QObject *watched, QEvent *event)
     if (event->type() == QEvent::MouseButtonRelease) {
         auto *mouse = static_cast<QMouseEvent *>(event);
         if (mouse->button() == Qt::LeftButton) {
+            const QString id = watched->property("sessionId").toString();
+            if (!id.isEmpty()) {
+                emit sessionSelected(id);
+                return true;
+            }
+        }
+    } else if (event->type() == QEvent::KeyPress) {
+        // 键盘等价于点击（原生 button 的行为）：仅 .session-select 可聚焦
+        const int key = static_cast<QKeyEvent *>(event)->key();
+        if (key == Qt::Key_Return || key == Qt::Key_Enter || key == Qt::Key_Space) {
             const QString id = watched->property("sessionId").toString();
             if (!id.isEmpty()) {
                 emit sessionSelected(id);
@@ -574,6 +613,69 @@ void SessionPanel::layoutIn(const QSize &host)
     setGeometry(areaFor(host));
 }
 
+// ------------------------------------------------------- ThemeListPopup
+
+ThemeListPopup::ThemeListPopup(QWidget *parent)
+    : QFrame(parent)
+{
+    setObjectName(QStringLiteral("themeListbox"));
+    setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_StyledBackground, true);
+    setFixedWidth(132);
+
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(5, 5, 5, 5);
+    layout->setSpacing(0);
+
+    for (const QString &id : themeIds()) {
+        auto *button = new QPushButton(this);
+        setClass(button, QStringLiteral("themeOption"));
+        button->setFixedHeight(30);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::TabFocus);
+        auto *bl = new QHBoxLayout(button);
+        bl->setContentsMargins(8, 0, 8, 0);
+        bl->setSpacing(8);
+        bl->addWidget(new ThemeSwatch(id, 14, true, button), 0);
+        QLabel *name = makeLabel(QStringLiteral("themeOptionText"), themeName(id), button);
+        name->setTextInteractionFlags(Qt::NoTextInteraction);
+        bl->addWidget(name, 1);
+        connect(button, &QPushButton::clicked, this, [this, id] {
+            hide();
+            emit themeChosen(id);
+        });
+        layout->addWidget(button);
+        m_entries.append({ id, button });
+    }
+}
+
+void ThemeListPopup::setCurrent(const QString &id)
+{
+    for (const Entry &entry : qAsConst(m_entries)) {
+        const bool active = entry.id == id;
+        entry.button->setProperty("active", active);
+        restyle(entry.button);
+    }
+}
+
+void ThemeListPopup::openBelow(QWidget *anchor)
+{
+    if (!anchor)
+        return;
+    adjustSize();
+    const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height() + 4));
+    int x = below.x() + anchor->width() - width();
+    int y = below.y();
+    if (QWidget *screenWidget = anchor->window()) {
+        const QRect host = screenWidget->geometry();
+        x = qBound(host.left() + 6, x, host.right() - width() - 6);
+        y = qMin(y, host.bottom() - height() - 6);
+    }
+    move(x, y);
+    show();
+    raise();
+}
+
 // ------------------------------------------------------------ Toast
 
 Toast::Toast(QWidget *parent)
@@ -595,17 +697,18 @@ void Toast::showMessage(const QString &text)
 {
     setText(text);
     if (parentWidget())
-        layoutIn(parentWidget()->size());
+        layoutIn(parentWidget()->size(), m_bottomInset);
     show();
     raise();
     m_timer->start();
 }
 
-void Toast::layoutIn(const QSize &host)
+void Toast::layoutIn(const QSize &host, int bottomInset)
 {
+    m_bottomInset = bottomInset;
     const int width = qMax(0, host.width() - 20);
     const int height = heightForWidth(width);
-    setGeometry(10, qMax(0, host.height() - 125 - height), width, height);
+    setGeometry(10, qMax(0, host.height() - bottomInset - height), width, height);
 }
 
 // ------------------------------------------------------------ DropOverlay

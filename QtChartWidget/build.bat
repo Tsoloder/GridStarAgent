@@ -23,7 +23,14 @@ pushd "%ROOT%build\example"
 "%QTDIR%\bin\qmake.exe" "%ROOT%examples\examples.pro" -spec win32-msvc "CONFIG+=release"
 nmake
 popd
+echo ==== build tests ====
+if not exist "%ROOT%build\tests" mkdir "%ROOT%build\tests"
+pushd "%ROOT%build\tests"
+"%QTDIR%\bin\qmake.exe" "%ROOT%tests\tests.pro" -spec win32-msvc "CONFIG+=release"
+nmake
+popd
 echo ==== output dir ====
 dir /b "%ROOT%bin"
 if /i "%~1"=="shot" "%ROOT%bin\demo.exe" --shot "%ROOT%shot.png"
+if /i "%~1"=="test" "%ROOT%bin\qtchartwidget_tests.exe"
 endlocal
