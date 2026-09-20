@@ -13,6 +13,7 @@ from tools import generation
 from tools import boundary
 from tools import quality
 from tools import advanced
+from tools import missile
 
 # 分组 id 需保持稳定：客户端会缓存并按 id 启用分组。
 TOOL_GROUPS = (
@@ -171,6 +172,18 @@ TOOL_GROUPS = (
             advanced.ProcessTrailingEdgeType1,
             advanced.ProcessTrailingEdgeType2,
             advanced.ProcessAllTrailingEdges,
+        ),
+    },
+    {
+        "id": "missile",
+        "description": "导弹网格生成：导弹 5 类 AI 部件分割、后缘方向判定、翼前缘识别、导弹弓形外场创建、导弹网格质量检查、导弹几何参数查询。",
+        "tools": (
+            missile.ProcessWithServerForMissile,
+            missile.DetermineFinTEDirection,
+            missile.IdentifyFinLeadingEdge,
+            missile.CreateMissileFarField,
+            missile.CheckMissileMeshQuality,
+            missile.GetMissileModelParameters,
         ),
     },
 )

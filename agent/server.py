@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 
 from client import headers, send_post_request, url
 from registry import register_tools
-from tools import advanced, boundary, cad, generation, mesh, project, quality, query
+from tools import advanced, boundary, cad, generation, mesh, missile, project, quality, query
 
 MCP_HOST = "127.0.0.1"
 MCP_PORT = 5656
@@ -132,6 +132,12 @@ GetPointCount = query.GetPointCount
 GetNewConnectorId = query.GetNewConnectorId
 GetDomainsByType = query.GetDomainsByType
 GetRecentMessages = query.GetRecentMessages
+ProcessWithServerForMissile = missile.ProcessWithServerForMissile
+DetermineFinTEDirection = missile.DetermineFinTEDirection
+IdentifyFinLeadingEdge = missile.IdentifyFinLeadingEdge
+CreateMissileFarField = missile.CreateMissileFarField
+CheckMissileMeshQuality = missile.CheckMissileMeshQuality
+GetMissileModelParameters = missile.GetMissileModelParameters
 
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)
