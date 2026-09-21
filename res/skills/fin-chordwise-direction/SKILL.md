@@ -14,23 +14,23 @@ allowed-tools: []
 ## 适用位置
 
 - 导弹翼/舵弦向方向（前缘至后缘的流向）
-- 适用于翼/舵的上表面、下表面的弦向网格线
-- 两种部件：弹翼(`fin`) 和 舵(`rudder` / 即 `tailRudder`)
+- 适用于翼/舵的侧面（`finSideSurface` / `rudderSideSurface`）的弦向网格线
+- 两种部件：弹翼(`fin`) 和 舵(`rudder`)
 
 ## 前置条件
 
 - 已通过 `GetMissileModelParameters` 获取弦长参数
 - 翼用 `finRootChord`(C_root) / `finTipChord`(C_tip)
-- 舵用自身弦长（服务端按 `tailRudder` 分组测量）
+- 舵用自身弦长（服务端按 `rudder` 分组测量）
 - 已获取翼/舵面尺寸（中间值用）
 - 表面网格已生成
 
 ## 部件分组名对照
 
-| 部件类型 | 分组前缀 | 上表面 | 下表面 | 后缘面 | 梢面 |
-|---------|---------|--------|--------|--------|------|
-| 弹翼(fin) | `fin` | `finUpperSurface` | `finLowerSurface` | `finTrailingEdge` | `finTip` |
-| 舵(rudder) | `rudder` | `rudderUpperSurface` | `rudderLowerSurface` | `rudderTrailingEdge` | `rudderTip` |
+| 部件类型 | 分组前缀 | 侧面 | 后缘面 | 梢面 |
+|---------|---------|------|--------|------|
+| 弹翼(fin) | `fin` | `finSideSurface` | `finTrailingEdge` | `finTip` |
+| 舵(rudder) | `rudder` | `rudderSideSurface` | `rudderTrailingEdge` | `rudderTop` |
 
 ## 尺寸参数
 
@@ -47,17 +47,17 @@ allowed-tools: []
 
 ### 设置步骤
 
-1. **获取弦向网格线 ID**：根据当前处理的部件类型，用对应分组前缀获取上/下表面的弦向网格线：
+1. **获取弦向网格线 ID**：根据当前处理的部件类型，用对应分组前缀获取侧面的弦向网格线：
 
 ```
-# 例：弹翼(fin)上表面
-upperDomains = GetSpliteAssemlyDomains("finUpperSurface")   # → {"domains": [101, 102, ...]}
+# 例：弹翼(fin)侧面
+sideDomains = GetSpliteAssemlyDomainsBatch(["finSideSurface"])   # → {"groups":[{"groupName":"finSideSurface","domain_ids":[101,102,...]}]}
 chordwiseConnectors = []
-for id in upperDomains["domains"]:
-    result = GetConnectorsByDomain(id)                       # → {"ids": [201, 202, ...]}
+for id in sideDomains["groups"][0]["domain_ids"]:
+    result = GetConnectorsByDomain(id)                     # → {"ids": [201, 202, ...]}
     chordwiseConnectors.extend(result["ids"])
 
-# 下表面同理，用 "finLowerSurface" 或 "rudderLowerSurface"
+# 舵同理，用 "rudderSideSurface"
 ```
 
 2. 调用 `UGReDimensionConfigDistribution` 设置分布参数：

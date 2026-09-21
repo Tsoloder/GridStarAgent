@@ -18,7 +18,7 @@ allowed-tools: []
 | 部件类型 | 后缘面分组 | 梢面分组 | 结合部件 |
 |---------|-----------|---------|---------|
 | 弹翼(fin) | `finTrailingEdge` | `finTip` | `body`（弹体） |
-| 舵(rudder) | `rudderTrailingEdge` | `rudderTip` | `body` 或 `rudderShaft`（舵轴） |
+| 舵(rudder) | `rudderTrailingEdge` | `rudderTop` | `body` 或 `rudderShaft`（舵轴） |
 
 ## 开始任务前
 

@@ -151,7 +151,7 @@
 | `name` | 边界条件组名，直接使用导弹分部件分组名称（如 "nose"/"body"/"fin"/"rudder"/"tail"） |
 | `groupID` | 从 100 开始递增，每个分组 +1（100, 101, 102, ...） |
 | `colorNumber` | 按分组顺序循环取 0–5 |
-| `domainIDs` | 逗号分隔的网格面 ID 字符串，如 `"4,31,55"`。通过 `GetSpliteAssemlyDomains` 获取各分组 domain IDs 后拼接 |
+| `domainIDs` | 逗号分隔的网格面 ID 字符串，如 `"4,31,55"`。通过 `GetSpliteAssemlyDomainsBatch` 获取各分组 domain IDs 后拼接 |
 | `property` | 首次铺底**必须为 `-10`**（无边界条件）；实际属性（物面→粘性固壁、外场→远场、对称→对称）在铺底完成后逐组设置 |
 
 - 分类：外场、物面、对称

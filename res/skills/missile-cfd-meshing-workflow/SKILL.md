@@ -56,8 +56,8 @@ allowed-tools: []
 
 **各向异性网格处理（前置条件满足时）→ 翼/舵后缘面处理 → 弓形外场创建与体网格块创建 → 空间网格生成 → 边界条件设置 → 网格质量检查**
 
-1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认弹翼/舵子组存在（`finUpperSurface`、`finLowerSurface`、`finTip`、`finTrailingEdge` 及对应的 `rudder*` 分组）。存在时按流程 A 表第 7 行执行各向异性处理；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。用户对网格数量没有要求时可一并跳过。
-2. **翼/舵后缘面处理**：用 `GetSpliteAssemlyDomains` 获取后缘面、梢部面、结合部件分组的网格面 ID → 先处理弹翼(fin)分组，再处理舵(rudder)分组。读取独立 Skill `fin-trailing-edge-processing` 的步骤资料（调 `read_skill_resource` 时 skill 参数填 `fin-trailing-edge-processing`，路径填 `references/type1.md`），严格按对应类型步骤逐个处理。**导弹仅存在梢部相邻型后缘面（2–4 条边）。**
+1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认弹翼/舵子组存在（`finLeadingEdge`、`finTrailingEdge`、`finTip`、`finSideSurface` 及对应的 `rudder*` 分组）。存在时按流程 A 表第 7 行执行各向异性处理；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。用户对网格数量没有要求时可一并跳过。
+2. **翼/舵后缘面处理**：用 `GetSpliteAssemlyDomainsBatch` 获取后缘面、梢部面、结合部件分组的网格面 ID → 先处理弹翼(fin)分组，再处理舵(rudder)分组。读取独立 Skill `fin-trailing-edge-processing` 的步骤资料（调 `read_skill_resource` 时 skill 参数填 `fin-trailing-edge-processing`，路径填 `references/type1.md`），严格按对应类型步骤逐个处理。**导弹仅存在梢部相邻型后缘面（2–4 条边）。**
 3. **弓形外场创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时调 `CreateMissileFarField` 创建弓形外场（1×弹体长度，头部距离 1.5×头部半径）。
 4. **空间网格生成**：按流程 A 表第 10 行执行。
 5. **边界条件设置**：按流程 A 表第 11 行执行。
@@ -69,16 +69,16 @@ allowed-tools: []
 2. **水密闸门**：表面网格生成前必须完成水密性处理（自由边检查通过）和导弹 5 类 AI 分割。处理失败时公差加大 5 倍重试，最多 2 次（共 3 次调用）；若仍未处理任何自由边则停止迭代，提示用户模型可能存在缝隙、穿插、孔洞等错误。自由边全部位于半模线位置时可接受。
 3. **边界闸门**：首次铺底时 `BorderConditionSaveDataToDomain` 的 `property` **必须统一为 `-10`（无边界条件）**，严禁在挂载阶段写入实际属性值。实际属性（物面→粘性固壁、外场→远场、对称→对称等）只能在铺底完成后、按用户明确要求逐组设置。物面可按导弹分部件拆成多个物面组（弹头、弹体、弹翼、舵、尾部）。
 4. **质量闸门**：面网格除去各向异性单元处最小角应大于 10°；体网格最大角不大于 178° 为合格，严格禁止存在 179.9° 单元。
-5. **前置条件闸门**：导弹 5 类 AI 分割完成后必须检查分割结果中的分组。存在弹翼/舵子组（`finUpperSurface`、`finLowerSurface`、`finTip`、`finTrailingEdge` 及对应的 `rudder*` 分组）时，表面网格生成后执行各向异性处理与后缘面处理；分组缺失时不得调用后缘面处理工具（`DetermineFinTEDirection` 等），须先补齐分组，无法补齐时向用户说明并在阶段 `note` 中记录跳过原因。
+5. **前置条件闸门**：导弹 5 类 AI 分割完成后必须检查分割结果中的分组。存在弹翼/舵子组（`finLeadingEdge`、`finTrailingEdge`、`finTip`、`finSideSurface` 及对应的 `rudder*` 分组）时，表面网格生成后执行各向异性处理与后缘面处理；分组缺失时不得调用后缘面处理工具（`DetermineFinTEDirection` 等），须先补齐分组，无法补齐时向用户说明并在阶段 `note` 中记录跳过原因。
 
 ## 依赖与可选性
 
 - 导弹部件网格参数表和各向异性尺寸均依赖弹径 D 和球头半径 R；D 依赖头部锥体与弹体交接处直径或弹尾直径。用户直接提供这些参数时跳过 `GetMissileModelParameters` 查询步骤。
 - `GetMissileModelParameters` 从 NNW 接口获取导弹关键参数；若返回参数无效（D==0.0 等），停止后续步骤并告知用户。
-- 导弹 5 类 AI 分割结果包含弹翼/舵子组（`finUpperSurface`、`finLowerSurface`、`finTip`、`finTrailingEdge` 及对应的 `rudder*` 分组）时，各向异性处理与后缘面处理是表面网格生成后的必经阶段，不得以"用户未提网格数量要求"为由跳过；仅当分组缺失而无法补齐时才跳过，并在阶段 `note` 中说明原因。
+- 导弹 5 类 AI 分割结果包含弹翼/舵子组（`finLeadingEdge`、`finTrailingEdge`、`finTip`、`finSideSurface` 及对应的 `rudder*` 分组）时，各向异性处理与后缘面处理是表面网格生成后的必经阶段，不得以"用户未提网格数量要求"为由跳过；仅当分组缺失而无法补齐时才跳过，并在阶段 `note` 中说明原因。
 - 导弹标准划分（5 类 AI 分割）：nose(弹头) / body(弹体) / fin(弹翼) / rudder(舵) / tail(尾部)；模型含外场时把外场单独设为一个部件。
-- `fin`（弹翼）组通过几何法进一步拆分为：`finLeadingEdge` / `finTrailingEdge` / `finUpperSurface` / `finLowerSurface` / `finTip` / `finRoot`
-- `rudder`（舵）组通过几何法进一步拆分为：`rudderLeadingEdge` / `rudderTrailingEdge` / `rudderUpperSurface` / `rudderLowerSurface` / `rudderTip` / `rudderRoot`，子部件各向异性处理和 fin 逻辑完全相同
+- `fin`（弹翼）组按 t.py 1.4 拆分为：`finLeadingEdge` / `finTrailingEdge` / `finTip` / `finSideSurface`
+- `rudder`（舵）组按 t.py 1.4 拆分为：`rudderLeadingEdge` / `rudderTrailingEdge` / `rudderTop` / `rudderSideSurface` / `rudderRoot`
 - 头部子类型：球头（半径较小球面）vs 尖锐头部（无明显边界），两种需区别处理。
 - 舵与翼区分：翼与弹体无缝连接；舵为控制部件，底部与弹体有间隙。
 

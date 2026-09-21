@@ -28,29 +28,26 @@
 
 ## 翼面子面拆分
 
-`fin`（弹翼）组通过几何法拆分为以下子面：
+`fin`（弹翼）组按 t.py 1.4 拆分为以下子面（4 个）：
 
 | 子面 | 英文 | 说明 |
 |------|------|------|
 | 前缘面 | finLeadingEdge | 翼前缘弧形面 |
 | 后缘面 | finTrailingEdge | 翼后缘狭长面（后缘处理使用） |
-| 上翼面 | finUpperSurface | 翼上表面 |
-| 下翼面 | finLowerSurface | 翼下表面 |
 | 翼梢面 | finTip | 翼梢端面（梯形翼才有，三角翼无） |
-| 根部面 | finRoot | 翼与弹体连接面 |
+| 翼侧面 | finSideSurface | 翼侧面（主体平面） |
 
 ## 舵面子面拆分
 
-`rudder`（舵）组通过几何法拆分为以下子面，逻辑与 fin 完全相同：
+`rudder`（舵）组按 t.py 1.4 拆分为以下子面（5 个）：
 
 | 子面 | 英文 | 说明 |
 |------|------|------|
 | 前缘面 | rudderLeadingEdge | 舵前缘弧形面 |
 | 后缘面 | rudderTrailingEdge | 舵后缘狭长面（后缘处理使用） |
-| 上舵面 | rudderUpperSurface | 舵上表面 |
-| 下舵面 | rudderLowerSurface | 舵下表面 |
-| 舵梢面 | rudderTip | 舵梢端面 |
+| 舵顶面 | rudderTop | 舵顶面 |
 | 根部面 | rudderRoot | 舵与弹体连接面 |
+| 侧面 | rudderSideSurface | 舵侧面 |
 
 ## 头部区分处理
 

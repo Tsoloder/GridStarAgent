@@ -84,17 +84,17 @@ noseMinSize = noseTargetSize * 0.1
 
 ```
 # 1. 获取 nose 和 body 分组的网格面 ID
-noseDomains = GetSpliteAssemlyDomains("nose")   # → {"domains": [1, 2, ...]}
-bodyDomains = GetSpliteAssemlyDomains("body")   # → {"domains": [3, 4, ...]}
+noseDomains = GetSpliteAssemlyDomainsBatch(["nose"])   # → {"groups":[{"groupName":"nose","domain_ids":[1, 2, ...]}]}
+bodyDomains = GetSpliteAssemlyDomainsBatch(["body"])   # → {"groups":[{"groupName":"body","domain_ids":[3, 4, ...]}]}
 
 # 2. 获取两组的网格线集合
 noseConnectors = set()
-for id in noseDomains["domains"]:
+for id in noseDomains["groups"][0]["domain_ids"]:
     result = GetConnectorsByDomain(id)           # → {"ids": [101, 102, ...]}
     noseConnectors.update(result["ids"])
 
 bodyConnectors = set()
-for id in bodyDomains["domains"]:
+for id in bodyDomains["groups"][0]["domain_ids"]:
     result = GetConnectorsByDomain(id)
     bodyConnectors.update(result["ids"])
 

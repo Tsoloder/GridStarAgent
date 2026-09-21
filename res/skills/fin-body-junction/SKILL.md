@@ -52,23 +52,23 @@ allowed-tools: []
 
 ```
 # 例：弹翼(fin)与弹体(body)的结合处
-finRootDomains = GetSpliteAssemlyDomains("finRoot")     # → {"domains": [...]}
-bodyDomains = GetSpliteAssemlyDomains("body")           # → {"domains": [...]}
+finSideDomains = GetSpliteAssemlyDomainsBatch(["finSideSurface"])  # → {"groups":[{"groupName":"finSideSurface","domain_ids":[...]}]}
+bodyDomains = GetSpliteAssemlyDomainsBatch(["body"])               # → {"groups":[{"groupName":"body","domain_ids":[...]}]}
 
-finRootConnectors = set()
-for id in finRootDomains["domains"]:
-    result = GetConnectorsByDomain(id)                   # → {"ids": [...]}
-    finRootConnectors.update(result["ids"])
+finSideConnectors = set()
+for id in finSideDomains["groups"][0]["domain_ids"]:
+    result = GetConnectorsByDomain(id)                      # → {"ids": [...]}
+    finSideConnectors.update(result["ids"])
 
 bodyConnectors = set()
-for id in bodyDomains["domains"]:
+for id in bodyDomains["groups"][0]["domain_ids"]:
     result = GetConnectorsByDomain(id)
     bodyConnectors.update(result["ids"])
 
-junctionConnectors = finRootConnectors & bodyConnectors  # 取交集 = 结合处共享边
+junctionConnectors = finSideConnectors & bodyConnectors     # 取交集 = 结合处共享边
 
 # 同理，舵(rudder)结合处：
-# rudderRootDomains = GetSpliteAssemlyDomains("rudderRoot")
+# rudderRootDomains = GetSpliteAssemlyDomainsBatch(["rudderRoot"])
 # 结合对象按分组名 body 或 rudderShaft 获取
 ```
 
@@ -102,7 +102,7 @@ for cid in junctionConnectors:
 
 | 序号 | 工具 | 参数 | 说明 |
 |------|------|------|------|
-| 1 | `GetSpliteAssemlyDomains` | `groupName`: `"finRoot"` / `"rudderRoot"` 及 `"body"` / `"rudderShaft"` | 获取结合处涉及的分组网格面 ID |
+| 1 | `GetSpliteAssemlyDomainsBatch` | `group_names`: `["finSideSurface"]` / `["rudderRoot"]` 及 `["body"]` / `["rudderShaft"]` | 获取结合处涉及的分组网格面 ID |
 | 2 | `GetConnectorsByDomain` | `id`: 每个网格面 ID | 获取面的网格线集合 |
 | 3 | `GetConnectorStartAndEndUnitLenth` | `id`: 每条共享边 ID | 获取原有两端间距（保留不修改） |
 | 4 | `UGReDimensionConfigDistribution` | `id`: 结合边 ID; `headSpace`: 原值; `tailSpace`: 原值; `headRate/tailRate`: 1.2; `headLayer/tailLayer`: 50; `disFunc`: 0; `mindValue`: 0.02 × 当地弦长 | 设置增长分布（不修改两端） |
