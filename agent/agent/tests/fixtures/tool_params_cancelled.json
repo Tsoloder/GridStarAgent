@@ -1,0 +1,50 @@
+{
+  "name": "tool_params_cancelled",
+  "description": "tool_params 取消后模型仍发起同一工具调用→被拦截，不落到 MCP",
+  "input": {
+    "session_id": "test-cancel-001",
+    "message": "<structured_interaction>{\"type\":\"tool_params_confirmed\",\"tool\":\"ImportCAD\",\"confirmed\":false,\"params\":{\"file\":\"wing.txt\"}}</structured_interaction>",
+    "display_content": "取消",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "收到，正在导入。"},
+        {"type": "tool_call", "id": "tc-cancel-001", "name": "ImportCAD", "args": {"file": "wing.txt"}},
+        {"type": "usage", "input": 60, "output": 10, "total": 70}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "该导入已被取消。"},
+        {"type": "text_chunk", "delta": "```json\n{\"options\": [{\"label\": \"重新确认参数\", \"value\": \"retry\", \"style\": \"primary\"}]}\n```"},
+        {"type": "usage", "input": 80, "output": 20, "total": 100}
+      ]
+    }
+  ],
+  "mock_mcp_results": {
+    "ImportCAD": "成功导入文件 wing.txt"
+  },
+  "expected_event_types": [
+    "traj_system_prompt",
+    "heartbeat",
+    "traj_request_start",
+    "text_chunk",
+    "traj_request_end",
+    "token_usage",
+    "tool_call",
+    "tool_result",
+    "heartbeat",
+    "traj_request_start",
+    "text_chunk",
+    "text_chunk",
+    "traj_request_end",
+    "token_usage",
+    "done"
+  ],
+  "expected_text_contains": "取消"
+}

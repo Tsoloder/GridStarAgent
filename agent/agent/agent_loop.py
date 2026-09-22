@@ -418,6 +418,64 @@ def _last_recorded_system_prompt(session: Session) -> str:
     return ""
 
 
+_STRUCTURED_INTERACTION_RE = re.compile(
+    r"<structured_interaction>(.*?)</structured_interaction>", re.S | re.I
+)
+_LEGACY_CONFIRM_RE = re.compile(
+    r"<tool_params_confirmed([^>]*)>(.*?)</tool_params_confirmed>", re.S | re.I
+)
+_LEGACY_ATTR_RE = re.compile(r"(\w+)\s*=\s*\"([^\"]*)\"")
+
+
+def parse_structured_interaction(message: str) -> dict:
+    """解析前端回填的 <structured_interaction> 载荷。
+
+    两种形态都要认：webui / Qt 现行的 JSON 形态
+    （type=tool_params_confirmed，带 confirmed 布尔值），以及历史与测试固件用的
+    XML 形态（<tool_params_confirmed tool=".."><params>{..}</params></...>）。
+    旧形态没有 confirmed 字段，按"已确认"处理以保持向后兼容。
+    返回 {} 表示这不是一条结构化交互消息。
+    """
+    if not message:
+        return {}
+    match = _STRUCTURED_INTERACTION_RE.search(message)
+    if not match:
+        return {}
+    state = {"type": "", "tool": "", "confirmed": True, "cancelled": False, "params": {}}
+    body = (match.group(1) or "").strip()
+    if body.startswith("{"):
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            state["type"] = str(payload.get("type") or "")
+            state["tool"] = str(payload.get("tool") or "")
+            params = payload.get("params")
+            state["params"] = params if isinstance(params, dict) else {}
+            if "confirmed" in payload:
+                state["confirmed"] = bool(payload.get("confirmed"))
+            state["cancelled"] = state["confirmed"] is False
+            return state
+    legacy = _LEGACY_CONFIRM_RE.search(body)
+    if legacy:
+        attrs = dict(_LEGACY_ATTR_RE.findall(legacy.group(1) or ""))
+        state["type"] = "tool_params_confirmed"
+        state["tool"] = str(attrs.get("tool") or "")
+        if "confirmed" in attrs:
+            state["confirmed"] = str(attrs["confirmed"]).strip().lower() not in {"false", "0", "no", "off"}
+        state["cancelled"] = state["confirmed"] is False
+        params_match = re.search(r"<params>(.*?)</params>", legacy.group(2) or "", re.S | re.I)
+        if params_match:
+            try:
+                params = json.loads(params_match.group(1).strip())
+            except (TypeError, ValueError):
+                params = None
+            if isinstance(params, dict):
+                state["params"] = params
+    return state
+
+
 async def run_agent_loop(
     session: Session,
     user_message: str,
@@ -455,9 +513,15 @@ async def run_agent_loop(
         params = item.get("params", {})
         selected_params[skill_id] = params if isinstance(params, dict) else {}
     attachments = attachments or []
-    is_structured_continuation = "<structured_interaction>" in user_message
+    structured_state = parse_structured_interaction(user_message)
+    is_structured_message = bool(structured_state)
+    # 用户点了"取消"：这不是确认延续，必须按普通 manual 流程处理，
+    # 否则"已确认"提示词和审批豁免会一起把工具推去执行。
+    is_param_cancelled = bool(structured_state.get("cancelled"))
+    cancelled_tool = str(structured_state.get("tool") or "")
+    is_structured_continuation = is_structured_message and not is_param_cancelled
     continued_skills = set()
-    if is_structured_continuation:
+    if is_structured_message:
         for previous in reversed(session.messages):
             if previous.get("role") == "assistant" and previous.get("active_skills"):
                 continued_skills.update(previous.get("active_skills", []))
@@ -497,7 +561,14 @@ async def run_agent_loop(
             "<interaction_mode>manual</interaction_mode>\n",
             "工具参数继续按基础 tool_params 协议逐次确认。",
         ]
-        if is_structured_continuation:
+        if is_param_cancelled:
+            manual_parts.append(
+                "\n当前消息是用户对 tool_params 的取消结果：用户没有确认这组参数。"
+                "禁止调用 %s，也不要把该工具描述为已执行。"
+                "请重新输出 tool_params JSON 块给出可修改的参数表，"
+                "或调用 ask_user_question 询问用户下一步意图。" % (cancelled_tool or "该工具")
+            )
+        elif is_structured_continuation:
             manual_parts.append(
                 "\n当前消息是用户对 tool_params 的确认结果。"
                 "请直接调用对应的 MCP 工具执行，不要再次输出 tool_params。"
@@ -532,7 +603,13 @@ async def run_agent_loop(
         "- 未使用该工具时，仍要在回复末尾用 options JSON 块列出下一步选择作为兜底。\n",
     ]
     if interaction_mode != "auto":
-        if is_structured_continuation:
+        if is_param_cancelled:
+            _fmt_parts.append(
+                "- 当前是 tool_params 取消延续：%s 未被确认，禁止调用它，"
+                "也不得重复提交同一组参数；请重新给出可编辑的 tool_params JSON 块，"
+                "或用 ask_user_question / options 询问用户下一步。\n" % (cancelled_tool or "该工具")
+            )
+        elif is_structured_continuation:
             _fmt_parts.append(
                 "- 当前是 tool_params 确认延续，不再需要输出 tool_params JSON 块。\n"
                 "- 用户已确认参数，直接调用对应的 MCP 工具执行，禁止再次输出 tool_params。\n"
@@ -1152,7 +1229,15 @@ async def run_agent_loop(
                                                    "、".join(sorted(group_tools)))
                             )
                     else:
-                        if not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
+                        if is_param_cancelled and cancelled_tool and tc["name"] == cancelled_tool:
+                            # 用户已取消这组参数：即便模型仍然发起调用也拦下，不再兜底执行
+                            logger.info("[cancelled] 用户已取消工具 %s，拦截本轮调用", tc["name"])
+                            result = (
+                                "Tool execution cancelled by user: %s。"
+                                "用户没有确认这组参数，本次调用未执行。"
+                                "请重新给出可编辑的 tool_params，或询问用户下一步意图。" % tc["name"]
+                            )
+                        elif not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
                             result = "Tool blocked by active Skill policy: %s" % tc["name"]
                         elif interaction_mode != "auto" and request_tool_approval and not is_structured_continuation and not _is_query_tool(tc["name"]):
                             # manual mode: intercept tool call and ask user to

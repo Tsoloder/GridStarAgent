@@ -273,6 +273,51 @@ async def test_structured_continuation():
     assert "导入完成" in _full_text(events)
 
 
+def test_parse_structured_interaction_confirmed_flag():
+    """取消与确认必须解析成不同状态；旧 XML 形态无 confirmed 字段时按已确认处理。"""
+    import agent_loop
+
+    confirmed = agent_loop.parse_structured_interaction(
+        '<structured_interaction>{"type":"tool_params_confirmed","tool":"ImportCAD",'
+        '"confirmed":true,"params":{"file":"wing.txt"}}</structured_interaction>'
+    )
+    assert confirmed["confirmed"] is True
+    assert confirmed["cancelled"] is False
+    assert confirmed["tool"] == "ImportCAD"
+
+    cancelled = agent_loop.parse_structured_interaction(
+        '<structured_interaction>{"type":"tool_params_confirmed","tool":"ImportCAD",'
+        '"confirmed":false,"params":{"file":"wing.txt"}}</structured_interaction>'
+    )
+    assert cancelled["confirmed"] is False
+    assert cancelled["cancelled"] is True
+
+    legacy = agent_loop.parse_structured_interaction(
+        '<structured_interaction><tool_params_confirmed tool="ImportCAD">'
+        '<params>{"file":"wing.txt"}</params></tool_params_confirmed></structured_interaction>'
+    )
+    assert legacy["cancelled"] is False
+    assert legacy["tool"] == "ImportCAD"
+
+    assert agent_loop.parse_structured_interaction("导入模型并生成网格") == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_params_cancelled_blocks_tool_execution(tmp_path, monkeypatch):
+    """用户点「取消」后模型仍调用同一工具：必须被拦截，不能落到 MCP 执行。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    events = await _run_fixture("tool_params_cancelled")
+    types = _event_types(events)
+    assert types == load_fixture("tool_params_cancelled")["expected_event_types"]
+
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    assert "cancelled by user" in tool_result["result"]
+    assert "成功导入" not in tool_result["result"]
+    assert types[-1] == "done"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "parse_error"),
