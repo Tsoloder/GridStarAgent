@@ -1753,6 +1753,8 @@ function renderProviderEditor() {
   $("[data-action='clear-key']",el.providerEditor).onclick = () => { provider.api_key = ""; markSettingsDirty(); renderProviderEditor(); };
   $("[data-action='test-provider']",el.providerEditor).onclick = testProvider; $("[data-action='read-models']",el.providerEditor).onclick = readProviderModels; $("[data-action='delete-provider']",el.providerEditor).onclick = deleteProvider; $("[data-action='add-manual-model']",el.providerEditor).onclick = () => addModel($("#manual-model-id",el.providerEditor).value);
 }
+// 模型设置里的上下文窗口/最大输出用 K/M 自适应：128K 这类约定俗成的写法换成 M 反而难读。
+// 用量面板一律用 M（见 Charts.formatMillions），两者口径不同是刻意的。
 function formatTokens(value) { return value >= 1048576 ? `${Math.round(value / 104857.6) / 10}M` : value >= 1024 ? `${Math.round(value / 102.4) / 10}K` : String(value); }
 function candidateLimits(model) { return ((state.settings.discoveredModels || {})[model.provider] || []).find(item => (item.id || item.model_id) === model.id) || null; }
 function autoLimit(model, name) { const limits = candidateLimits(model), value = limits && limits[name]; return value ? `自动 · ${formatTokens(value)}` : "保存时自动识别"; }
@@ -1843,14 +1845,16 @@ const USAGE_GRANULARITIES = [{value:"day",label:"按天"},{value:"hour",label:"�
 // 结果缓存的条目上限。key 带时间窗且精确到分钟，跨分钟后旧条目再也不会命中，
 // 不设上限就会随反复切换一直堆积
 const USAGE_CACHE_LIMIT = 32;
+// tokens 标记哪些列是 token 用量，需要按 M 换算；轮次是一般计数，按原值显示。
+// 不加区分会把 33 轮写成 0.000033M。
 const USAGE_COLUMNS = [
   {key:"name",label:"模型",numeric:false},
   {key:"provider",label:"供应商",numeric:false},
-  {key:"total",label:"总量",numeric:true},
-  {key:"input",label:"输入",numeric:true},
-  {key:"output",label:"输出",numeric:true},
-  {key:"measured",label:"实测",numeric:true},
-  {key:"estimated",label:"估算",numeric:true},
+  {key:"total",label:"总量",numeric:true,tokens:true},
+  {key:"input",label:"输入",numeric:true,tokens:true},
+  {key:"output",label:"输出",numeric:true,tokens:true},
+  {key:"measured",label:"实测",numeric:true,tokens:true},
+  {key:"estimated",label:"估算",numeric:true,tokens:true},
   {key:"turns",label:"轮次",numeric:true},
 ];
 function usagePad(value) { return String(value).padStart(2, "0"); }
@@ -2240,10 +2244,10 @@ function renderUsageOverview(data) {
   const base = totals.cache_read + totals.input;
   const hitRate = base > 0 ? `${Math.round((totals.cache_read / base) * 100)}%` : "—";
   const cards = [
-    ["总用量", formatTokens(totals.total)],
-    ["输入", formatTokens(totals.input)],
-    ["输出", formatTokens(totals.output)],
-    ["实测 / 估算", `${formatTokens(totals.measured)} / ${formatTokens(totals.estimated)}`],
+    ["总用量", Charts.formatMillions(totals.total)],
+    ["输入", Charts.formatMillions(totals.input)],
+    ["输出", Charts.formatMillions(totals.output)],
+    ["实测 / 估算", `${Charts.formatMillions(totals.measured)} / ${Charts.formatMillions(totals.estimated)}`],
     ["缓存命中率", hitRate],
     ["会话数", String(totals.sessions)],
   ];
@@ -2306,7 +2310,8 @@ function renderUsageTable() {
     if (item.key === "name") {
       return `<td title="${escapeHtml(row.fullKey || row.name)}">${escapeHtml(row.name)}</td>`;
     }
-    return `<td class="${item.numeric ? "num" : ""}">${escapeHtml(item.numeric ? formatTokens(row[item.key]) : row[item.key])}</td>`;
+    // 只有 token 列按 M 换算，轮次等计数列按原值显示
+    return `<td class="${item.numeric ? "num" : ""}">${escapeHtml(item.tokens ? Charts.formatMillions(row[item.key]) : row[item.key])}</td>`;
   }).join("");
   el.usageTable.innerHTML = `<table class="usage-table"><thead><tr>${columns.map(item =>
     `<th class="${item.numeric ? "num" : ""}"><button type="button" data-usage-sort="${item.key}" class="${sort.key === item.key ? "active" : ""}">${item.label}${sort.key === item.key ? (sort.desc ? " ↓" : " ↑") : ""}</button></th>`
@@ -2326,7 +2331,7 @@ function setUsageView(next) {
 function announceUsageHover(row) {
   if (!el.usageLive) return;
   el.usageLive.textContent = row
-    ? `${row.t} 用量：总 ${formatTokens(row.total)}，输入 ${formatTokens(row.input)}，输出 ${formatTokens(row.output)}`
+    ? `${row.t} 用量：总 ${Charts.formatMillions(row.total)}，输入 ${Charts.formatMillions(row.input)}，输出 ${Charts.formatMillions(row.output)}`
     : "";
 }
 function renderUsageCharts() {

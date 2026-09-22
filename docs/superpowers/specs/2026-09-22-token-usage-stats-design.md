@@ -39,8 +39,22 @@
 
 - `estimated=true` 表示该轮实时 usage 缺失、由本地估算兜底得出（[agent_loop.py](file:///d:/TRAE_project/GridStarAgent/agent/agent/agent_loop.py#L362-L395)）。统计中必须与实测分开，不得相加合并。
 - 老会话可能整条没有 `usage` 字段，直接跳过，不做反推估算。
+- `usage.model` 正常是 `provider/model` 全键，但**不保证**：早期记录或测试脚本写入的是裸模型 ID（如 `test-model`），此时供应商无从判定。
 
-### 2.2 聚合方式：按需扫描 + 会话级缓存
+### 2.2 会话识别规则
+
+统计范围包含两类目录：
+
+- `SESSIONS_DIR/<会话 id>/`：在用会话。
+- `SESSIONS_DIR/.trash/<会话 id>/`：已删除会话。删除时 [delete_session](file:///d:/TRAE_project/GridStarAgent/agent/agent/session.py#L431-L452) 把整个会话目录移进 `.trash`，`meta.json` 与 `messages.jsonl` 都还在。它们的用量同样计入——token 是真花掉的，删掉对话日志不等于没消耗。
+
+两类都必须存在 `meta.json`，判定与 `load_session` 一致。`create_session` 经由 `save_session` 必定先写 `meta.json` 并登记 `index.json`，所以真实会话永远有它。
+
+只认 `messages.jsonl` 是不够的：测试脚本会直接往 sessions 目录写孤立的消息文件，它们没有 `meta.json`、不在 `index.json` 里，应用既列不出来也删不掉。把它们当成会话，统计页就会出现用户无法与任何会话对应、也无法清理的幽灵用量。
+
+缓存键用相对路径（`<id>` 或 `.trash/<id>`），避免在用与已删除的会话撞键。
+
+### 2.3 聚合方式：按需扫描 + 会话级缓存
 
 新模块遍历 `SESSIONS_DIR/*/messages.jsonl`，为每个会话缓存已解析的用量记录，缓存键为该文件的 `(mtime, size)`。文件未变化时复用缓存，不重复解析。
 
@@ -181,7 +195,15 @@ GET /usage/stats?start=2026-09-15T00:00&end=2026-09-22T18:00&provider=openai&mod
 
 字段口径：各数值都是把记录里同名字段直接相加，不做再推导。`cache_read`、`cache_write`、`reasoning` 是独立字段，不计入 `input` 或 `output`。不同供应商对「输入是否已包含缓存读取」的定义不一致，因此缓存命中率统一定义为 `cache_read / (cache_read + input)`，不假设 `input` 与 `cache_read` 的包含关系。
 
-数值用现有的 `formatTokens()` 格式。
+数值用 `Charts.formatMillions()`：**一律以百万（M）为单位**，不足 1M 也写成小数（`0.5M`、`0.075M`），不退回 K。
+
+单位统一的理由：同一页里 `3.2M` 与 `503.7K` 混排，读者要在两套量纲之间换算才能比较大小。统一成 M 后所有数值可直接对比。
+
+小数值的小数位数按数量级补足（有效数字约两位），而不是固定两位：固定两位会把几千的用量压成 `0.00M`，看起来像没有消耗。0 显示为 `0M`。
+
+坐标轴刻度同单位，但 0 只写 `0` 不写 `0M`。
+
+模型设置页的上下文窗口/最大输出**不适用**这条规则，仍用 K/M 自适应（`128K` 这类约定俗成的写法换成 `0.13M` 反而难读）。两者口径不同是刻意的，`app.js` 里保留独立的 `formatTokens()`。
 
 ### 4.5 折线图
 
@@ -210,7 +232,8 @@ GET /usage/stats?start=2026-09-15T00:00&end=2026-09-22T18:00&provider=openai&mod
 - 分组为「模型用量」：列为 模型 / 供应商 / 总量 / 输入 / 输出 / 实测 / 估算 / 轮次；分组为「供应商用量」时，首列换成 供应商，去掉供应商列；
 - 名称列显示配置里的显示名，并把完整的 `provider/model` 键放在单元格 `title` 里，鼠标悬停即可与设置页逐字对照；
 - 点击表头切换升/降序，默认按总量降序；
-- 数值列右对齐，用 `formatTokens()` 显示。
+- 数值列右对齐，用 `Charts.formatMillions()` 显示（同概览卡，统一 M）。
+- **只有 token 类列（总量/输入/输出/实测/估算）按 M 换算**，轮次是计数，按原值显示。若不加区分，33 轮会被写成 `0.000033M`。列定义里用 `tokens: true` 标记。
 
 ### 4.9 缩放交互
 
@@ -287,6 +310,7 @@ Charts.bar(container, {buckets, view, onViewChange, onHover})
 - `resolution` 为 `"day"`：`按小时` 粒度置灰；
 - 记录缺少 `usage.model`：计入「未知供应商」，明细表中单列一行；
 - 历史出现过但已不在配置中的模型：仍在候选列表里，名称后标注「未在配置中」；
+- `usage.model` 是裸模型 ID（无 `provider/` 前缀）且无 `meta_id` 可回落：归属记 `unknown`，显示「未知供应商」；
 - 时间窗内没有任何记录：候选列表为空，两个下拉只有「全部」两项，图表与表格走空状态；
 - 已选中的模型或供应商在当前时间窗内没有记录：保留下拉里的选中项，不静默清空；
 - 未配置任何模型：候选列表仍按历史记录生成，显示名退回原始键；
@@ -309,6 +333,9 @@ Charts.bar(container, {buckets, view, onViewChange, onHover})
 - `candidates` 的显示名取自 `provider_names`；
 - 跨度超过 90 天时 `resolution` 为 `"day"`；
 - 会话文件未变化时命中缓存，`_read_jsonl` 不被重复调用；
+- 只有 `messages.jsonl`、没有 `meta.json` 的孤立目录不计入统计（在用与 `.trash` 下同理）；
+- `.trash` 下已删除会话的用量计入统计；
+- 同名的在用与已删除目录各自独立缓存，互不覆盖；
 - 新消息写入后缓存失效并反映到统计结果；
 - 无记录的时间窗返回零值结构；
 - 没有 `usage` 字段的旧记录被跳过且不报错。
@@ -347,6 +374,10 @@ Charts.bar(container, {buckets, view, onViewChange, onHover})
 - 明细表表头排序切换正确；
 - 分组为「模型用量」且选中单个模型时，饼图切换为该模型的 token 构成，不是满圆；
 - 缓存命中率按 `cache_read / (cache_read + input)` 计算；
+- 用量数值一律以 M 为单位显示，k 档不再出现；
+- 非零的小用量不会显示成 `0.00M`；
+- 明细表的轮次列显示整数轮次，不被换算成 M；
+- 模型设置页的上下文窗口仍按 K/M 自适应显示；
 - 空范围显示空状态。
 
 ## 9. 首版不包含

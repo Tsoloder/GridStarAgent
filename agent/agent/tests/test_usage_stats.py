@@ -36,6 +36,17 @@ def write_session(root, sid, messages, model_id=""):
     return path
 
 
+def write_orphan_messages(root, sid, messages):
+    """只写 messages.jsonl：模拟测试脚本直接落盘、没有 meta.json 的孤立目录。"""
+    path = root / sid
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "messages.jsonl").write_text(
+        "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in messages),
+        encoding="utf-8",
+    )
+    return path
+
+
 def assistant(ts, **usage):
     return {"role": "assistant", "content": "x", "ts": ts, "usage": usage}
 
@@ -296,6 +307,54 @@ def test_reversed_window_is_normalized(sessions_root):
 
 
 # ---------- 旧格式与缓存 ----------
+
+def test_orphan_messages_without_meta_is_ignored(sessions_root):
+    """只有 messages.jsonl、没有 meta.json 的目录不是会话（load_session 同样不认）。"""
+    write_orphan_messages(sessions_root, "1100b2ff-bb13-5ed3-aa7a-22d69625fe5d", [
+        assistant("2026-09-22T10:00:00", input=50, output=20, total=70, model="test-model")])
+    write_session(sessions_root, "real", [
+        assistant("2026-09-22T10:00:00", input=5, output=0, total=5, model="alpha/m1")])
+
+    payload = collect_usage(datetime(2026, 9, 22, 10), datetime(2026, 9, 22, 10))
+
+    assert payload["totals"]["total"] == 5
+    assert payload["totals"]["sessions"] == 1
+    assert [row["model"] for row in payload["models"]] == ["alpha/m1"]
+
+
+def test_trash_sessions_are_counted(sessions_root):
+    """被删除的会话移进 .trash，用量仍计入：token 真花掉了，删日志不等于没消耗。"""
+    write_session(sessions_root / ".trash", "deleted-one", [
+        assistant("2026-09-22T10:00:00", input=900, output=100, total=1000, model="custom-2/deepseek")])
+    write_session(sessions_root, "live", [
+        assistant("2026-09-22T10:00:00", input=5, output=0, total=5, model="alpha/m1")])
+
+    payload = collect_usage(datetime(2026, 9, 22, 10), datetime(2026, 9, 22, 10))
+
+    assert payload["totals"]["total"] == 1005
+    assert payload["totals"]["sessions"] == 2
+    assert [row["model"] for row in payload["models"]] == ["custom-2/deepseek", "alpha/m1"]
+
+
+def test_trash_keeps_separate_cache_entry_from_live(sessions_root):
+    """缓存键用相对路径：同名的在用与已删除目录不会互相覆盖。"""
+    write_session(sessions_root, "same-id", [
+        assistant("2026-09-22T10:00:00", input=5, output=0, total=5, model="alpha/m1")])
+    write_session(sessions_root / ".trash", "same-id", [
+        assistant("2026-09-22T10:00:00", input=7, output=0, total=7, model="alpha/m1")])
+
+    assert collect_usage(datetime(2026, 9, 22, 10), datetime(2026, 9, 22, 10))["totals"]["total"] == 12
+    assert usage_stats._session_cache.get("same-id") is not None
+    assert usage_stats._session_cache.get(".trash/same-id") is not None
+
+
+def test_trash_dir_without_meta_is_ignored(sessions_root):
+    """孤立目录即便落在 .trash 下同样不是会话。"""
+    write_orphan_messages(sessions_root / ".trash", "orphan", [
+        assistant("2026-09-22T10:00:00", input=50, output=20, total=70, model="test-model")])
+
+    assert collect_usage(datetime(2026, 9, 22, 10), datetime(2026, 9, 22, 10))["totals"]["total"] == 0
+
 
 def test_legacy_messages_json_is_read(sessions_root):
     path = sessions_root / "s1"

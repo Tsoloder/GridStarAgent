@@ -293,7 +293,7 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=71" in index
+    assert "app.js?v=73" in index
     assert "style.css?v=58" in index
 
 
@@ -309,7 +309,7 @@ def test_webui_voice_input_contract():
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
     assert "style.css?v=58" in index
-    assert "app.js?v=71" in index
+    assert "app.js?v=73" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -519,6 +519,23 @@ def test_webui_usage_panel_contract():
     assert 'svg.addEventListener("dblclick"' in charts
     assert 'svg.addEventListener("wheel"' in charts
     assert 'svg.addEventListener("mousedown"' in charts
+
+    # 用量一律以 M 为单位：同一页混用 K 与 M 无法横向比较，故不再有 K 档
+    assert "function formatMillions(" in charts
+    assert "/ 102.4" not in charts
+    assert 'return "0M";' in charts
+    # 不足 1M 时按数量级补足小数位，否则 8.8K 会被压成 0.00M，看起来像没有消耗
+    assert "Math.min(8, 1 - Math.floor(Math.log(abs) / Math.LN10))" in charts
+    # 用量面板统一走 M 格式化
+    for call in ("Charts.formatMillions(totals.total)", "Charts.formatMillions(totals.input)",
+                 "Charts.formatMillions(totals.output)", "Charts.formatMillions(row[item.key])"):
+        assert call in script
+    # 模型设置的上下文窗口仍用 K/M 自适应：128K 换成 0.13M 反而难读
+    assert "function formatTokens(value) { return value >= 1048576" in script
+    assert "formatTokens(totals" not in script and "formatTokens(row[item" not in script
+    # 轮次是计数不是用量：只给 token 列打 tokens 标记，否则 33 轮会写成 0.000033M
+    assert '{key:"turns",label:"轮次",numeric:true},' in script
+    assert 'escapeHtml(item.tokens ? Charts.formatMillions(row[item.key]) : row[item.key])' in script
 
     for rule in (".usage-panel{", ".usage-filters{", ".usage-select{", ".usage-listbox{",
                  ".usage-range-panel{", ".usage-cal-day{", ".usage-overview{", ".usage-stat{",

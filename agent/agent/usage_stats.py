@@ -138,44 +138,61 @@ def _read_session_records(session_path: Path, fallback_model: str) -> list:
     return records
 
 
+def _session_dirs() -> list:
+    """产出 [(缓存键, 目录)]：在用会话，以及 .trash 里的已删除会话。
+
+    已删除会话的用量同样计入：token 是真花掉的，删掉日志不等于没消耗。
+    缓存键用相对路径而非目录名，避免在用与已删除的会话撞键。
+    """
+    try:
+        entries = sorted(SESSIONS_DIR.iterdir())
+    except OSError:
+        return []
+    found = [(path.name, path) for path in entries
+             if path.is_dir() and not path.name.startswith(".")]
+    try:
+        trashed = sorted((SESSIONS_DIR / ".trash").iterdir())
+    except OSError:
+        trashed = []
+    found.extend((f".trash/{path.name}", path) for path in trashed if path.is_dir())
+    return found
+
+
 def _load_sessions() -> list:
-    """返回 [(sid, records)] 快照。
+    """返回 [(缓存键, records)] 快照。
 
     只有文件 (mtime, size) 变化、新增或删除会话时才重新解析，
     数据变化时清空响应缓存。
+
+    会话的判定与 load_session 一致：必须有 meta.json。只认 messages.jsonl 会把
+    测试脚本直接写进 sessions 目录的孤立文件当成会话，统计出用户根本看不到、
+    也删不掉的幽灵用量。
     """
     global _response_cache
     with _cache_lock:
         changed = False
         seen = set()
-        try:
-            entries = sorted(SESSIONS_DIR.iterdir())
-        except OSError:
-            entries = []
-        for path in entries:
-            if not path.is_dir():
+        for cache_id, path in _session_dirs():
+            meta_path = path / "meta.json"
+            if not meta_path.exists():
                 continue
-            sid = path.name
             jsonl_path = path / "messages.jsonl"
             json_path = path / "messages.json"
-            meta_path = path / "meta.json"
             key = (_stat_key(jsonl_path), _stat_key(json_path), _stat_key(meta_path))
-            if key == (None, None, None):
-                continue
-            seen.add(sid)
-            cached = _session_cache.get(sid)
+            seen.add(cache_id)
+            cached = _session_cache.get(cache_id)
             if cached is not None and cached["key"] == key:
                 continue
             records = _read_session_records(path, _read_session_model(meta_path))
-            _session_cache[sid] = {"key": key, "records": records}
+            _session_cache[cache_id] = {"key": key, "records": records}
             changed = True
-        for sid in list(_session_cache):
-            if sid not in seen:
-                del _session_cache[sid]
+        for cache_id in list(_session_cache):
+            if cache_id not in seen:
+                del _session_cache[cache_id]
                 changed = True
         if changed:
             _response_cache = {}
-        return [(sid, entry["records"]) for sid, entry in _session_cache.items()]
+        return [(cache_id, entry["records"]) for cache_id, entry in _session_cache.items()]
 
 
 def _bucket_labels(start: datetime, end: datetime, resolution: str) -> list:

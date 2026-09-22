@@ -33,19 +33,27 @@ const Charts = (function () {
     return new Date(year, month - 1, day, isNaN(hour) ? 0 : hour, 0, 0, 0).getTime();
   }
 
-  function formatTokens(value) {
-    const abs = Math.abs(value);
-    if (abs >= 1048576) return `${Math.round(value / 104857.6) / 10}M`;
-    if (abs >= 1024) return `${Math.round(value / 102.4) / 10}K`;
-    return String(Math.round(value));
+  const MILLION = 1e6;
+
+  // 用量一律以百万（M）为单位：同一页混用 K 与 M，数值之间难以横向比较，
+  // 所以不足 1M 也写成小数（如 0.5M），不退回 K。
+  function formatMillions(value) {
+    const tokens = Number(value) || 0;
+    if (tokens === 0) return "0M";
+    const millions = tokens / MILLION;
+    const abs = Math.abs(millions);
+    // 1M 以上留两位小数；不足 1M 时按数量级补足小数位，
+    // 否则固定两位会把几千的用量压成 0.00M，看起来像没有消耗
+    const digits = abs >= 1 ? 2 : Math.min(8, 1 - Math.floor(Math.log(abs) / Math.LN10));
+    let text = millions.toFixed(digits);
+    if (text.indexOf(".") >= 0) text = text.replace(/0+$/, "").replace(/\.$/, "");
+    return `${text}M`;
   }
 
-  // 坐标轴刻度另用十进制：刻度步长是 1/2/5×10ⁿ，若按 1024 进制显示会得到 3.9K 这种不圆整的值
+  // 坐标轴刻度与数值同单位；0 只写 0，不写 0M
   function axisLabel(value) {
-    const abs = Math.abs(value);
-    if (abs >= 1e6) return `${Math.round(value / 1e5) / 10}M`;
-    if (abs >= 1e3) return `${Math.round(value / 1e2) / 10}k`;
-    return String(Math.round(value));
+    const tokens = Number(value) || 0;
+    return tokens === 0 ? "0" : formatMillions(tokens);
   }
 
   function clamp(value, low, high) {
@@ -372,9 +380,9 @@ const Charts = (function () {
       guide.setAttribute("x2", px);
       guide.setAttribute("opacity", 1);
       tip.innerHTML = `<strong>${escapeText(bucketTitle(row.t))}</strong>`
-        + `<span>总用量 <b>${formatTokens(row.total)}</b></span>`
-        + `<span>输入 <b>${formatTokens(row.input)}</b></span>`
-        + `<span>输出 <b>${formatTokens(row.output)}</b></span>`;
+        + `<span>总用量 <b>${formatMillions(row.total)}</b></span>`
+        + `<span>输入 <b>${formatMillions(row.input)}</b></span>`
+        + `<span>输出 <b>${formatMillions(row.output)}</b></span>`;
       tip.classList.remove("hidden");
       const width = ctx.svg.getBoundingClientRect().width;
       tip.style.left = `${clamp(px - 90, 4, Math.max(4, width - 184))}px`;
@@ -397,7 +405,7 @@ const Charts = (function () {
     });
     const summary = shown.map(item => {
       const sum = rows.reduce((total, row) => total + (Number(row[item.key]) || 0), 0);
-      return `${item.label} ${formatTokens(sum)}`;
+      return `${item.label} ${formatMillions(sum)}`;
     });
     ctx.svg.setAttribute("aria-label", `${rows.length} 个时间点的用量趋势：${summary.join("，")}`);
   }
@@ -484,9 +492,9 @@ const Charts = (function () {
       guide.setAttribute("x2", px);
       guide.setAttribute("opacity", 1);
       tip.innerHTML = `<strong>${escapeText(bucketTitle(row.t))}</strong>`
-        + `<span>实测 <b>${formatTokens(row.measured)}</b></span>`
-        + `<span>估算 <b>${formatTokens(row.estimated)}</b></span>`
-        + `<span>合计 <b>${formatTokens(row.total)}</b></span>`;
+        + `<span>实测 <b>${formatMillions(row.measured)}</b></span>`
+        + `<span>估算 <b>${formatMillions(row.estimated)}</b></span>`
+        + `<span>合计 <b>${formatMillions(row.total)}</b></span>`;
       tip.classList.remove("hidden");
       const width = ctx.svg.getBoundingClientRect().width;
       tip.style.left = `${clamp(px - 90, 4, Math.max(4, width - 184))}px`;
@@ -510,7 +518,7 @@ const Charts = (function () {
     const measured = rows.reduce((total, row) => total + row.measured, 0);
     const estimated = rows.reduce((total, row) => total + row.estimated, 0);
     ctx.svg.setAttribute("aria-label",
-      `${rows.length} 个时间点的用量构成：实测 ${formatTokens(measured)}，估算 ${formatTokens(estimated)}`);
+      `${rows.length} 个时间点的用量构成：实测 ${formatMillions(measured)}，估算 ${formatMillions(estimated)}`);
   }
 
   function arcPath(cx, cy, outer, inner, startAngle, endAngle) {
@@ -579,7 +587,7 @@ const Charts = (function () {
         sector.path.setAttribute("fill-opacity", index === null || position === index ? 1 : 0.35);
       });
       const current = index === null ? null : sectors[index];
-      centerValue.textContent = formatTokens(current ? current.item.value : total);
+      centerValue.textContent = formatMillions(current ? current.item.value : total);
       centerLabel.textContent = current
         ? `${current.item.label} · ${Math.round(current.item.value / total * 100)}%`
         : (options.unit || "总量");
@@ -597,7 +605,7 @@ const Charts = (function () {
       row.innerHTML = `<i style="background:${sectors[index].color}"></i>`
         + `<span class="pie-legend-name" title="${escapeText(item.label)}">${escapeText(item.label)}</span>`
         + `<span class="pie-legend-pct">${(item.value / total * 100).toFixed(1)}%</span>`
-        + `<b>${formatTokens(item.value)}</b>`;
+        + `<b>${formatMillions(item.value)}</b>`;
       row.addEventListener("mouseenter", () => focus(index));
       row.addEventListener("mouseleave", () => focus(null));
       wrap.append(row);
@@ -605,5 +613,5 @@ const Charts = (function () {
     ctx.svg.setAttribute("role", "img");
   }
 
-  return {line: line, pie: pie, bar: bar, parseBucket: parseBucket, formatTokens: formatTokens};
+  return {line: line, pie: pie, bar: bar, parseBucket: parseBucket, formatMillions: formatMillions};
 })();
