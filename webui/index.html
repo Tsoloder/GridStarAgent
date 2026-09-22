@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
   <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
-  <link rel="stylesheet" href="style.css?v=55">
+  <link rel="stylesheet" href="style.css?v=56">
 </head>
 <body>
   <main class="app-shell">
@@ -51,7 +51,10 @@
     </section>
 
     <nav id="turn-rail" class="turn-rail hidden" aria-label="对话轮次导航"></nav>
-    <div id="turn-rail-tip" class="turn-rail-tip" role="tooltip"></div>
+    <div id="turn-rail-panel" class="turn-rail-panel" aria-label="对话轮次列表">
+      <div class="turn-rail-panel-head"><span>对话轮次</span><b id="turn-rail-count"></b></div>
+      <div id="turn-rail-list" class="turn-rail-list"></div>
+    </div>
 
     <section id="trajectory-view" class="trajectory-view hidden" aria-label="轨迹视图">
       <div class="traj-toolbar">
@@ -144,6 +147,6 @@
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=64" defer></script>
+  <script src="app.js?v=65" defer></script>
 </body>
 </html>

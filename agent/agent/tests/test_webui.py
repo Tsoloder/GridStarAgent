@@ -293,8 +293,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=64" in index
-    assert "style.css?v=55" in index
+    assert "app.js?v=65" in index
+    assert "style.css?v=56" in index
 
 
 def test_webui_voice_input_contract():
@@ -308,8 +308,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=55" in index
-    assert "app.js?v=64" in index
+    assert "style.css?v=56" in index
+    assert "app.js?v=65" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -406,33 +406,37 @@ def test_webui_choice_card_contract():
 
 
 def test_webui_turn_rail_navigates_conversation_turns():
-    """对话界面最左侧竖排白点：一轮一个点，悬浮显示该轮提问，点击跳转，当前轮高亮。"""
+    """对话界面最左侧竖排白点：一轮一个点，鼠标移入展开整轮列表，点击行/点跳转，当前轮高亮。"""
     index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
     stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
 
-    # 轨道与悬浮窗是对话区旁的独立节点，悬浮窗不放在轨道内（轨道可滚动，放进去会被 overflow 裁掉）
+    # 轨道与轮次面板是对话区旁的独立节点，面板不放在轨道内（轨道可滚动，放进去会被 overflow 裁掉）
     assert 'id="turn-rail"' in index
-    assert 'id="turn-rail-tip"' in index
-    assert index.index('id="turn-rail-tip"') > index.index('id="turn-rail"')
+    assert 'id="turn-rail-panel"' in index
+    assert 'id="turn-rail-list"' in index
+    assert index.index('id="turn-rail-panel"') > index.index('id="turn-rail"')
 
-    # 轮次以用户消息为界：一个点对应一条 user 消息
+    # 轮次以用户消息为界：一个点对应一条 user 消息，列表一行摘要同一轮
     assert 'function renderTurnRail()' in script
     assert 'el.messages.querySelectorAll(".message.user")' in script
     # 消息区增删统一走 MutationObserver + 下一帧合并刷新，点集未变不重建
     assert "new MutationObserver(syncTurnRail).observe(el.messages, {childList: true});" in script
     assert "function syncTurnRail()" in script
-    # 悬浮显示该轮提问、点击定位到该轮、滚动时重算当前轮高亮
-    assert "function showTurnRailTip(" in script
-    assert "function hideTurnRailTip()" in script
+    # 移入轨道展开整轮列表、点击定位到该轮、滚动时重算当前轮高亮
+    assert "function showTurnRailPanel(" in script
+    assert "function hideTurnRailPanel()" in script
+    assert "function jumpToTurn(" in script
+    assert 'el.turnRail.addEventListener("mouseenter", showTurnRailPanel);' in script
     assert 'node.scrollIntoView({block: "start", behavior: "smooth"})' in script
     assert "function updateTurnRailActive()" in script
     assert "updateTurnRailActive(); }, {passive: true});" in script
     assert "syncTurnRail();" in script[script.index("function switchViewTab"):]
 
-    # 固定在最左边缘垂直居中，点/当前点/悬浮窗的样式
+    # 固定在最左边缘垂直居中，点/当前点的样式 + 右侧列表行样式
     for rule in (".turn-rail{position:fixed;left:0;top:50%;transform:translateY(-50%)",
                  ".turn-rail-dot{", ".turn-rail-dot:before{", ".turn-rail-dot.active:before{",
-                 ".turn-rail-tip{position:fixed;", ".turn-rail-tip.show{"):
+                 ".turn-rail-panel{position:fixed;", ".turn-rail-panel.show{",
+                 ".turn-rail-row{", ".turn-rail-index{", ".turn-rail-row.active .turn-rail-index{"):
         assert rule in stylesheet
 

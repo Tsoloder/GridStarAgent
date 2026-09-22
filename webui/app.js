@@ -39,7 +39,7 @@ const el = {
   tabChat: $("#tab-chat"), tabTraj: $("#tab-trajectory"), trajView: $("#trajectory-view"),
   trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
   trajTimeline: $("#traj-timeline"), composer: $(".composer"),
-  turnRail: $("#turn-rail"), turnRailTip: $("#turn-rail-tip"),
+  turnRail: $("#turn-rail"), turnRailPanel: $("#turn-rail-panel"), turnRailList: $("#turn-rail-list"), turnRailCount: $("#turn-rail-count"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -676,24 +676,35 @@ el.messages.addEventListener("click", event => {
 
 /* --- 对话轮次导航轨：页面最左边缘竖排白点，一轮一个点 ---
    轮次以用户消息为界：一条 user 消息与其后的 assistant/tool 消息同属一轮。
-   悬浮显示该轮提问，点击定位到该轮；当前所处的轮次（滚动位置落在中间线及以前的最末一轮）高亮。 */
-let railNodes = [], railDots = [], railPending = false;
+   鼠标移入轨道区域即向右展开完整轮次列表（序号 + 该轮提问摘要），点击列表行或白点定位到该轮；
+   当前所处的轮次（滚动位置落在中间线及以前的最末一轮）在轨道白点与列表行上同步高亮。 */
+let railNodes = [], railDots = [], railRows = [], railPending = false, railPanelTimer = 0;
 function railTurnText(node) {
   const body = node.querySelector(".markdown");
   const text = (body ? body.textContent : "").replace(/\s+/g, " ").trim();
   return text || "（本轮无文本内容）";
 }
-function hideTurnRailTip() { if (el.turnRailTip) el.turnRailTip.classList.remove("show"); }
-// 悬浮窗贴点右侧显示；节点靠近视口上下边时整体回推，避免被裁掉
-function showTurnRailTip(dot, node) {
-  const tip = el.turnRailTip;
-  if (!tip) return;
-  tip.textContent = railTurnText(node);
-  tip.classList.add("show");
-  const rect = dot.getBoundingClientRect();
-  tip.style.left = Math.round(rect.right + 10) + "px";
-  const top = rect.top + rect.height / 2 - tip.offsetHeight / 2;
-  tip.style.top = Math.round(Math.min(Math.max(8, top), Math.max(8, window.innerHeight - tip.offsetHeight - 8))) + "px";
+function hideTurnRailPanel() {
+  clearTimeout(railPanelTimer);
+  if (el.turnRailPanel) el.turnRailPanel.classList.remove("show");
+}
+// 离开轨道/列表留一点延迟再收起：鼠标从白点移到右侧列表要跨过间隙，不能让面板闪退
+function scheduleHideTurnRailPanel() {
+  clearTimeout(railPanelTimer);
+  railPanelTimer = setTimeout(hideTurnRailPanel, 180);
+}
+function jumpToTurn(index) { const node = railNodes[index]; if (node) node.scrollIntoView({block: "start", behavior: "smooth"}); }
+// 面板贴在轨道右侧展开，纵向与轨道居中；视口上下越界时整体回推，避免被裁掉
+function showTurnRailPanel() {
+  const panel = el.turnRailPanel;
+  if (!panel || !railNodes.length) return;
+  clearTimeout(railPanelTimer);
+  panel.classList.add("show");
+  const railRect = el.turnRail.getBoundingClientRect();
+  panel.style.left = Math.round(railRect.right + 10) + "px";
+  const top = railRect.top + railRect.height / 2 - panel.offsetHeight / 2;
+  panel.style.top = Math.round(Math.min(Math.max(8, top), Math.max(8, window.innerHeight - panel.offsetHeight - 8))) + "px";
+  updateTurnRailActive();
 }
 function updateTurnRailActive() {
   if (!railDots.length) return;
@@ -703,6 +714,11 @@ function updateTurnRailActive() {
   // 依次找「顶边还在中间线及以上」的最后一轮；一轮都够不着时停在第一轮
   railNodes.forEach((node, index) => { if (index < railDots.length && node.getBoundingClientRect().top <= mid) active = index; });
   railDots.forEach((dot, index) => dot.classList.toggle("active", index === active));
+  railRows.forEach((row, index) => {
+    const on = index === active;
+    row.classList.toggle("active", on);
+    if (on) row.setAttribute("aria-current", "true"); else row.removeAttribute("aria-current");
+  });
 }
 // 轮次节点集合未变就不重建，避免流式输出时反复刷 DOM 打断悬浮
 function renderTurnRail() {
@@ -711,24 +727,45 @@ function renderTurnRail() {
     ? Array.prototype.slice.call(el.messages.querySelectorAll(".message.user")) : [];
   const same = turns.length === railNodes.length && turns.every((node, index) => node === railNodes[index]);
   if (!same) {
-    hideTurnRailTip();
+    hideTurnRailPanel();
     railNodes = turns;
+    railDots = [];
+    railRows = [];
     el.turnRail.innerHTML = "";
-    railDots = turns.map((node, index) => {
+    el.turnRailList.innerHTML = "";
+    el.turnRailCount.textContent = turns.length ? turns.length + " 轮" : "";
+    turns.forEach((node, index) => {
       const dot = document.createElement("button");
       dot.type = "button";
       dot.className = "turn-rail-dot";
       dot.setAttribute("aria-label", "第 " + (index + 1) + " 轮");
-      dot.onclick = () => node.scrollIntoView({block: "start", behavior: "smooth"});
-      dot.onmouseenter = () => showTurnRailTip(dot, node);
-      dot.onmouseleave = hideTurnRailTip;
+      dot.onclick = () => jumpToTurn(index);
       el.turnRail.append(dot);
-      return dot;
+      railDots.push(dot);
+
+      const text = railTurnText(node);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "turn-rail-row";
+      row.title = text;
+      row.setAttribute("aria-label", "第 " + (index + 1) + " 轮：" + text);
+      row.innerHTML = '<i class="turn-rail-index">' + (index + 1) + '</i><span class="turn-rail-text"></span>';
+      row.querySelector(".turn-rail-text").textContent = text;
+      row.onclick = () => { jumpToTurn(index); hideTurnRailPanel(); };
+      el.turnRailList.append(row);
+      railRows.push(row);
     });
   }
-  el.turnRail.classList.toggle("hidden", !turns.length);
+  const empty = !turns.length;
+  el.turnRail.classList.toggle("hidden", empty);
+  if (empty) hideTurnRailPanel();
   updateTurnRailActive();
 }
+// 鼠标进入轨道区域展开列表；面板自身也算悬停区，移到列表上继续保留
+el.turnRail.addEventListener("mouseenter", showTurnRailPanel);
+el.turnRail.addEventListener("mouseleave", scheduleHideTurnRailPanel);
+el.turnRailPanel.addEventListener("mouseenter", () => clearTimeout(railPanelTimer));
+el.turnRailPanel.addEventListener("mouseleave", scheduleHideTurnRailPanel);
 // 消息区增删（发消息、切会话、历史重放、暂存/挂回）都走这里，统一按下一帧合并刷新
 function syncTurnRail() {
   if (railPending) return;
