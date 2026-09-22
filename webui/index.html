@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GridStar AI</title>
   <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
-  <link rel="stylesheet" href="style.css?v=56">
+  <link rel="stylesheet" href="style.css?v=58">
 </head>
 <body>
   <main class="app-shell">
@@ -127,6 +127,7 @@
         <button id="tab-models" type="button" role="tab" aria-selected="true" aria-controls="panel-models" data-settings-tab="models">模型</button>
         <button id="tab-skills" type="button" role="tab" aria-selected="false" aria-controls="panel-skills" data-settings-tab="skills">技能</button>
         <button id="tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="panel-mcp" data-settings-tab="mcp">MCP 工具</button>
+        <button id="tab-usage" type="button" role="tab" aria-selected="false" aria-controls="panel-usage" data-settings-tab="usage">用量</button>
       </div>
       <div class="settings-content">
         <div id="panel-models" class="settings-panel models-panel" role="tabpanel" aria-labelledby="tab-models">
@@ -143,10 +144,66 @@
           <div id="mcp-status" class="mcp-status" role="status" aria-live="polite"></div>
           <div id="mcp-tools" class="mcp-tools"></div>
         </div>
+        <div id="panel-usage" class="settings-panel usage-panel hidden" role="tabpanel" aria-labelledby="tab-usage">
+          <div class="usage-filters">
+            <div class="usage-filter">
+              <span class="usage-filter-label">分组</span>
+              <button id="usage-group" class="usage-select" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="usage-group-label">模型用量</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+              <div id="usage-group-list" class="usage-listbox hidden" role="listbox" aria-label="分组维度"></div>
+            </div>
+            <div class="usage-filter">
+              <span class="usage-filter-label">供应商</span>
+              <button id="usage-provider" class="usage-select" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="usage-provider-label">全部供应商</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+              <div id="usage-provider-list" class="usage-listbox hidden" role="listbox" aria-label="供应商"></div>
+            </div>
+            <div class="usage-filter">
+              <span class="usage-filter-label">模型</span>
+              <button id="usage-model" class="usage-select" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="usage-model-label">全部模型</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+              <div id="usage-model-list" class="usage-listbox hidden" role="listbox" aria-label="模型"></div>
+            </div>
+            <div class="usage-filter">
+              <span class="usage-filter-label">粒度</span>
+              <button id="usage-granularity" class="usage-select" type="button" aria-haspopup="listbox" aria-expanded="false"><span id="usage-granularity-label">按天</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+              <div id="usage-granularity-list" class="usage-listbox hidden" role="listbox" aria-label="时间粒度"></div>
+            </div>
+            <div class="usage-filter usage-range-filter">
+              <span class="usage-filter-label">日期</span>
+              <button id="usage-range" class="usage-select" type="button" aria-haspopup="dialog" aria-expanded="false"><svg class="usage-cal-icon" viewBox="0 0 24 24" width="13" height="13" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="17" rx="2"/><path d="M3 9h18M8 2v4M16 2v4"/></svg><span id="usage-range-label">最近 7 天</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></button>
+            </div>
+            <button id="usage-refresh" class="secondary" type="button">刷新</button>
+            <!-- 日历面板挂在筛选行下（不是日期触发器内）：它宽约 560，跟着触发器左缘向右展开会顶出弹窗右缘被裁掉 -->
+            <div id="usage-range-panel" class="usage-range-panel hidden" role="dialog" aria-label="选择时间范围">
+              <div id="usage-calendar" class="usage-calendar"></div>
+              <div id="usage-range-presets" class="usage-range-presets"></div>
+            </div>
+          </div>
+          <div id="usage-status" class="usage-status" role="status" aria-live="polite"></div>
+          <div id="usage-overview" class="usage-overview"></div>
+          <div class="usage-card">
+            <div class="usage-card-head"><div><span class="eyebrow">TREND</span><h4>输入 / 输出趋势</h4></div><em>滚轮缩放 · 拖拽平移 · 双击复位 · Shift + 滚轮缩放纵轴</em></div>
+            <div id="usage-line" class="usage-chart"></div>
+          </div>
+          <div class="usage-grid">
+            <div class="usage-card">
+              <div class="usage-card-head"><div><span class="eyebrow">SHARE</span><h4 id="usage-pie-title">模型占比</h4></div></div>
+              <div id="usage-pie" class="usage-chart"></div>
+            </div>
+            <div class="usage-card">
+              <div class="usage-card-head"><div><span class="eyebrow">MEASURED</span><h4>实测 vs 估算</h4></div></div>
+              <div id="usage-bar" class="usage-chart"></div>
+            </div>
+          </div>
+          <div class="usage-card">
+            <div class="usage-card-head"><div><span class="eyebrow">DETAIL</span><h4 id="usage-table-title">模型明细</h4></div></div>
+            <div id="usage-table" class="usage-table-wrap"></div>
+          </div>
+          <div id="usage-live" class="usage-live" aria-live="polite"></div>
+        </div>
       </div>
       <footer class="settings-actions"><span id="settings-status" role="status" aria-live="polite"></span><button id="cancel-settings" class="secondary" type="button">取消</button><button id="save-settings" class="primary" type="button">保存设置</button></footer>
     </section>
   </div>
-  <script src="app.js?v=65" defer></script>
+  <script src="charts.js?v=4" defer></script>
+  <script src="app.js?v=71" defer></script>
 </body>
 </html>

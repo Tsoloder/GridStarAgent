@@ -23,6 +23,13 @@ const state = {
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
+  // 用量面板：视图状态自持，图表只负责渲染并回传新的时间视窗
+  // provider/model 筛选项取自「配置好的」模型目录，而不是历史用量，否则筛选器与设置页对不上
+  usage: {loaded:false,loading:false,error:"",open:null,data:null,view:null,cache:{},token:0,
+    range:{preset:"7d",start:null,end:null},granularity:"day",groupBy:"model",
+    provider:"",model:"",
+    catalog:{},configuredProviders:{},providerOptions:[],modelOptions:[],
+    calendar:null,pendingStart:null,pendingEnd:null,sort:{key:"total",desc:true}},
   viewTab: "chat",
   traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
@@ -36,6 +43,15 @@ const el = {
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
   skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
+  usageGroup: $("#usage-group"), usageGroupLabel: $("#usage-group-label"), usageGroupList: $("#usage-group-list"),
+  usageProvider: $("#usage-provider"), usageProviderLabel: $("#usage-provider-label"), usageProviderList: $("#usage-provider-list"),
+  usageModel: $("#usage-model"), usageModelLabel: $("#usage-model-label"), usageModelList: $("#usage-model-list"),
+  usageGranularity: $("#usage-granularity"), usageGranularityLabel: $("#usage-granularity-label"), usageGranularityList: $("#usage-granularity-list"),
+  usageRange: $("#usage-range"), usageRangeLabel: $("#usage-range-label"), usageRangePanel: $("#usage-range-panel"),
+  usageCalendar: $("#usage-calendar"), usageRangePresets: $("#usage-range-presets"), usageRefresh: $("#usage-refresh"),
+  usageStatus: $("#usage-status"), usageOverview: $("#usage-overview"), usageLine: $("#usage-line"),
+  usagePie: $("#usage-pie"), usagePieTitle: $("#usage-pie-title"), usageBar: $("#usage-bar"),
+  usageTable: $("#usage-table"), usageTableTitle: $("#usage-table-title"), usageLive: $("#usage-live"),
   tabChat: $("#tab-chat"), tabTraj: $("#tab-trajectory"), trajView: $("#trajectory-view"),
   trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
   trajTimeline: $("#traj-timeline"), composer: $(".composer"),
@@ -1747,7 +1763,7 @@ function renderModelCard(model, parent) {
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); const limits = [item.context_window ? `${formatTokens(item.context_window)} 输入` : "", item.max_output_tokens ? `${formatTokens(item.max_output_tokens)} 输出` : ""].filter(Boolean).join(" · "); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}${limits ? `<em>${escapeHtml(limits)}</em>` : ""}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
 function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
-function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); }
+function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); }
 function schemaParams(schema) {
   // 从 JSON Schema 提取入参摘要，用于工具列表展示每个工具的参数
   const props = (schema && schema.properties) || {}, required = new Set((schema && schema.required) || []);
@@ -1814,6 +1830,578 @@ function validateSettings() { const errors = []; for (const provider of state.se
 async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); state.configLoaded = true; el.warning.classList.add("hidden"); await refreshModels(null, data.config && data.config.default_model); updateSendState(); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
 async function refreshModels(models = null, defaultModel = null) { if (!models) { const data = await request("/config/models"); models = data.models || []; defaultModel = data.default_model || defaultModel; } const previous = el.model.value; state.models = models; const keys = visibleModels().map(modelKey); selectModel(keys.includes(previous) ? previous : (defaultModel && keys.includes(defaultModel) ? defaultModel : keys[0] || "")); }
 
+// --- 用量统计面板：按供应商/模型聚合历史 token 消耗 ---
+const USAGE_PRESETS = [
+  {id:"12h",label:"最近 12 小时",hours:12},
+  {id:"24h",label:"最近 24 小时",hours:24},
+  {id:"3d",label:"最近 3 天",days:3},
+  {id:"7d",label:"最近 7 天",days:7},
+  {id:"30d",label:"最近 30 天",days:30},
+];
+const USAGE_GROUPS = [{value:"model",label:"模型用量"},{value:"provider",label:"供应商用量"}];
+const USAGE_GRANULARITIES = [{value:"day",label:"按天"},{value:"hour",label:"按小时"}];
+// 结果缓存的条目上限。key 带时间窗且精确到分钟，跨分钟后旧条目再也不会命中，
+// 不设上限就会随反复切换一直堆积
+const USAGE_CACHE_LIMIT = 32;
+const USAGE_COLUMNS = [
+  {key:"name",label:"模型",numeric:false},
+  {key:"provider",label:"供应商",numeric:false},
+  {key:"total",label:"总量",numeric:true},
+  {key:"input",label:"输入",numeric:true},
+  {key:"output",label:"输出",numeric:true},
+  {key:"measured",label:"实测",numeric:true},
+  {key:"estimated",label:"估算",numeric:true},
+  {key:"turns",label:"轮次",numeric:true},
+];
+function usagePad(value) { return String(value).padStart(2, "0"); }
+function usageIsoLocal(date) { return `${date.getFullYear()}-${usagePad(date.getMonth()+1)}-${usagePad(date.getDate())}T${usagePad(date.getHours())}:${usagePad(date.getMinutes())}`; }
+function usageDayKey(date) { return `${date.getFullYear()}-${usagePad(date.getMonth()+1)}-${usagePad(date.getDate())}`; }
+function usageDayStart(date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(); }
+function usagePreset(id) { return USAGE_PRESETS.find(item => item.id === id) || USAGE_PRESETS[3]; }
+function usageWindow() {
+  // 自定义区间优先；预设区间按自然日回溯，"最近 N 天"含今天
+  const range = state.usage.range;
+  if (range.start && range.end) return {start: range.start, end: range.end};
+  const preset = usagePreset(range.preset), end = new Date(), start = new Date();
+  if (preset.hours) start.setHours(start.getHours() - preset.hours);
+  else { start.setDate(start.getDate() - preset.days + 1); start.setHours(0, 0, 0, 0); }
+  return {start: start, end: end};
+}
+function usageRangeText() {
+  const range = state.usage.range;
+  if (!range.start || !range.end) return usagePreset(range.preset).label;
+  const start = usageDayKey(range.start), end = usageDayKey(range.end);
+  return start === end ? start : `${start} ~ ${end}`;
+}
+function usageDomain() {
+  const data = state.usage.data;
+  if (!data) return null;
+  // 右端补满当前桶，保证日/小时两种粒度共用同一区间（下钻时视窗才不会跳）
+  return [Charts.parseBucket(data.range.start), Charts.parseBucket(data.range.end) + 3600000];
+}
+// 可见跨度不足 3 个桶时下钻到小时桶：按天桶只落在自然日零点，窄视窗里可能一个都落不进来，
+// 图会只剩空坐标系。这也是「缩放突破档位限制、放大到小时」的实现方式。
+function usageDrilled() {
+  const data = state.usage.data, view = state.usage.view;
+  if (!data || data.range.resolution !== "hour" || !view) return false;
+  if (state.usage.granularity === "hour") return false;
+  return (view.end - view.start) < 3 * 86400000;
+}
+function usageRollupDays(buckets) {
+  const groups = new Map();
+  buckets.forEach(row => {
+    const key = row.t.slice(0, 10);
+    let target = groups.get(key);
+    if (!target) { target = {t:key,input:0,output:0,total:0,measured:0,estimated:0,turns:0}; groups.set(key, target); }
+    target.input += row.input; target.output += row.output; target.total += row.total;
+    target.measured += row.measured; target.estimated += row.estimated; target.turns += row.turns;
+  });
+  return Array.from(groups.values());
+}
+function usageBuckets() {
+  const data = state.usage.data;
+  if (!data) return [];
+  if (data.range.resolution === "day") return data.buckets;
+  if (state.usage.granularity === "hour" || usageDrilled()) return data.buckets;
+  return usageRollupDays(data.buckets);
+}
+function usagePopoverOpen() {
+  return [el.usageGroupList, el.usageProviderList, el.usageModelList, el.usageGranularityList, el.usageRangePanel]
+    .some(panel => panel && !panel.classList.contains("hidden"));
+}
+function closeUsagePopovers() {
+  [[el.usageGroup, el.usageGroupList], [el.usageProvider, el.usageProviderList],
+   [el.usageModel, el.usageModelList],
+   [el.usageGranularity, el.usageGranularityList], [el.usageRange, el.usageRangePanel]]
+    .forEach(pair => {
+      if (!pair[0] || !pair[1]) return;
+      pair[1].classList.add("hidden");
+      pair[0].setAttribute("aria-expanded", "false");
+    });
+}
+function toggleUsagePopover(trigger, panel, onOpen) {
+  const willOpen = panel.classList.contains("hidden");
+  closeUsagePopovers();
+  if (!willOpen) return;
+  if (onOpen) onOpen();
+  panel.classList.remove("hidden");
+  trigger.setAttribute("aria-expanded", "true");
+}
+function renderUsageListbox(container, items, current, onPick) {
+  if (!container) return;
+  container.innerHTML = "";
+  items.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(item.value === current));
+    button.className = item.value === current ? "selected" : "";
+    button.disabled = Boolean(item.disabled);
+    button.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}`;
+    button.onclick = () => { if (!item.disabled) onPick(item.value); };
+    container.append(button);
+  });
+}
+function renderUsageListboxes() {
+  const usage = state.usage, data = usage.data;
+  const hourDisabled = !data || data.range.resolution === "day";
+  renderUsageListbox(el.usageGroupList, USAGE_GROUPS, usage.groupBy, value => {
+    // 分组只决定饼图与明细表按什么拆，不改变筛选条件，因此不需要重新请求
+    usage.groupBy = value;
+    closeUsagePopovers();
+    renderUsage();
+  });
+  renderUsageListbox(el.usageProviderList, [{value:"",label:"全部供应商"}].concat(usage.providerOptions),
+    usage.provider, value => usagePickProvider(value));
+  renderUsageListbox(el.usageModelList, [{value:"",label:"全部模型"}].concat(usage.modelOptions),
+    usage.model, value => usagePickModel(value));
+  renderUsageListbox(el.usageGranularityList, USAGE_GRANULARITIES.map(item =>
+    hourDisabled && item.value === "hour" ? {value:item.value,label:item.label,disabled:true,note:"当前范围仅提供按天"} : item
+  ), usage.granularity, value => {
+    usage.granularity = value;
+    usage.view = null;
+    closeUsagePopovers();
+    renderUsage();
+  });
+}
+function renderUsageRangePresets() {
+  if (!el.usageRangePresets) return;
+  const usage = state.usage;
+  el.usageRangePresets.innerHTML = "";
+  USAGE_PRESETS.forEach(preset => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = !usage.range.start && usage.range.preset === preset.id ? "active" : "";
+    button.textContent = preset.label;
+    button.onclick = () => applyUsagePreset(preset.id);
+    el.usageRangePresets.append(button);
+  });
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "usage-cal-confirm";
+  confirm.textContent = "确定";
+  confirm.disabled = !usage.pendingStart;
+  confirm.onclick = () => { if (usage.pendingStart) applyUsageCustom(usage.pendingStart, usage.pendingEnd || usage.pendingStart); };
+  el.usageRangePresets.append(confirm);
+}
+function usageDayState(day) {
+  const usage = state.usage;
+  const usingPending = Boolean(usage.pendingStart);
+  const start = usingPending ? usageDayStart(usage.pendingStart) : (usage.range.start ? usageDayStart(usage.range.start) : null);
+  const end = usingPending
+    ? usageDayStart(usage.pendingEnd || usage.pendingStart)
+    : (usage.range.end ? usageDayStart(usage.range.end) : null);
+  if (start === null || end === null) return "";
+  const ms = usageDayStart(day);
+  if (ms === start && ms === end) return "single";
+  if (ms === start) return "start";
+  if (ms === end) return "end";
+  return ms > start && ms < end ? "in" : "";
+}
+function usageMonthGrid(monthDate) {
+  const grid = document.createElement("div");
+  grid.className = "usage-cal-grid";
+  grid.innerHTML = `<div class="usage-cal-month">${monthDate.getFullYear()}-${usagePad(monthDate.getMonth() + 1)}</div>`
+    + `<div class="usage-cal-week">${["一","二","三","四","五","六","日"].map(name => `<span>${name}</span>`).join("")}</div>`;
+  const cells = document.createElement("div");
+  cells.className = "usage-cal-cells";
+  const first = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const offset = (first.getDay() + 6) % 7;   // 周一开头
+  const cursor = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1 - offset);
+  for (let index = 0; index < 42; index += 1) {
+    const day = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + index);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `usage-cal-day${day.getMonth() === monthDate.getMonth() ? "" : " other"} ${usageDayState(day)}`.trim();
+    button.textContent = String(day.getDate());
+    button.onclick = () => pickUsageDay(day);
+    cells.append(button);
+  }
+  grid.append(cells);
+  return grid;
+}
+function renderUsageCalendar() {
+  if (!el.usageCalendar) return;
+  const usage = state.usage;
+  const anchor = usage.calendar || new Date();
+  el.usageCalendar.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "usage-cal-nav";
+  head.innerHTML = `<div class="usage-cal-title">${anchor.getFullYear()}-${usagePad(anchor.getMonth() + 1)} ~ ${new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).getFullYear()}-${usagePad(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).getMonth() + 1)}</div>`
+    + `<div class="usage-cal-steps">`
+    + `<button type="button" data-usage-month="-12" aria-label="上一年">«</button>`
+    + `<button type="button" data-usage-month="-1" aria-label="上个月">‹</button>`
+    + `<button type="button" data-usage-month="1" aria-label="下个月">›</button>`
+    + `<button type="button" data-usage-month="12" aria-label="下一年">»</button>`
+    + `</div>`;
+  el.usageCalendar.append(head);
+  head.querySelectorAll("[data-usage-month]").forEach(button => button.onclick = () => {
+    usage.calendar = new Date(anchor.getFullYear(), anchor.getMonth() + Number(button.dataset.usageMonth), 1);
+    renderUsageCalendar();
+  });
+  const months = document.createElement("div");
+  months.className = "usage-cal-months";
+  months.append(usageMonthGrid(anchor), usageMonthGrid(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1)));
+  el.usageCalendar.append(months);
+}
+function pickUsageDay(day) {
+  const usage = state.usage;
+  if (!usage.pendingStart || usage.pendingEnd) {
+    usage.pendingStart = day;
+    usage.pendingEnd = null;
+    renderUsageCalendar();
+    renderUsageRangePresets();
+    return;
+  }
+  usage.pendingEnd = day;
+  applyUsageCustom(usage.pendingStart, day);
+}
+function applyUsagePreset(id) {
+  const usage = state.usage;
+  usage.range = {preset:id,start:null,end:null};
+  usage.pendingStart = usage.pendingEnd = null;
+  // 12/24 小时档在按天下只剩一两个点，强制切到按小时
+  if (usagePreset(id).hours) usage.granularity = "hour";
+  usage.view = null;
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function applyUsageCustom(startDay, endDay) {
+  const usage = state.usage;
+  const low = startDay <= endDay ? startDay : endDay;
+  const high = startDay <= endDay ? endDay : startDay;
+  const start = new Date(low.getFullYear(), low.getMonth(), low.getDate(), 0, 0, 0, 0);
+  const end = new Date(high.getFullYear(), high.getMonth(), high.getDate(), 23, 59, 0, 0);
+  usage.range = {preset:null,start:start,end:end};
+  usage.pendingStart = usage.pendingEnd = null;
+  if (end - start <= 86400000) usage.granularity = "hour";
+  usage.view = null;
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageModelName(key, fallback) {
+  // 显示名优先取配置里的 name；历史里出现过但已从配置移除的模型加标注，
+  // 否则用户会疑惑这个模型为什么在设置页里找不到
+  const entry = state.usage.catalog[key];
+  if (entry) return entry.name;
+  return `${fallback || key}（未在配置中）`;
+}
+function usageProviderName(id, fallback) {
+  const known = state.usage.configuredProviders[id];
+  if (known) return known;
+  // 与后端 UNKNOWN_PROVIDER 对应：早期记录里 usage.model 不含供应商前缀
+  if (id === "unknown") return "未知供应商";
+  return fallback || id || "未知供应商";
+}
+function usageSyncCatalog() {
+  // 配置目录只用来把历史记录里的键映射成设置页里显示的同一个名字
+  const usage = state.usage;
+  const configured = {};
+  const catalog = {};
+  (state.models || []).filter(item => item.enabled !== false).forEach(item => {
+    const key = modelKey(item);
+    const provider = item.provider || "";
+    catalog[key] = {
+      name: item.name || item.id || key,
+      provider: provider,
+      providerName: item.provider_name || provider,
+    };
+    if (!(provider in configured)) configured[provider] = item.provider_name || provider;
+  });
+  usage.catalog = catalog;
+  usage.configuredProviders = configured;
+
+  // 下拉选项只列「有调用记录」的模型与供应商：candidates 按时间窗算出，不随当前筛选缩水。
+  // 列出从没调用过的配置模型只会让用户选到空结果，所以不列。
+  const data = usage.data || {};
+  const candidates = data.candidates || {};
+  usage.providerOptions = (candidates.providers || [])
+    .map(row => ({value: row.provider, label: usageProviderName(row.provider, row.label)}));
+  usage.modelOptions = (candidates.models || [])
+    .filter(row => !usage.provider || row.provider === usage.provider)
+    .map(row => ({
+      value: row.model,
+      label: usageModelName(row.model, row.label),
+      note: usage.provider ? "" : usageProviderName(row.provider),
+    }));
+
+  // 当前时间窗内该模型没有记录时它不在候选里，但选中项要原样留着：
+  // 静默清空会让下拉和表格各说各话，用户也看不到自己到底筛了什么。
+  if (usage.model && !usage.modelOptions.some(item => item.value === usage.model)) {
+    usage.modelOptions.push({value: usage.model, label: usageModelName(usage.model), note: ""});
+  }
+  if (usage.provider && !usage.providerOptions.some(item => item.value === usage.provider)) {
+    usage.providerOptions.push({value: usage.provider, label: usageProviderName(usage.provider), count: 0});
+  }
+}
+function usagePickProvider(value) {
+  const usage = state.usage;
+  usage.provider = value;
+  // 已选模型若不属于新供应商，两个条件会自相矛盾查出空结果，直接回落到全部模型
+  if (usage.model) {
+    const row = usageCandidateModel(usage.model);
+    const owner = row ? row.provider : (usage.catalog[usage.model] || {}).provider;
+    if (owner && owner !== value) usage.model = "";
+  }
+  usage.view = null;
+  usageSyncCatalog();
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageCandidateModel(key) {
+  const candidates = (state.usage.data || {}).candidates || {};
+  return (candidates.models || []).find(item => item.model === key);
+}
+function usagePickModel(value) {
+  const usage = state.usage;
+  usage.model = value;
+  // 模型键自带供应商，选模型时把供应商一并对齐，否则会组成互相矛盾的条件查出空结果
+  const row = usageCandidateModel(value);
+  const owner = row ? row.provider : (usage.catalog[value] || {}).provider;
+  if (owner && owner !== usage.provider) usage.provider = owner;
+  usage.view = null;
+  usageSyncCatalog();
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageAdoptData(data) {
+  const usage = state.usage;
+  usage.data = data;
+  // 跨度过大时服务端只给按天桶，粒度档位跟着回落，避免显示值与可用选项自相矛盾
+  if (data.range.resolution === "day") usage.granularity = "day";
+}
+function usageQueryKey(window_) {
+  const usage = state.usage;
+  return `${usageIsoLocal(window_.start)}|${usageIsoLocal(window_.end)}|${usage.provider}|${usage.model}`;
+}
+async function usageEnsureCatalog() {
+  // 配置目录现在只用于把历史里的键映射成设置页的显示名；缺失时显示名会退回原始键，
+  // 所以先补一次拉取，保证刚打开面板时名字就对得上
+  if ((state.models || []).length) return;
+  try {
+    const data = await request("/config/models");
+    state.models = data.models || [];
+  } catch (_) { /* 拉取失败就保持空列表，用量本身仍可查看 */ }
+}
+async function usageEnterTab() {
+  // 首次进入先备好配置目录（名称映射用），再取用量数据渲染
+  await usageEnsureCatalog();
+  usageSyncCatalog();
+  if (state.usage.loaded) renderUsage();
+  else await loadUsageStats();
+}
+async function loadUsageStats(force = false) {
+  const usage = state.usage;
+  const window_ = usageWindow();
+  const key = usageQueryKey(window_);
+  const cached = usage.cache[key];
+  if (!force && cached) {
+    // 命中缓存也要作废仍在飞的请求：否则它返回时令牌还对得上，
+    // 会把刚渲染出来的这份缓存结果覆盖成上一个筛选的数据
+    usage.token += 1;
+    usage.loading = false;
+    if (el.usageRefresh) el.usageRefresh.disabled = false;
+    usageAdoptData(cached);
+    usage.error = "";
+    usage.loaded = true;
+    renderUsage();
+    return;
+  }
+  // 令牌用于丢弃过期响应：区间/筛选可以连续切换，抢先返回的旧结果不能写进当前视图
+  const token = usage.token + 1;
+  usage.token = token;
+  usage.loading = true;
+  usage.error = "";
+  el.usageStatus.textContent = "正在统计用量…";
+  if (el.usageRefresh) el.usageRefresh.disabled = true;
+  try {
+    const query = `?start=${encodeURIComponent(usageIsoLocal(window_.start))}&end=${encodeURIComponent(usageIsoLocal(window_.end))}`
+      + (usage.provider ? `&provider=${encodeURIComponent(usage.provider)}` : "")
+      + (usage.model ? `&model=${encodeURIComponent(usage.model)}` : "");
+    const data = await request(`/usage/stats${query}`);
+    if (usage.token !== token) return;
+    if (Object.keys(usage.cache).length >= USAGE_CACHE_LIMIT) usage.cache = {};
+    usage.cache[key] = data;
+    usageAdoptData(data);
+    usage.loaded = true;
+  } catch (error) {
+    if (usage.token !== token) return;
+    usage.error = error.message;
+  } finally {
+    if (usage.token === token) {
+      usage.loading = false;
+      if (el.usageRefresh) el.usageRefresh.disabled = false;
+      renderUsage();
+    }
+  }
+}
+function renderUsageOverview(data) {
+  const totals = data.totals;
+  const base = totals.cache_read + totals.input;
+  const hitRate = base > 0 ? `${Math.round((totals.cache_read / base) * 100)}%` : "—";
+  const cards = [
+    ["总用量", formatTokens(totals.total)],
+    ["输入", formatTokens(totals.input)],
+    ["输出", formatTokens(totals.output)],
+    ["实测 / 估算", `${formatTokens(totals.measured)} / ${formatTokens(totals.estimated)}`],
+    ["缓存命中率", hitRate],
+    ["会话数", String(totals.sessions)],
+  ];
+  el.usageOverview.innerHTML = cards.map(pair => `<div class="usage-stat"><span>${pair[0]}</span><b>${pair[1]}</b></div>`).join("");
+}
+function usagePieGroups() {
+  const usage = state.usage, data = usage.data;
+  if (usage.groupBy === "provider") {
+    return (data.providers || []).map(row =>
+      ({label:usageProviderName(row.provider, row.label), value:row.total}));
+  }
+  if (usage.model) {
+    // 选定单个模型后仍按模型切分只剩一个满圆，改为看这个模型的 token 构成
+    const row = (data.models || []).find(item => item.model === usage.model);
+    if (!row) return [];
+    return [["输入",row.input],["输出",row.output],["缓存读",row.cache_read],["缓存写",row.cache_write]]
+      .filter(pair => pair[1] > 0).map(pair => ({label:pair[0],value:pair[1]}));
+  }
+  const models = data.models || [];
+  const groups = models.slice(0, 6).map(row =>
+    ({label:usageModelName(row.model, row.label), value:row.total}));
+  const rest = models.slice(6);
+  if (rest.length) groups.push({label:`其他 ${rest.length} 个`,value:rest.reduce((sum,row) => sum + row.total, 0)});
+  return groups;
+}
+function usageTableRows(isProvider) {
+  const data = state.usage.data;
+  if (isProvider) {
+    return (data.providers || []).map(row => ({
+      name: usageProviderName(row.provider, row.label), fullKey: row.provider,
+      total: row.total, input: row.input, output: row.output,
+      measured: row.measured, estimated: row.estimated, turns: row.turns,
+    }));
+  }
+  return (data.models || []).map(row => ({
+    name: usageModelName(row.model, row.label), fullKey: row.model,
+    provider: usageProviderName(row.provider),
+    total: row.total, input: row.input, output: row.output,
+    measured: row.measured, estimated: row.estimated, turns: row.turns,
+  }));
+}
+function renderUsageTable() {
+  const usage = state.usage, data = usage.data;
+  if (!data || !el.usageTable) return;
+  const isProvider = usage.groupBy === "provider";
+  const columns = USAGE_COLUMNS.filter(item => !(isProvider && item.key === "provider"))
+    .map(item => item.key === "name" ? {key:item.key,label:isProvider ? "供应商" : "模型",numeric:item.numeric} : item);
+  const rows = usageTableRows(isProvider);
+  const sort = usage.sort;
+  const column = USAGE_COLUMNS.find(item => item.key === sort.key) || USAGE_COLUMNS[2];
+  rows.sort((left, right) => {
+    const a = left[sort.key], b = right[sort.key];
+    const result = column.numeric ? (a - b) : String(a).localeCompare(String(b));
+    return sort.desc ? -result : result;
+  });
+  el.usageTableTitle.textContent = isProvider ? "供应商明细" : "模型明细";
+  if (!rows.length) { el.usageTable.innerHTML = '<div class="chart-empty">所选范围内没有用量记录</div>'; return; }
+  // 名称列显示配置里的显示名，完整 provider/model 键放在 title 里，便于与设置页对照
+  const cells = row => columns.map(item => {
+    if (item.key === "name") {
+      return `<td title="${escapeHtml(row.fullKey || row.name)}">${escapeHtml(row.name)}</td>`;
+    }
+    return `<td class="${item.numeric ? "num" : ""}">${escapeHtml(item.numeric ? formatTokens(row[item.key]) : row[item.key])}</td>`;
+  }).join("");
+  el.usageTable.innerHTML = `<table class="usage-table"><thead><tr>${columns.map(item =>
+    `<th class="${item.numeric ? "num" : ""}"><button type="button" data-usage-sort="${item.key}" class="${sort.key === item.key ? "active" : ""}">${item.label}${sort.key === item.key ? (sort.desc ? " ↓" : " ↑") : ""}</button></th>`
+  ).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table>`;
+  el.usageTable.querySelectorAll("[data-usage-sort]").forEach(button => button.onclick = () => {
+    const key = button.dataset.usageSort;
+    const target = USAGE_COLUMNS.find(item => item.key === key) || USAGE_COLUMNS[2];
+    if (usage.sort.key === key) usage.sort.desc = !usage.sort.desc;
+    else usage.sort = {key:key,desc:target.numeric};
+    renderUsageTable();
+  });
+}
+function setUsageView(next) {
+  state.usage.view = next;
+  renderUsageCharts();
+}
+function announceUsageHover(row) {
+  if (!el.usageLive) return;
+  el.usageLive.textContent = row
+    ? `${row.t} 用量：总 ${formatTokens(row.total)}，输入 ${formatTokens(row.input)}，输出 ${formatTokens(row.output)}`
+    : "";
+}
+function renderUsageCharts() {
+  const usage = state.usage, data = usage.data;
+  if (!data) return;
+  const buckets = usageBuckets(), domain = usageDomain(), view = usage.view;
+  if (!buckets.length || !domain) return;
+  Charts.line(el.usageLine, {
+    buckets: buckets, domain: domain, view: view,
+    series: [{key:"input",label:"输入",color:"var(--cyan)"},{key:"output",label:"输出",color:"var(--green)"}],
+    onViewChange: setUsageView, onHover: announceUsageHover,
+  });
+  Charts.bar(el.usageBar, {
+    buckets: buckets, domain: domain, view: view,
+    onViewChange: setUsageView, onHover: announceUsageHover,
+  });
+}
+function renderUsage() {
+  const usage = state.usage, data = usage.data;
+  usageSyncCatalog();
+  // 标签直接由当前选中项反查，配置改名后不会留着旧值；查不到就退回原始键
+  const picked = usage.modelOptions.find(item => item.value === usage.model);
+  el.usageGroupLabel.textContent = usage.groupBy === "provider" ? "供应商用量" : "模型用量";
+  el.usageProviderLabel.textContent = usage.provider ? usageProviderName(usage.provider) : "全部供应商";
+  el.usageModelLabel.textContent = usage.model
+    ? (picked ? picked.label : usageModelName(usage.model))
+    : "全部模型";
+  el.usageGranularityLabel.textContent = usage.granularity === "hour" ? "按小时" : "按天";
+  el.usageRangeLabel.textContent = usageRangeText();
+  renderUsageListboxes();
+  if (!data) {
+    el.usageStatus.textContent = usage.error ? `用量统计失败：${usage.error}` : "正在统计用量…";
+    return;
+  }
+  el.usageStatus.textContent = usage.error
+    ? `用量统计失败：${usage.error}`
+    : `${data.range.start.replace("T", " ")} 至 ${data.range.end.replace("T", " ")}`
+      + ` · 可用最细粒度 ${data.range.resolution === "hour" ? "按小时" : "按天"}`
+      + (usage.loading ? " · 正在刷新…" : "");
+  renderUsageOverview(data);
+  renderUsageCharts();
+  el.usagePieTitle.textContent = usage.groupBy === "provider"
+    ? "供应商占比"
+    : (usage.model ? `${picked ? picked.label : usageModelName(usage.model)} 构成` : "模型占比");
+  Charts.pie(el.usagePie, {groups:usagePieGroups(),unit:"总量"});
+  renderUsageTable();
+}
+function bindUsagePanel() {
+  if (!el.usageGroup) return;
+  el.usageGroup.onclick = () => toggleUsagePopover(el.usageGroup, el.usageGroupList, renderUsageListboxes);
+  el.usageProvider.onclick = () => toggleUsagePopover(el.usageProvider, el.usageProviderList, renderUsageListboxes);
+  el.usageModel.onclick = () => toggleUsagePopover(el.usageModel, el.usageModelList, renderUsageListboxes);
+  el.usageGranularity.onclick = () => toggleUsagePopover(el.usageGranularity, el.usageGranularityList, renderUsageListboxes);
+  el.usageRange.onclick = () => toggleUsagePopover(el.usageRange, el.usageRangePanel, () => {
+    const usage = state.usage;
+    usage.pendingStart = usage.pendingEnd = null;
+    const anchor = usage.range.end || usage.range.start || new Date();
+    usage.calendar = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    renderUsageCalendar();
+    renderUsageRangePresets();
+  });
+  if (el.usageRefresh) el.usageRefresh.onclick = () => loadUsageStats(true);
+  document.addEventListener("click", event => {
+    if (!state.settings.open || state.settings.activeTab !== "usage") return;
+    if (event.target.closest(".usage-filter")) return;
+    closeUsagePopovers();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !state.settings.open || state.settings.activeTab !== "usage") return;
+    if (!usagePopoverOpen()) return;
+    event.preventDefault();
+    closeUsagePopovers();
+  });
+}
+
 async function bootstrap() {
   setConnection("checking","连接中");
   const results = await Promise.all([settle(request("/health")),settle(request("/config/models")),settle(request("/skills")),settle(request("/sessions"))]);
@@ -1840,6 +2428,15 @@ el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSe
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
 if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
 if (el.refreshSkills) el.refreshSkills.onclick = () => loadSkills();
+bindUsagePanel();
+// 图表按像素宽度绘制，窗口尺寸变化后需要重画；用量页不可见时跳过
+let usageResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(usageResizeTimer);
+  usageResizeTimer = setTimeout(() => {
+    if (state.settings.open && state.settings.activeTab === "usage" && state.usage.loaded) renderUsage();
+  }, 160);
+});
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;

@@ -293,8 +293,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=65" in index
-    assert "style.css?v=56" in index
+    assert "app.js?v=71" in index
+    assert "style.css?v=58" in index
 
 
 def test_webui_voice_input_contract():
@@ -308,8 +308,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=56" in index
-    assert "app.js?v=65" in index
+    assert "style.css?v=58" in index
+    assert "app.js?v=71" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -439,4 +439,96 @@ def test_webui_turn_rail_navigates_conversation_turns():
                  ".turn-rail-panel{position:fixed;", ".turn-rail-panel.show{",
                  ".turn-rail-row{", ".turn-rail-index{", ".turn-rail-row.active .turn-rail-index{"):
         assert rule in stylesheet
+
+
+def test_webui_usage_panel_contract():
+    """设置中心第四个 Tab「用量」：供应商/模型维度、按天/按小时、日历选区间、三图 + 明细表。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    charts = (Path(WEBUI_DIR) / "charts.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+    backend_dir = Path(__file__).resolve().parents[1]
+    stats = (backend_dir / "usage_stats.py").read_text(encoding="utf-8")
+
+    # Tab 排在 MCP 之后，面板与筛选控件齐备
+    assert 'data-settings-tab="usage"' in index
+    assert 'id="panel-usage"' in index
+    assert index.index('data-settings-tab="usage"') > index.index('data-settings-tab="mcp"')
+    for anchor in ('id="usage-group"', 'id="usage-provider"', 'id="usage-model"', 'id="usage-granularity"',
+                   'id="usage-range"', 'id="usage-range-panel"', 'id="usage-calendar"', 'id="usage-overview"',
+                   'id="usage-line"', 'id="usage-pie"', 'id="usage-bar"', 'id="usage-table"'):
+        assert anchor in index
+    # 筛选顺序：分组 → 供应商 → 模型 → 粒度 → 日期
+    assert index.index('id="usage-group"') < index.index('id="usage-provider"')
+    assert index.index('id="usage-provider"') < index.index('id="usage-model"')
+    assert index.index('id="usage-model"') < index.index('id="usage-granularity"')
+    # 日历面板挂在筛选行下而不是日期触发器内：它宽约 560，
+    # 跟着触发器左缘向右展开会顶出弹窗右缘被裁掉
+    assert index.index('id="usage-range-panel"') > index.index('id="usage-refresh"')
+    assert index.index('id="usage-range-panel"') < index.index('id="usage-status"')
+    assert ".usage-filters{position:relative;" in stylesheet
+    assert ".usage-range-panel{position:absolute;z-index:26;top:calc(100% + 5px);right:0;left:auto;max-width:100%;" in stylesheet
+    # 图表模块先于 app.js 加载，且不引任何外部资源（内网离线）
+    assert 'charts.js?v=' in index
+    assert index.index('charts.js?v=') < index.index('app.js?v=')
+    assert '<script src="http' not in index
+
+    # 接口与聚合口径
+    assert "/usage/stats" in script
+    assert "/usage/stats" in (backend_dir / "app.py").read_text(encoding="utf-8")
+    assert "function loadUsageStats(" in script
+    assert "function usageRollupDays(" in script
+    assert "function usageDrilled(" in script
+    assert 'if (tab === "usage")' in script
+    # 供应商/模型筛选项只列「有调用记录」的模型：candidates 按时间窗算出、不随筛选缩水。
+    # 列出从没调用过的配置模型只会让用户选到空结果。
+    assert "function usageSyncCatalog(" in script
+    assert "data.candidates" in script
+    assert '"candidates"' in stats
+    assert "function usageProviderName(" in script
+    assert "function usageModelName(" in script
+    assert "&provider=" in script
+    assert '"provider"' in stats
+    # 配置目录只用于名称映射，不再作为选项来源
+    assert "(state.models || []).filter(item => item.enabled !== false)" in script
+    # 选中项在当前时间窗无记录时仍保留下拉里，不静默清空
+    assert "usage.modelOptions.push({value: usage.model" in script
+    # 结果缓存有上限：key 精确到分钟，跨分钟后旧条目再也命中不了，不设上限会一直堆积
+    assert "USAGE_CACHE_LIMIT" in script
+    assert "if (Object.keys(usage.cache).length >= USAGE_CACHE_LIMIT) usage.cache = {};" in script
+    # 命中缓存时也要作废在飞请求，否则它返回时会把这份缓存结果覆盖成上一个筛选的数据
+    assert "usage.token += 1;" in script
+    # 分组只决定饼图与明细表的拆分维度，不再置灰模型下拉、也不再清空已选筛选
+    assert "el.usageModel.disabled" not in script
+    for label in ("最近 12 小时", "最近 24 小时", "最近 3 天", "最近 7 天", "最近 30 天"):
+        assert label in script
+    for label in ("模型用量", "供应商用量", "按小时", "按天"):
+        assert label in script
+    # 12/24 小时档在按天下只剩一两个点，选择后自动切到按小时
+    assert "if (usagePreset(id).hours) usage.granularity = \"hour\";" in script
+    # 单个模型下饼图退化为该模型的 token 构成，避免只剩一个满圆
+    assert "缓存读" in script and "缓存写" in script
+    # 缓存命中率口径不假设 input 与 cache_read 的包含关系
+    assert "totals.cache_read / base" in script
+
+    # 图表模块自带折线/饼/柱与时间轴缩放，零依赖
+    for name in ("function line(", "function pie(", "function bar(", "function bindTimeZoom(",
+                 "function clampView(", "function arcPath("):
+        assert name in charts
+    assert "https://" not in charts and "http://" not in charts.replace("http://www.w3.org/2000/svg", "")
+    assert 'svg.addEventListener("dblclick"' in charts
+    assert 'svg.addEventListener("wheel"' in charts
+    assert 'svg.addEventListener("mousedown"' in charts
+
+    for rule in (".usage-panel{", ".usage-filters{", ".usage-select{", ".usage-listbox{",
+                 ".usage-range-panel{", ".usage-cal-day{", ".usage-overview{", ".usage-stat{",
+                 ".usage-table{", ".chart-legend{", ".chart-tip{", ".chart-empty{", ".pie-legend{"):
+        assert rule in stylesheet
+
+
+def test_webui_serves_charts_module():
+    response = client.get("/ui/charts.js")
+
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
 

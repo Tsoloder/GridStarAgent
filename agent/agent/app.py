@@ -6,7 +6,7 @@ import secrets
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +62,7 @@ from session import (
     validate_session_id,
 )
 from skill_runtime import SkillError, SkillRegistry, tool_is_allowed
+from usage_stats import collect_usage
 from workflow_runner import run_workflow
 
 setup_logging()
@@ -540,6 +541,36 @@ async def refresh_models():
         return JSONResponse({"error": "no config"}, status_code=400)
     await _model_catalog.refresh()
     return await get_models()
+
+
+def _parse_local_dt(value):
+    """解析本地时间参数（YYYY-MM-DD[THH[:MM[:SS]]]），无法识别时返回 None。"""
+    text = str(value or "").strip().replace(" ", "T")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+@app.get("/usage/stats")
+async def usage_stats_endpoint(request: Request):
+    """Token 用量统计：按时间窗聚合会话历史里的 usage 记录。"""
+    end = _parse_local_dt(request.query_params.get("end")) or datetime.now()
+    start = _parse_local_dt(request.query_params.get("start")) or (end - timedelta(days=7))
+    model = (request.query_params.get("model") or "").strip()
+    provider = (request.query_params.get("provider") or "").strip()
+    provider_names = {}
+    if current_config is not None:
+        provider_names = {item.id: item.name for item in current_config.providers}
+    try:
+        return collect_usage(start, end, model, provider, provider_names)
+    except Exception as exc:
+        logger.exception("usage stats failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
 
 
 @app.post("/chat/stream")
