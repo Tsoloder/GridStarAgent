@@ -396,7 +396,7 @@ def test_chat_stream_replays_history_on_reconnect(monkeypatch):
     from types import SimpleNamespace
 
     install_config(monkeypatch)
-    monkeypatch.setattr(server, "_mcp", object())
+    monkeypatch.setattr(server, "_mcp", SimpleNamespace(connected=True))
     monkeypatch.setattr(server, "skill_registry",
                         SimpleNamespace(reload=lambda: None,
                                         set_roots=lambda *a, **k: None))
@@ -521,7 +521,7 @@ def _install_fake_loop(monkeypatch, started):
 
 def _install_stream_env(monkeypatch):
     install_config(monkeypatch)
-    monkeypatch.setattr(server, "_mcp", object())
+    monkeypatch.setattr(server, "_mcp", SimpleNamespace(connected=True))
     monkeypatch.setattr(server, "skill_registry",
                         SimpleNamespace(reload=lambda: None,
                                         set_roots=lambda *a, **k: None))
@@ -646,3 +646,293 @@ def test_get_sessions_marks_active_background(monkeypatch):
     del server._pending_approvals[active_id + ":call-1"]
     sessions = client.get("/sessions").json()["sessions"]
     assert sessions[0]["waiting"] is False
+
+
+def test_background_events_broadcast_to_every_subscriber():
+    """同一轮事件要广播给所有订阅者，而不是被先到的那个 consumer 抢走。"""
+    import asyncio
+
+    async def main():
+        bg = server.BackgroundSession("broadcast-1")
+        first = bg.subscribe()
+        second = bg.subscribe()
+        await server._bg_put(bg, {"type": "text_chunk", "delta": "一起看"})
+        return (
+            first.get_nowait(),
+            second.get_nowait(),
+            len(bg.history),
+            bg.subscriber_count,
+        )
+
+    first, second, history_size, count = asyncio.run(main())
+    assert _strip_seq(first) == {"type": "text_chunk", "delta": "一起看"}
+    assert _strip_seq(second) == {"type": "text_chunk", "delta": "一起看"}
+    assert history_size == 1
+    assert count == 2
+
+
+def test_background_unsubscribe_updates_subscriber_count():
+    import asyncio
+
+    async def main():
+        bg = server.BackgroundSession("broadcast-2")
+        queue = bg.subscribe()
+        bg.unsubscribe(queue)
+        return bg.subscriber_count, len(bg.subscribers)
+
+    assert asyncio.run(main()) == (0, 0)
+
+
+def test_stop_background_invalidates_and_cancels_running_task():
+    """删除/清空会话要先取消后台任务，并置 invalidated 阻止它继续落盘。"""
+    import asyncio
+
+    async def main():
+        cancelled = []
+
+        async def worker():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                cancelled.append(True)
+                raise
+
+        bg = server.BackgroundSession("stop-1")
+        bg.task = asyncio.create_task(worker())
+        await asyncio.sleep(0)
+        await server._stop_background(bg)
+        return bg.invalidated, cancelled, bg.task.done()
+
+    invalidated, cancelled, done = asyncio.run(main())
+    assert invalidated is True
+    assert cancelled == [True]
+    assert done is True
+
+
+def test_invalidated_background_turn_skips_persistence(monkeypatch):
+    """被标记失效的轮次不得再 save_session / update_index，否则已删会话会复活。"""
+    import asyncio
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    persisted = []
+    monkeypatch.setattr(server, "save_session", lambda *a, **k: persisted.append("save"))
+    monkeypatch.setattr(server, "update_index", lambda *a, **k: persisted.append("index"))
+    monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
+    monkeypatch.setattr(
+        server, "load_session",
+        lambda _: SimpleNamespace(model_id="m", messages=[],
+                                  append_trajectory=lambda *a, **k: None),
+    )
+
+    def fake_loop(*args, **kwargs):
+        async def gen():
+            yield {"type": "tool_call", "name": "ImportCAD", "args": {}}
+            yield {"type": "done"}
+        return gen()
+
+    monkeypatch.setattr(server, "run_agent_loop", fake_loop)
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        bg.invalidated = True
+        await server._run_background_loop(
+            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+        )
+        return bg.done_event.is_set()
+
+    assert asyncio.run(main()) is True
+    assert persisted == []
+
+
+def test_background_turn_holds_session_turn_lock(monkeypatch):
+    """chat 后台轮与 workflow 共用同一把 session turn lock，二者不能同时改历史。"""
+    import asyncio
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    observed = []
+
+    async def fake_loop(*args, **kwargs):
+        observed.append(server._session_turn_lock(session_id).locked())
+
+    monkeypatch.setattr(server, "_run_background_loop", fake_loop)
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        await server._run_background_locked(
+            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+        )
+
+    asyncio.run(main())
+    assert observed == [True]
+
+
+def test_runtime_retire_defers_close_until_released(monkeypatch):
+    """配置更新时旧 runtime 仍被后台任务引用，必须等引用归零才关闭。"""
+    import asyncio
+
+    closed = []
+
+    async def close(runtime):
+        closed.append(runtime)
+
+    monkeypatch.setattr(server, "_close_runtime", close)
+    monkeypatch.setattr(server, "_runtime_refs", {})
+    monkeypatch.setattr(server, "_retired_runtimes", set())
+
+    runtime = object()
+
+    async def main():
+        server._acquire_runtime(runtime)
+        await server._retire_runtime(runtime)
+        deferred = list(closed)
+        await server._release_runtime(runtime)
+        return deferred
+
+    assert asyncio.run(main()) == []
+    assert closed == [runtime]
+
+
+def test_runtime_retire_closes_immediately_without_refs(monkeypatch):
+    import asyncio
+
+    closed = []
+
+    async def close(runtime):
+        closed.append(runtime)
+
+    monkeypatch.setattr(server, "_close_runtime", close)
+    monkeypatch.setattr(server, "_runtime_refs", {})
+    monkeypatch.setattr(server, "_retired_runtimes", set())
+
+    runtime = object()
+    asyncio.run(server._retire_runtime(runtime))
+    assert closed == [runtime]
+
+
+def test_chat_and_workflow_require_connected_mcp(monkeypatch):
+    """MCP 连接失败但对象仍在时，入口要按未连接拦截，而不是放进 agent_loop。"""
+    import uuid
+
+    install_config(monkeypatch)
+    monkeypatch.setattr(server, "_mcp", SimpleNamespace(connected=False))
+    client = TestClient(server.app)
+
+    chat = client.post(
+        "/chat/stream",
+        json={"session_id": str(uuid.uuid4()), "message": "hi"},
+    )
+    assert chat.status_code == 503
+
+    workflow = client.post(
+        "/workflows/run",
+        json={"session_id": str(uuid.uuid4()), "steps": []},
+    )
+    assert workflow.status_code == 503
+
+
+class _FakeCancellableTask:
+    """可 await、可 cancel 的假后台任务：cancel 后立刻 done，模拟取消当场落地。"""
+
+    def __init__(self, events):
+        self.events = events
+        self._done = False
+
+    def done(self):
+        return self._done
+
+    def cancel(self):
+        self.events.append("cancel")
+        self._done = True
+
+    def __await__(self):
+        async def _noop():
+            return None
+
+        return _noop().__await__()
+
+
+def test_delete_session_stops_background_task_before_deleting(monkeypatch):
+    """删除会话必须先取消后台任务再删目录，否则任务收尾会把会话写回来。"""
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    events = []
+    monkeypatch.setattr(
+        server, "delete_session",
+        lambda sid: events.append(("delete", sid)) or True,
+    )
+
+    bg = server.BackgroundSession(session_id)
+    bg.task = _FakeCancellableTask(events)
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    response = TestClient(server.app).delete("/sessions/%s" % session_id)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert events == ["cancel", ("delete", session_id)]
+    assert bg.invalidated is True
+
+
+def test_clear_session_stops_background_task_first(monkeypatch):
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    events = []
+    monkeypatch.setattr(
+        server, "clear_session",
+        lambda sid: events.append(("clear", sid)) or True,
+    )
+    ledger_cleared = []
+    monkeypatch.setattr(
+        server, "TaskLedger",
+        lambda sid: SimpleNamespace(clear=lambda: ledger_cleared.append(sid)),
+    )
+
+    bg = server.BackgroundSession(session_id)
+    bg.task = _FakeCancellableTask(events)
+    monkeypatch.setitem(server._background_sessions, session_id, bg)
+
+    response = TestClient(server.app).post("/sessions/%s/clear" % session_id)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert events == ["cancel", ("clear", session_id)]
+    assert ledger_cleared == [session_id]
+
+
+def test_cors_allows_loopback_any_port_and_rejects_others():
+    """localhost / 127.0.0.1 的任意端口都要放行，其他来源不放行。"""
+    client = TestClient(server.app)
+
+    allowed = client.options(
+        "/chat/stream",
+        headers={
+            "Origin": "http://127.0.0.1:8080",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert allowed.status_code == 200
+    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:8080"
+
+    localhost = client.options(
+        "/chat/stream",
+        headers={
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert localhost.headers["access-control-allow-origin"] == "http://localhost:5173"
+
+    rejected = client.options(
+        "/chat/stream",
+        headers={
+            "Origin": "http://evil.example.com",
+            "Access-Control-Request-Method": "POST",
+        },
+    )
+    assert "access-control-allow-origin" not in rejected.headers

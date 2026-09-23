@@ -210,6 +210,15 @@ function stopSession(id) {
   if (controller) controller.abort();
   request(`/sessions/${encodeURIComponent(id)}/cancel`, {method:"POST",body:"{}"}).catch(() => {});
 }
+// 丢弃某会话的前端流状态：中断在跑的流并清掉 controller/stream/stash 三张表。
+// 删除与清空会话都要走这里，否则被切走会话的暂存 DOM 会在清空后又被挂回，看起来像没清。
+function dropStreamState(id) {
+  const controller = state.controllers.get(id);
+  if (controller) controller.abort();
+  state.controllers.delete(id);
+  state.streams.delete(id);
+  state.stashed.delete(id);
+}
 // 会话列表徽标：前端实时状态优先；刷新页面后靠服务端 active 字段兜底
 const STATUS_TEXT = {running:"进行中", done:"已完成", stopped:"已停止", error:"异常", waiting:"待确认"};
 function setStatus(id, status) {
@@ -1492,10 +1501,19 @@ async function renameSession(session) {
 }
 async function clearSession(session) {
   if (!(await showDialog({title:"清空会话", message:`将清空“${session.title}”的全部消息，此操作不可撤销。`, confirmText:"清空", danger:true}))) return;
-  try { await request(`/sessions/${encodeURIComponent(session.id)}/clear`, {method:"POST",body:"{}"}); if (state.session && state.session.meta.id === session.id) await loadSession(session.id); await refreshSessions(); } catch (error) { showToast(error.message); }
+  try {
+    await request(`/sessions/${encodeURIComponent(session.id)}/clear`, {method:"POST",body:"{}"});
+    // 清空同样要丢弃前端流状态：否则被切走会话的暂存 DOM 会在切回时覆盖清空结果
+    dropStreamState(session.id);
+    if (state.session && state.session.meta.id === session.id) await loadSession(session.id);
+    await refreshSessions();
+    // 放在最后：中断流会异步走一遍 catch 并写 stopped 徽标，这里把它抹掉
+    state.status.delete(session.id);
+    syncComposer();
+  } catch (error) { showToast(error.message); }
 }
 async function deleteSession(session) {
-  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); const controller = state.controllers.get(session.id); if (controller) controller.abort(); state.controllers.delete(session.id); state.streams.delete(session.id); state.stashed.delete(session.id); state.status.delete(session.id); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay(); } await refreshSessions(); syncComposer(); } catch (error) { showToast(error.message); }
+  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); dropStreamState(session.id); state.status.delete(session.id); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay(); } await refreshSessions(); syncComposer(); } catch (error) { showToast(error.message); }
 }
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
@@ -1553,7 +1571,13 @@ async function consumeSse(response, onEvent, controller) {
     while ((boundary = buffer.indexOf("\n\n")) >= 0) {
       const frame = buffer.slice(0,boundary); buffer = buffer.slice(boundary+2); let type = "message"; const dataLines = [];
       frame.split("\n").forEach(line => { if (line.startsWith("event:")) type = line.slice(6).trim(); else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^\s+/, "")); });
-      if (dataLines.length) { try { await onEvent(type, JSON.parse(dataLines.join("\n"))); } catch (error) { if (error instanceof SyntaxError) showToast(`忽略无效 SSE 数据：${type}`); else throw error; } }
+      if (dataLines.length) { try { await onEvent(type, JSON.parse(dataLines.join("\n"))); } catch (error) {
+        // error 事件会让 handleStreamEvent 抛出：这里必须主动断开，否则响应体不会被读完，
+        // 连接会一直挂到 GC（旧内核尤其明显）。SyntaxError 只是坏数据，忽略即可。
+        if (error instanceof SyntaxError) { showToast(`忽略无效 SSE 数据：${type}`); continue; }
+        if (controller) { try { controller.abort(); } catch (_) {} } else { try { reader.cancel(); } catch (_) {} }
+        throw error;
+      } }
     }
     if (done) break;
   }
@@ -1587,6 +1611,9 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   if (!state.session) { await createSession(); if (!state.session) return; }
   // 会话 id 立即锁定：后续任何 await 期间用户切走会话，消息也必须发进原会话
   const sessionId = state.session.meta.id;
+  // 会话 id 锁定后再确认一次空闲：等待 createSession/切会话期间可能刚接回后台流，
+  // 此时再发会开出第二条 SSE，同一轮被渲染进两个气泡
+  if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;
   const shown = displayContent != null ? displayContent : message;
   if (retryAttachments == null) clearAttachments();
   // 新一轮提问必须落底并恢复自动跟随，即使用户上一轮上滚停留在历史里
@@ -1641,6 +1668,8 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
 // 重连后台仍在运行的回复流：后端会把断开前的全部事件回放一遍，
 // 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
 async function reconnectStream(sessionId, info, turnTs) {
+  // 已有流在跑就不再重连：maybeReconnect 曾出现与发送动作交错的可能，二次确认避免同会话双流
+  if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;
   const assistant = createMessage("assistant", "", "");
   // 重连气泡时间/计时起点用本轮原始发送时间（落盘 ts），不是刷新时刻
   if (turnTs) setBubbleTime(assistant, turnTs);

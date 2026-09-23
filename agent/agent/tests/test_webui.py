@@ -293,7 +293,7 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=73" in index
+    assert "app.js?v=74" in index
     assert "style.css?v=58" in index
 
 
@@ -309,7 +309,7 @@ def test_webui_voice_input_contract():
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
     assert "style.css?v=58" in index
-    assert "app.js?v=73" in index
+    assert "app.js?v=74" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -371,7 +371,8 @@ def test_webui_choice_card_contract():
     assert 'if (el.composer) el.composer.classList.remove("choice-open");' in script
     assert "function openChoiceOverlay(payload)" in script
     assert "function closeChoiceOverlay()" in script
-    assert 'requestAnimationFrame(() => host.classList.add("open"))' in script
+    assert "requestAnimationFrame" in script
+    assert 'host.classList.add("open")' in script
     assert 'host.classList.remove("open");' in script
 
     # 模型询问：ask_user_question 工具事件与旧 options 文本块都走同一套浮层
@@ -548,4 +549,43 @@ def test_webui_serves_charts_module():
 
     assert response.status_code == 200
     assert "javascript" in response.headers["content-type"]
+
+
+def test_webui_clears_stream_state_and_avoids_duplicate_streams():
+    """清空会话要像删除一样丢弃前端流状态，且同会话不允许开出第二条 SSE。
+
+    回归的 bug：clearSession 只请求后端、不清理 controllers/streams/stashed，
+    被切走会话的暂存 DOM 会在切回时被 restoreView 挂回，看起来「清空没生效」。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 统一的流状态清理：中断在跑的流并清掉 controller/stream/stash 三张表
+    assert "function dropStreamState(id)" in script
+    assert "state.stashed.delete(id);" in script
+
+    clear = script[script.index("async function clearSession(session)"):]
+    clear = clear[:clear.index("async function deleteSession")]
+    assert "dropStreamState(session.id);" in clear
+    # 清空后要抹掉中断流异步写入的 stopped 徽标
+    assert "state.status.delete(session.id);" in clear
+    # 丢弃暂存 DOM 必须在刷新视图之前，否则切回时挂回的是清空前的旧内容
+    assert clear.index("dropStreamState(session.id);") < clear.index("await loadSession(session.id);")
+
+    delete = script[script.index("async function deleteSession(session)"):]
+    assert "dropStreamState(session.id);" in delete
+
+    # error 事件抛出前必须主动断开，避免响应体不被读完、连接挂到 GC
+    consume = script[script.index("async function consumeSse(response, onEvent, controller)"):]
+    consume = consume[:consume.index("function handleStreamEvent")]
+    assert "controller.abort();" in consume
+    assert "reader.cancel();" in consume
+
+    # 同会话双流防护：发送与重连在锁定会话后都要再确认一次没有在跑的流
+    guard = "if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;"
+    send = script[script.index("async function sendMessage("):]
+    send = send[:send.index("async function reconnectStream")]
+    assert guard in send
+    reconnect = script[script.index("async function reconnectStream"):]
+    reconnect = reconnect[:reconnect.index("async function maybeReconnect")]
+    assert guard in reconnect
 
