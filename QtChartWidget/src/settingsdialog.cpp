@@ -3,6 +3,7 @@
 #include "commonwidgets.h"
 #include "popups.h"
 #include "theme.h"
+#include "usagepanel.h"
 
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -284,10 +285,10 @@ void SettingsDialog::buildUi()
     auto *tl = new QHBoxLayout(tabs);
     tl->setContentsMargins(18, 0, 18, 0);
     tl->setSpacing(0);
-    const QString tabNames[3] = {QStringLiteral("模型"), QStringLiteral("技能"),
-                                 QStringLiteral("MCP 工具")};
-    QPushButton **tabPtrs[3] = {&m_tabModels, &m_tabSkills, &m_tabMcp};
-    for (int i = 0; i < 3; ++i) {
+    const QString tabNames[4] = {QStringLiteral("模型"), QStringLiteral("技能"),
+                                 QStringLiteral("MCP 工具"), QStringLiteral("用量")};
+    QPushButton **tabPtrs[4] = {&m_tabModels, &m_tabSkills, &m_tabMcp, &m_tabUsage};
+    for (int i = 0; i < 4; ++i) {
         auto *button = new QPushButton(tabNames[i], tabs);
         setClass(button, QStringLiteral("settingsTab"));
         button->setFixedHeight(42);
@@ -302,8 +303,8 @@ void SettingsDialog::buildUi()
             [this] { switchTab(QStringLiteral("models")); });
     connect(m_tabSkills, &QPushButton::clicked, this,
             [this] { switchTab(QStringLiteral("skills")); });
-    connect(m_tabMcp, &QPushButton::clicked, this,
-            [this] { switchTab(QStringLiteral("mcp")); });
+    connect(m_tabMcp, &QPushButton::clicked, this, [this] { switchTab(QStringLiteral("mcp")); });
+    connect(m_tabUsage, &QPushButton::clicked, this, [this] { switchTab(QStringLiteral("usage")); });
 
     // ---- .settings-content ----
     m_stack = new QStackedWidget(this);
@@ -311,6 +312,7 @@ void SettingsDialog::buildUi()
     m_stack->addWidget(buildModelsPage());
     m_stack->addWidget(buildSkillsPage());
     m_stack->addWidget(buildMcpPage());
+    m_stack->addWidget(buildUsagePage());
     root->addWidget(m_stack, 1);
 
     // ---- .settings-actions ----
@@ -768,6 +770,14 @@ QWidget *SettingsDialog::buildMcpPage()
     return page;
 }
 
+QWidget *SettingsDialog::buildUsagePage()
+{
+    // #panel-usage：.usage-panel 自身纵向滚动，内容由 UsagePanel 渲染
+    m_usagePanel = new UsagePanel;
+    connect(m_usagePanel, &UsagePanel::statsRequested, this, &SettingsDialog::usageStatsRequested);
+    return plainScroll(m_usagePanel, QString(), QStringLiteral("usagePanelScroll"));
+}
+
 // ------------------------------------------------------------ 数据接口
 
 void SettingsDialog::loadConfig(const QVariantMap &config, const QVariant &revision)
@@ -847,17 +857,41 @@ void SettingsDialog::switchTab(const QString &tab)
     m_tabModels->setProperty("active", tab == QLatin1String("models"));
     m_tabSkills->setProperty("active", tab == QLatin1String("skills"));
     m_tabMcp->setProperty("active", tab == QLatin1String("mcp"));
+    m_tabUsage->setProperty("active", tab == QLatin1String("usage"));
     restyle(m_tabModels);
     restyle(m_tabSkills);
     restyle(m_tabMcp);
+    restyle(m_tabUsage);
     m_stack->setCurrentIndex(tab == QLatin1String("skills")
                                  ? 1
-                                 : (tab == QLatin1String("mcp") ? 2 : 0));
+                                 : (tab == QLatin1String("mcp")
+                                        ? 2
+                                        : (tab == QLatin1String("usage") ? 3 : 0)));
     m_saveButton->setVisible(tab == QLatin1String("models"));
     if (tab == QLatin1String("mcp"))
         emit refreshMcpRequested();
     else if (tab == QLatin1String("skills"))
         renderSkills();
+    else if (tab == QLatin1String("usage") && m_usagePanel)
+        m_usagePanel->enterTab(); // 首次进入懒加载（与 MCP Tab 的既有做法一致）
+}
+
+void SettingsDialog::setUsageCatalog(const QVariantList &models)
+{
+    if (m_usagePanel)
+        m_usagePanel->setCatalogModels(models);
+}
+
+void SettingsDialog::setUsageStats(const QString &requestId, const QVariantMap &data)
+{
+    if (m_usagePanel)
+        m_usagePanel->setStats(requestId, data);
+}
+
+void SettingsDialog::setUsageLoadFailed(const QString &requestId, const QString &error)
+{
+    if (m_usagePanel)
+        m_usagePanel->setLoadFailed(requestId, error);
 }
 
 void SettingsDialog::setStatus(const QString &text)

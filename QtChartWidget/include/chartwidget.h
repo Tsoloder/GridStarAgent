@@ -13,6 +13,7 @@ class QFrame;
 class QLabel;
 class QPushButton;
 class QScrollArea;
+class QTimer;
 class QVBoxLayout;
 QT_END_NAMESPACE
 
@@ -31,6 +32,7 @@ class Toast;
 class ToolItemWidget;
 class TrajectoryView;
 class TurnRailDot;
+class TurnRailRow;
 class WorkflowRunCard;
 
 // GridStar AI 主界面（webui/index.html 的 main.app-shell）：
@@ -152,6 +154,13 @@ public:
     // 宿主保存成功后调用：清除脏标记并关闭对话框
     void settingsSaved();
 
+    // ---- 用量统计（设置中心「用量」页） ----
+    // 宿主收到 usageStatsRequested 后拉 GET /usage/stats 并回填；
+    // data 与后端响应同构：{range, totals, buckets, providers, models, candidates}
+    // 回填时必须原样带回信号下发的 requestId，不匹配的在飞响应会被丢弃
+    void setUsageStats(const QString &requestId, const QVariantMap &data);
+    void setUsageLoadFailed(const QString &requestId, const QString &error);
+
     // ---- 界面缩放（VSCode 式快捷键：Ctrl+= 放大 / Ctrl+- 缩小 / Ctrl+0 重置） ----
     void zoomIn();
     void zoomOut();
@@ -192,6 +201,9 @@ signals:
     void readModelsRequested(const QString &providerId);
     void refreshSkillsRequested();
     void refreshMcpRequested();
+    // 宿主收到后拉 GET /usage/stats（start/end 为本地时间 "yyyy-MM-ddTHH:mm"）并回填 setUsageStats
+    void usageStatsRequested(const QString &requestId, const QString &start, const QString &end,
+                             const QString &provider, const QString &model);
 
     void attachRequested();
     void voiceRequested();
@@ -236,11 +248,13 @@ private:
     void applyZoom();
     void applyTheme(const QString &id);
 
-    // 轮次导航轨
+    // 轮次导航轨（鼠标移入轨道即向右展开整轮列表，见 .turn-rail-panel）
     void rebuildTurnRail();
     void updateTurnRailActive();
-    void showTurnRailTip(int turn);
-    void hideTurnRailTip();
+    void showTurnRailPanel();
+    void scheduleHideTurnRailPanel();
+    void hideTurnRailPanel();
+    void layoutTurnRailPanel();
     void focusTurn(int turn);
 
     // 计划窗口：跑完即收起；选择浮层展开时上移让位
@@ -271,11 +285,17 @@ private:
     Composer *m_composer = nullptr;
     QString m_viewTab = QStringLiteral("chat");
 
-    // 轮次导航轨（.turn-rail）：页面最左边缘竖排白点，一轮一个
+    // 轮次导航轨（.turn-rail）：页面最左边缘竖排白点，一轮一个；
+    // 鼠标移入轨道区域后向右展开 .turn-rail-panel 列出整轮
     QWidget *m_turnRail = nullptr;
-    QFrame *m_turnRailTip = nullptr;
-    QLabel *m_turnRailTipText = nullptr;
+    QFrame *m_turnRailPanel = nullptr;
+    QLabel *m_turnRailCount = nullptr;
+    QScrollArea *m_turnRailScroll = nullptr;
+    QWidget *m_turnRailList = nullptr;
+    QVBoxLayout *m_turnRailListLayout = nullptr;
+    QTimer *m_turnRailHideTimer = nullptr;
     QList<TurnRailDot *> m_railDots;
+    QList<TurnRailRow *> m_railRows;
     QList<QPointer<MessageWidget>> m_railTurns;
     int m_railActive = 0;
 

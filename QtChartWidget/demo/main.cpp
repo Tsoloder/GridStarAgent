@@ -11,13 +11,17 @@
 #include <chartwidget.h>
 
 #include <QApplication>
+#include <QDateTime>
 #include <QDebug>
+#include <QEvent>
+#include <QMouseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QPixmap>
 #include <QStringList>
 #include <QTimer>
 #include <QVariant>
+#include <QtMath>
 
 #include <initializer_list>
 #include <utility>
@@ -211,6 +215,111 @@ QString phasePlanText()
         "```\n");
 }
 
+// GET /usage/stats 的演示响应：按小时切桶，供应商/模型两套聚合，candidates 不随筛选缩水
+QVariantMap demoUsageStats(const QString &start, const QString &end, const QString &provider,
+                           const QString &model)
+{
+    // 三个模型固定占比，便于演示分组 / 供应商筛选与占比图
+    struct Share { const char *model; const char *provider; const char *label; double weight; };
+    const Share shares[] = {
+        { "gs-pro-32k", "gridstar", "GS-Pro 32K", 0.5 },
+        { "gs-lite-8k", "gridstar", "GS-Lite 8K", 0.2 },
+        { "deepseek-chat", "deepseek", "DeepSeek Chat", 0.3 },
+    };
+
+    const QDateTime startDt = QDateTime::fromString(start, QStringLiteral("yyyy-MM-ddTHH:mm"));
+    const QDateTime endDt = QDateTime::fromString(end, QStringLiteral("yyyy-MM-ddTHH:mm"));
+    QVariantList buckets;
+    qint64 tInput = 0, tOutput = 0, tMeasured = 0, tEstimated = 0, tTurns = 0;
+    QDateTime cursor = startDt;
+    for (int index = 0; cursor <= endDt && index < 3000; ++index) {
+        const double wave = 0.55 + 0.45 * qSin(index * 0.7);
+        const qint64 inTok = qint64(80000 * wave) + 12000;
+        const qint64 outTok = qint64(inTok * 0.22) + 400;
+        const qint64 total = inTok + outTok;
+        // 每 11 桶造一条估算兜底记录（实测与估算分开记账）
+        const bool estimated = (index % 11 == 0);
+        QVariantMap bucket;
+        bucket.insert(QStringLiteral("t"), cursor.toString(QStringLiteral("yyyy-MM-ddTHH")));
+        bucket.insert(QStringLiteral("input"), inTok);
+        bucket.insert(QStringLiteral("output"), outTok);
+        bucket.insert(QStringLiteral("total"), total);
+        bucket.insert(QStringLiteral("measured"), estimated ? 0 : total);
+        bucket.insert(QStringLiteral("estimated"), estimated ? total : 0);
+        bucket.insert(QStringLiteral("turns"), 2 + index % 3);
+        buckets.append(bucket);
+        tInput += inTok;
+        tOutput += outTok;
+        tMeasured += estimated ? 0 : total;
+        tEstimated += estimated ? total : 0;
+        tTurns += 2 + index % 3;
+        cursor = cursor.addSecs(3600);
+    }
+
+    const qint64 windowTotal = tInput + tOutput;
+    QVariantList providers;
+    QVariantList models;
+    QVariantList candidateProviders;
+    QVariantList candidateModels;
+    for (const Share &share : shares) {
+        const QString providerId = QString::fromUtf8(share.provider);
+        const qint64 total = qint64(windowTotal * share.weight);
+        QVariantMap row = obj({ { "provider", providerId },
+                                { "label", QString::fromUtf8(share.label) },
+                                { "model", providerId + QLatin1Char('/') + share.model },
+                                { "total", total },
+                                { "input", qint64(total * 0.8) },
+                                { "output", total - qint64(total * 0.8) },
+                                { "measured", qint64(total * 0.9) },
+                                { "estimated", total - qint64(total * 0.9) },
+                                { "cache_read", qint64(total * 0.35) },
+                                { "cache_write", qint64(total * 0.05) },
+                                { "turns", tTurns / 3 },
+                                { "sessions", 3 } });
+        candidateModels.append(row);
+        if (!candidateProviders.isEmpty()) {
+            QVariantMap existing = candidateProviders.last().toMap();
+            if (existing.value(QStringLiteral("provider")).toString() == providerId)
+                continue;
+        }
+        QVariantMap providerRow = row;
+        providerRow.remove(QStringLiteral("model"));
+        candidateProviders.append(providerRow);
+        providers.append(providerRow);
+    }
+    for (const QVariant &v : candidateModels) {
+        const QVariantMap row = v.toMap();
+        const QString rowProvider = row.value(QStringLiteral("provider")).toString();
+        const QString rowModel = row.value(QStringLiteral("model")).toString();
+        if (!provider.isEmpty() && rowProvider != provider)
+            continue;
+        if (!model.isEmpty() && rowModel != model)
+            continue;
+        models.append(row);
+    }
+
+    QVariantMap out;
+    out.insert(QStringLiteral("range"),
+               obj({ { "start", start }, { "end", end }, { "resolution", "hour" } }));
+    out.insert(QStringLiteral("totals"),
+               obj({ { "total", tInput + tOutput },
+                     { "input", tInput },
+                     { "output", tOutput },
+                     { "measured", tMeasured },
+                     { "estimated", tEstimated },
+                     { "cache_read", qint64(tInput * 0.35) },
+                     { "cache_write", qint64(tInput * 0.05) },
+                     { "reasoning", qint64(tOutput * 0.15) },
+                     { "turns", tTurns },
+                     { "sessions", 4 } }));
+    out.insert(QStringLiteral("buckets"), buckets);
+    out.insert(QStringLiteral("providers"), providers);
+    out.insert(QStringLiteral("models"), models);
+    out.insert(QStringLiteral("candidates"),
+               obj({ { "providers", candidateProviders }, { "models", candidateModels } }));
+    return out;
+}
+
 QVariantList demoHistory()
 {
     QVariantList out;
@@ -332,15 +441,17 @@ QVariantList workflowSteps()
 class DemoHost
 {
 public:
-    explicit DemoHost(ChartWidget *chart) : m_chart(chart) { wire(); }
+    explicit DemoHost(ChartWidget *chart) : m_chart(chart) {}
 
     void populate();
     void loadHistory();
     // 轨迹视图示例数据（宿主从 /sessions/{id}/trajectory 拉到的 events）
     void loadTrajectory();
+    // 初始数据推完之后再接信号：否则 populate 的 setter 会触发下面这些处理器里
+    // 的 showToast，启动即弹一条提示压住阶段计划面板，干扰离屏对照图
+    void wire();
 
 private:
-    void wire();
     void startTurn(const QString &message, const QString &display,
                    const QVariantList &attachments);
     bool runCommand(const QString &text, const QVariantList &attachments);
@@ -526,6 +637,16 @@ void DemoHost::wire()
             m_chart->showToast(QStringLiteral("MCP 已重连"));
         });
     });
+    // 设置中心「用量」页：宿主拉 GET /usage/stats 后回填
+    QObject::connect(c, &ChartWidget::usageStatsRequested, c,
+                     [this](const QString &requestId, const QString &start, const QString &end,
+                            const QString &provider, const QString &model) {
+                         QTimer::singleShot(150, m_chart,
+                                            [this, requestId, start, end, provider, model] {
+                             m_chart->setUsageStats(requestId,
+                                                    demoUsageStats(start, end, provider, model));
+                         });
+                     });
 
     QObject::connect(c, &ChartWidget::attachRequested, c, [this] {
         const QStringList paths = QFileDialog::getOpenFileNames(
@@ -852,17 +973,92 @@ int main(int argc, char *argv[])
     host->populate();
     if (!emptyShot)
         host->loadHistory();
+    // 初始数据推完之后才接信号：否则 populate 的 setter（如 setMode）会触发处理器里的
+    // showToast，启动即弹一条提示压住阶段计划面板，干扰离屏对照图。
+    // 必须早于下面的 Tab 块：openSettings("usage") 会同步发 usageStatsRequested。
+    host->wire();
     if (tab == QLatin1String("traj")) {
         host->loadTrajectory();
         chart->setViewTab(QStringLiteral("traj"));
+    } else if (tab == QLatin1String("usage")) {
+        // 打开设置中心的「用量」页（与 webui 的第四个 Tab 对照）
+        chart->openSettings(QStringLiteral("usage"));
+    } else if (tab == QLatin1String("models") || tab == QLatin1String("skills")
+               || tab == QLatin1String("mcp")) {
+        // 设置中心其余三个 Tab（与 webui 的 tab-models / tab-skills / tab-mcp 对照）
+        chart->openSettings(tab);
+    } else if (tab == QLatin1String("rail")) {
+        // 离屏无法悬停：等价地派发 Enter 展开轮次列表面板，便于出对照图
+        QTimer::singleShot(200, chart, [chart] {
+            if (QWidget *rail = chart->findChild<QWidget *>(QStringLiteral("turnRail"))) {
+                QEvent enter(QEvent::Enter);
+                QApplication::sendEvent(rail, &enter);
+            }
+        });
+    } else if (tab == QLatin1String("theme")) {
+        // 皮肤下拉（既有浮层）也能出对照图，用来核对浮层是否继承主题 QSS
+        QTimer::singleShot(200, chart, [chart] {
+            if (QWidget *trigger = chart->findChild<QWidget *>(QStringLiteral("themeTrigger"))) {
+                const QPoint center(trigger->width() / 2, trigger->height() / 2);
+                QMouseEvent press(QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(trigger, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton,
+                                    Qt::NoModifier);
+                QApplication::sendEvent(trigger, &release);
+            }
+        });
+    } else if (tab == QLatin1String("usage-cal")) {
+        // 用量页 + 日期浮层：离屏没有真实点击，等价地给日期触发器派发一次点击
+        chart->openSettings(QStringLiteral("usage"));
+        QTimer::singleShot(500, chart, [chart] {
+            if (QWidget *range = chart->findChild<QWidget *>(QStringLiteral("usageRange"))) {
+                const QPoint center(range->width() / 2, range->height() / 2);
+                QMouseEvent press(QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(range, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton,
+                                    Qt::NoModifier);
+                QApplication::sendEvent(range, &release);
+            }
+        });
     }
 
     chart->show();
     chart->focusInput();
 
     if (!shotPath.isEmpty()) {
-        QTimer::singleShot(500, &app, [chart, shotPath] {
-            const QPixmap shot = chart->grab();
+        QTimer::singleShot(700, &app, [chart, shotPath, tab, theme] {
+            if (!theme.isEmpty())
+                chart->setTheme(theme); // 显示之后再套一次，确保离屏截图用的是目标皮肤
+            // 用量页在设置对话框里，截图目标跟着切换
+            QWidget *target = chart;
+            if (tab == QLatin1String("usage") || tab == QLatin1String("usage-cal")) {
+                if (QWidget *dialog =
+                        chart->findChild<QWidget *>(QStringLiteral("settingsDialog"))) {
+                    // 面板比对话框高，截全图时先拉高，把三图与明细表一起拍进来
+                    dialog->resize(dialog->width(), 1240);
+                    target = dialog;
+                }
+            } else if (tab == QLatin1String("models") || tab == QLatin1String("skills")
+                       || tab == QLatin1String("mcp")) {
+                if (QWidget *dialog =
+                        chart->findChild<QWidget *>(QStringLiteral("settingsDialog")))
+                    target = dialog;
+            }
+            if (tab == QLatin1String("usage-cal")) {
+                // 日期浮层是独立控件，单独抓它自己
+                if (QWidget *popup =
+                        chart->findChild<QWidget *>(QStringLiteral("usageRangePopup")))
+                    target = popup;
+            }
+            if (tab == QLatin1String("theme")) {
+                // 皮肤下拉同理
+                if (QWidget *popup =
+                        chart->findChild<QWidget *>(QStringLiteral("themeListbox")))
+                    target = popup;
+            }
+            const QPixmap shot = target->grab();
             if (shot.isNull() || !shot.save(shotPath)) {
                 qCritical("截图保存失败: %s", qPrintable(shotPath));
                 qApp->exit(1);

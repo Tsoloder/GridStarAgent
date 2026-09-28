@@ -18,6 +18,8 @@ QT_END_NAMESPACE
 
 namespace gs {
 
+class UsagePanel;
+
 // HTML <details> 的等价物：点击 summary 展开 / 收起 body
 class ExpandCard : public QFrame
 {
@@ -44,9 +46,10 @@ private:
     bool m_open = false;
 };
 
-// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 三个 Tab
+// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 / 用量 四个 Tab
 // 对应 app.js 的 renderSettings / renderProviderEditor / renderModelCard /
-// renderCandidates / renderSkills / renderMcpTools / validateSettings / saveSettings
+// renderCandidates / renderSkills / renderMcpTools / validateSettings / saveSettings /
+// renderUsagePanel
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -68,6 +71,11 @@ public:
     void setMcpTools(const QVariantList &tools, bool connected, bool loading,
                      const QString &error);
 
+    // 用量页：配置目录（显示名映射）与后端回填
+    void setUsageCatalog(const QVariantList &models);
+    void setUsageStats(const QString &requestId, const QVariantMap &data);
+    void setUsageLoadFailed(const QString &requestId, const QString &error);
+
     void switchTab(const QString &tab);
     QString activeTab() const { return m_tab; }
     void setStatus(const QString &text);
@@ -80,6 +88,8 @@ signals:
     void refreshSkillsRequested();
     void refreshMcpRequested();
     void saveRequested(const QVariantMap &config, const QVariant &revision);
+    void usageStatsRequested(const QString &requestId, const QString &start, const QString &end,
+                             const QString &provider, const QString &model);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
@@ -94,6 +104,7 @@ private:
     QWidget *buildProviderEditor();
     QWidget *buildSkillsPage();
     QWidget *buildMcpPage();
+    QWidget *buildUsagePage();
 
     void renderSettings();
     void renderProviderList();
@@ -145,6 +156,7 @@ private:
     QPushButton *m_tabModels = nullptr;
     QPushButton *m_tabSkills = nullptr;
     QPushButton *m_tabMcp = nullptr;
+    QPushButton *m_tabUsage = nullptr;
     QPushButton *m_saveButton = nullptr;
     QLabel *m_status = nullptr;
 
@@ -187,6 +199,9 @@ private:
     QLabel *m_mcpStatus = nullptr;
     QVBoxLayout *m_mcpLayout = nullptr;
     QPushButton *m_refreshMcp = nullptr;
+
+    // 用量页
+    UsagePanel *m_usagePanel = nullptr;
 };
 
 } // namespace gs

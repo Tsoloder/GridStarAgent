@@ -17,7 +17,7 @@ QtChartWidget/
 │   ├── chartwidget.h        唯一公开头文件：gs::ChartWidget + C 工厂
 │   └── qtchartwidget_global.h  导出宏 QTCHARTWIDGET_EXPORT
 ├── src/                     库实现（内部类不导出）
-│   ├── chartwidget.cpp      主组合部件（顶栏 / 会话栏 / 视图页签 / 消息流 / 导航轨 / 事件分发）
+│   ├── chartwidget.cpp      主组合部件（顶栏 / 会话栏 / 视图页签 / 消息流 / 轮次导航轨与列表面板 / 事件分发）
 │   ├── theme.cpp            三套皮肤调色板 + QSS（对应 webui/style.css 的 :root 变量表）
 │   ├── markdownview.cpp     Markdown / 代码块 / 表格 / 引用 / 任务列表 / ```json 结构化块
 │   ├── messagewidgets.*     一轮一张卡：正文 + 过程区（思考/工具）+ 底部信息行 + 工具参数表
@@ -26,9 +26,11 @@ QtChartWidget/
 │   ├── trajectoryview.*     轨迹视图（时间轴概览 + 事件账本 + 记录详情，对应 webui 轨迹 tab）
 │   ├── popups.cpp           会话面板（含状态徽标）、模型与 Skill 下拉、皮肤下拉、Toast
 │   ├── phasepanel.cpp       阶段计划面板（当前项背景色 + 呼吸点，跑完即收起）
-│   ├── settingsdialog.cpp   设置中心对话框
+│   ├── settingsdialog.cpp   设置中心对话框（模型 / 技能 / MCP 工具 / 用量 四个 Tab）
+│   ├── usagepanel.*         用量面板（筛选下拉 / 概览卡 / 日历区间浮层 / 明细表，对应 #panel-usage）
+│   ├── usagecharts.*        自绘图表（折线 / 环形 / 堆叠柱 + 缩放平移，对应 webui/charts.js）
 │   └── commonwidgets.*      FlowLayout、Chevron、StatusDot、PulseDot、ThemeSwatch、
-│                            TurnRailDot、MiniBar、ConnectionButton、IconPushButton 等
+│                            TurnRailDot、TurnRailRow、MiniBar、ConnectionButton、IconPushButton 等
 ├── resources/
 │   ├── icons/               20 个 feather 风格 SVG 图标（viewBox 24×24，运行时着色）
 │   ├── Logo.ico             顶栏品牌标（与 webui/Logo.ico 同一张）
@@ -114,10 +116,16 @@ demo.exe                 # 交互窗口，预载一段示例历史
 demo.exe --empty         # 空态（欢迎页）
 demo.exe --theme silver  # 皮肤：dark / silver / blue
 demo.exe --tab traj      # 直接打开「轨迹」页签（含示例轨迹事件）
+demo.exe --tab models    # 直接打开设置中心的「模型」页（skills / mcp 同理）
+demo.exe --tab usage     # 直接打开设置中心的「用量」页（含示例用量数据）
+demo.exe --tab usage-cal # 用量页 + 展开日期区间浮层（离屏没有真实点击，等价派发一次点击）
+demo.exe --tab theme     # 展开皮肤下拉浮层（核对浮层样式用）
+demo.exe --tab rail      # 展开轮次列表面板（离屏无法悬停，等价派发 Enter）
 demo.exe --shot out.png  # 离屏渲染并截图后退出
 ```
 
-`--theme` / `--tab` 可与 `--shot` 组合，用于按皮肤或页签出对照图。
+`--theme` / `--tab` 可与 `--shot` 组合，用于按皮肤或页签出对照图；
+`--tab usage` 时截图目标是设置对话框（内容比窗口高，截图前会把对话框拉高以拍全三图与明细表）。
 
 离屏截图（`--shot`）使用 `offscreen` 平台插件，该平台默认不加载系统字体，
 会出现"有框无字"的截图；运行前设置字体目录即可：
@@ -138,7 +146,7 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
 | `/options` | 追加选项卡（```json 结构化块） |
 | `/params` | 追加工具参数确认卡 |
 | `/toast <文本>` | 弹出 Toast |
-| `/settings [tab]` | 打开设置中心（可选 tab：models/skills/mcp，与 webui 的三个页签一致） |
+| `/settings [tab]` | 打开设置中心（可选 tab：models/skills/mcp/usage，与 webui 的四个页签一致） |
 
 不带指令的普通文本会走一轮模拟流式回复：思考过程 → 正文分块 → 工具调用 →
 工具结果 → token 统计。
@@ -194,7 +202,7 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
 
    ```c
    QWidget *qtchartwidget_create(void);   // 返回 new gs::ChartWidget()
-   const char *qtchartwidget_version(void); // "2.0.0"
+   const char *qtchartwidget_version(void); // "2.1.0"
    ```
 
 ### 公开 API 分组（include/chartwidget.h）
@@ -223,7 +231,8 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
   `setTokenUsageDetail(usage)` / `setTurnTiming(timing)` / `startLiveTiming(startMs)`
 - 轨迹视图：`setTrajectoryEvents` / `appendTrajectoryEvents`
 - 设置中心：`setSettingsDraft` / `setDiscoveredModels` / `setProviderBusy` /
-  `setSettingsSkills` / `setMcpTools` / `openSettings` / `settingsSaved`
+  `setSettingsSkills` / `setMcpTools` / `setUsageStats` / `setUsageLoadFailed` /
+  `openSettings` / `settingsSaved`
 - 界面缩放：`zoomIn` / `zoomOut` / `zoomReset` / `zoomFactor`
   （快捷键 `Ctrl+=` / `Ctrl+-` / `Ctrl+0` 已内置于部件）
 - 信号：`sendMessage`、`stopRequested`、`modeChanged`、`modelSelected`、`skillSelected`、
@@ -232,8 +241,8 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
   `workflowRunRequested`、`retryRequested`、`trajectoryReloadRequested`、
   `viewTabChanged`、`themeChanged`、`choiceOpenChanged`、`settingsSaveRequested`、
   `testProviderRequested`、`readModelsRequested`、`refreshSkillsRequested`、
-  `refreshMcpRequested`、`attachRequested`、`voiceRequested`、`attachmentsAdded`、
-  `attachmentRemoved`
+  `refreshMcpRequested`、`usageStatsRequested`、`attachRequested`、`voiceRequested`、
+  `attachmentsAdded`、`attachmentRemoved`
 
 ### 主要数据形状（与 webui/app.js 同构）
 
@@ -259,6 +268,15 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
   `user / traj_system_prompt / traj_context / traj_request_start / traj_request_end /
   tool_call / tool_result`，与后端 `/sessions/{id}/trajectory` 的 events 同构；
   时间轴两态投影（等宽操作 / 实际时长）、账本三种分组（平铺 / 轮次 / 调用）都在控件内部完成
+- 用量统计 `setUsageStats(requestId, data)`：与后端 `GET /usage/stats` 的响应同构 ——
+  `{range{start, end, resolution}, totals{total, input, output, measured, estimated,
+  cache_read, cache_write, reasoning, turns, sessions}, buckets[{t, input, output, total,
+  measured, estimated, turns}], providers[...], models[...], candidates{providers, models}}`。
+  `buckets` 始终按小时（`t` 形如 `YYYY-MM-DDTHH`）；粒度选「按天」时由控件按自然日上卷，
+  `resolution` 为 `day`（跨度 > 90 天）时「按小时」档位置灰。筛选项来自 `candidates`
+  （只按时间窗过滤，不随当前筛选缩水）；显示名优先取 `setModels` 里的 `provider_name` / `name`
+  请求以 `usageStatsRequested` 下发的 `requestId` 对账（回填时必须原样带回）：晚到的旧响应、
+  旧失败都会被丢弃，不会覆盖当前视图；结果缓存与 app.js 同口径，满 32 条整体清空
 
 ### 其它行为口径（与 webui 对齐）
 
@@ -267,7 +285,24 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
   卡片底部信息行左侧为复制按钮，右侧依次是用量、用时、收到时刻
 - 思考与工具调用收在卡内「过程区」：运行态只把折叠箭头换成呼吸点，位置与高度不变；
   工具调用展开后参数以两列表格呈现、结果按 JSON 缩进美化
-- 轮次导航轨：页面最左边缘竖排白点，一轮一个，悬浮显示该轮提问，点击定位到该轮
+- 轮次导航轨：页面最左边缘竖排白点，一轮一个；鼠标移入轨道即向右展开整轮列表面板
+  （「对话轮次 · N 轮」头 + 序号徽标 + 提问摘要，一行一轮），点击行或白点都跳转到该轮，
+  当前轮次在点与行上同步高亮；轨道与面板各自算悬停区，跨间隙留 180ms 延迟收起，
+  点击行会一并收起面板（与 `app.js` 一致）。行摘要在正文回填之后再就地刷新，
+  不会因为 `createMessage` 收尾时的那次重建而停在占位文案
+- 设置中心「用量」页（`#panel-usage`，与 webui 第四个 Tab 对齐）：
+  - 筛选：分组（模型 / 供应商）、供应商、模型、粒度（按天 / 按小时）、日期（预设 + 双月日历）；
+    选项来自 `candidates`（只列有调用记录的项），已选项即使落在时间窗外也不静默清空
+  - 概览卡六格：总用量 / 输入 / 输出 / 实测 · 估算 / 缓存命中率 / 会话数，
+    缓存命中率 = `cache_read / (cache_read + input)`
+  - **数值一律以百万（M）显示**：不足 1M 也写小数（`0.5M` / `0.075M`），位数按数量级补足，
+    不退回 K；只有 token 类列这样显示，轮次按原值（模型设置页的上下文窗口仍是 K/M 自适应）
+  - 折线（输入 / 输出）与堆叠柱（实测 / 估算）共享同一时间视窗，缩放平移联动；
+    可见跨度不足 3 个桶时下钻到小时桶（`resolution` 为 `day` 时没有小时桶可下钻）
+  - 环形图：分组为模型时取前 6 个 + 「其他 N 个」；选中单个模型时改看该模型的 token 构成
+  - 明细表：列随分组切换，点表头排序（数值列默认降序），名称列 toolTip 给出完整键
+  - 请求按 `(start, end, provider, model)` 在库内缓存 32 条；每次发起都换新的
+    `requestId`，晚到的旧响应 / 旧失败按 `requestId` 丢弃
 - 计划窗口只服务执行过程：本轮结束时计划全部完成就收起；选择浮层展开时自动上移让位
 - 排版细节（QSS 表达不了、库内用代码补）：
   - **单行省略**：轨迹行进账本与分组头用自绘 `ElidedLabel`（`sizeHint` 按全文、
@@ -297,6 +332,16 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
 - 轨迹详情面板响应式：宽度 >760 用 380px、760~560 用 300px、<560 脱离布局改 88vw 覆盖浮层
   （对应 webui 的两个 `@media` 断点）
 - 未做：`backdrop-filter` 毛玻璃（Qt 无该类 API，只能自绘背景快照 + 模糊，见下）
+- 样式表完整性（根因修复）：Qt QSS 遇到它不认识的选择器（CSS3 的 `:not(...)`、`:!state`）时，
+  **不只是跳过那一条，而是丢弃其后所有规则**。`#choiceSubmit:hover:not(:disabled)` 恰好落在中段，
+  于是它之后的半张样式表（设置中心、用量页、各浮层、状态栏按钮…）长时间静默失效 —— 表现为这些
+  区域的控件落回平台原生样式（浅色、原生边框）。修复：把三处不受支持的选择器改成 Qt 语法
+  （`:hover:not(:disabled)` 与 `:hover:!disabled` → `:hover:enabled`；`trajViewButton:hover:not([active="true"])`
+  → `:hover`，并把 `[active="true"]` 规则同时挂上 `:hover` 以提高优先级）。测试 `appStyleSheetParsesFully`
+  静态拦截 `:not(` / `:!`，并在样式表末尾追加探针规则动态复核，防止再退化。
+- 浮层样式：用量页的两个浮层（筛选项下拉、日期区间面板）是 `Qt::Popup` 子窗口，以 ChartWidget
+  为父窗口创建，**直接继承其样式表**（与既有模型 / 皮肤下拉一致），故上面这条修好后即恢复主题皮肤。
+  注意别把它们先挂到设置对话框、事后再 `setParent` 重挂 —— Qt 会把样式重置回原生样式。
 
 ### 性能口径
 
@@ -340,7 +385,7 @@ $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
 ### 宿主职责（这些在 webui 里由前端完成，库不做）
 
 - 全部网络：`/sessions`、`/chat/stream`（SSE）、`/upload`、`/asr`、`/config`、
-  `/workflows/run`、`/sessions/{id}/trajectory` 等；库只推数据、收交互
+  `/workflows/run`、`/sessions/{id}/trajectory`、`/usage/stats` 等；库只推数据、收交互
 - 附件：数量/类型/大小校验（webui 为 ≤6 个、≤10MB、≤4 张图）与上传，再把结果 `addAttachments`
 - 语音：录音、重采样到 16kHz、WAV 编码与 `POST /asr`，再把识别文本 `setInputText`；
   录音时长上限也在宿主侧（webui `app.js:1862,1906` 为 5 分钟，到点提示并自动停止）——
@@ -381,6 +426,7 @@ QObject::connect(reply, &QNetworkReply::finished, this, [this, reply] {
 `setTurnTiming` / `startLiveTiming` / `appendFailure` / `setPhasePlan` / `showChoice` /
 `showToast` / `setTrajectoryEvents` / `appendTrajectoryEvents` / `setSettingsDraft` /
 `setDiscoveredModels` / `setProviderBusy` / `setSettingsSkills` / `setMcpTools` /
+`setUsageStats` / `setUsageLoadFailed` /
 `setSettingsStatus` / `setConnectionState` / `setCurrentSessionTitle`。
 
 信号是跨线程安全的（Qt 默认 `AutoConnection` 会自动排队），宿主可以放心从工作线程 `emit`
@@ -403,16 +449,17 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 测试进程自行设置 `QT_QPA_PLATFORM=offscreen`，不需要显示器；也不需要把 Qt 的 `bin`
 加进 PATH（`QtChartWidget.dll` 与测试同目录）。
 
-覆盖范围（34 项，含 init/cleanup）：
+覆盖范围（38 项，含 init/cleanup）：
 
 | 分组 | 用例 |
 | --- | --- |
-| 皮肤 / 缩放 | `themeSwitchAndSignal`（含未知皮肤回退）、`zoomSteps`（档位步进与封顶） |
+| 皮肤 / 缩放 | `themeSwitchAndSignal`（含未知皮肤回退、三套皮肤的 QSS 确实重设）、`appStyleSheetParsesFully`（整张样式表被 Qt 完整解析：无 `:not(` / `:!` 等不受支持的选择器，末尾追加的探针规则仍命中）、`zoomSteps`（档位步进与封顶） |
 | 输入区 | `modeModelSkillSignals`、`inputSendRoundTrip`（发送态 / 信号 / 清空）、`attachmentChipPreview`（图片缩略图 / 扩展名 / 上传中文案）、`inputAutoGrowOnResize`（宽度变了高度跟着重算） |
 | 历史渲染 | `historyMergesTurnWithUsageAndTiming`（一轮一张卡 + 用量/用时/时刻）、`historyToolResultBackfill`（结果回填、摘要、参数表）、`expandKeepsScrollPosition`（展开工具项后重判贴底，流式分片不抢滚动） |
 | 选择浮层 | `optionsOverlayChooseAndEsc`（点选项即确认 + Esc 收起）、`optionsOverlayFreeText`（「其他」自由作答、空文本拦截）、`toolParamsOverlaySubmit`（参数回填成结构化消息）、`approvalOverlayRoundTrip`（批准回执 + 宿主收卡） |
 | 卡片 | `workflowProposalRun`、`phasePlanCollapsesWhenComplete`（跑完收起 / 执行中不收起）、`phasePlanSurvivesViewTabSwitch`（切轨迹再切回仍恢复） |
 | 轨迹 / 会话 | `trajectoryViewTabSwitch`（页签互斥 + 账本渲染）、`trajectoryInspectorResponsive`（380/300/88vw 三档）、`sessionBadgeStatus`（状态徽标含布尔回退） |
+| 轮次轨 / 用量 | `turnRailPanelHover`（移入轨道展开整轮列表、行序与当前轮高亮、点行/Enter/Space 跳转并收起、离开 180ms 延迟收起、行不越出面板）、`usagePanelTab`（切 Tab 才请求、默认筛选、M 单位概览、三图渲染、明细表显示名与排序、轮次不换算成 M）、`usageStaleResponseIgnored`（同区间刷新换 requestId；晚到的旧响应/旧失败不覆盖当前视图） |
 | 排版与动效 | `letterSpacingApplied`（Polish 时补字距、其他控件不受影响）、`trajectoryRowElides`（省略并保留全文）、`hoverRevealsCopyButton`（悬浮 .5→1）、`overlayAndCardTransitions`（浮层淡入淡出 + 卡片一次性 effect） |
 | 工具项与口径 | `toolArgsTableAndResultFormat`（参数表、JSON 美化、失败判定、限高滚动容器）、`askUserToolCallIsNotRendered`（询问类调用不落成工具条目）、`usageModelLabelMapping`（用量弹层自动映射供应商名称） |
 | 嵌入作用域 | `escScopedToOwnWidget`（宿主窗口的 Esc 不被吞、也不误关浮层）、`zoomShortcutScopedToWidget`（快捷键限定 WidgetWithChildren） |

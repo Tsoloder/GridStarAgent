@@ -16,6 +16,7 @@
 #include <QFont>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
+#include <QHeaderView>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -27,6 +28,8 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QStyle>
+#include <QTableWidget>
 #include <QTextEdit>
 #include <QSignalSpy>
 #include <QTest>
@@ -232,6 +235,93 @@ QVariantList historyFixture()
     return QVariantList{ user, assistant, tool };
 }
 
+// GET /usage/stats 的响应形状（两个模型、两个供应商；实测与估算分开记账）
+QVariantMap usageFixture(const QString &start, const QString &end)
+{
+    QVariantMap proModel;
+    proModel.insert(QStringLiteral("model"), QStringLiteral("gridstar/gs-pro-32k"));
+    proModel.insert(QStringLiteral("provider"), QStringLiteral("gridstar"));
+    proModel.insert(QStringLiteral("label"), QStringLiteral("gs-pro-32k"));
+    proModel.insert(QStringLiteral("total"), 1428571);
+    proModel.insert(QStringLiteral("input"), 1200000);
+    proModel.insert(QStringLiteral("output"), 228571);
+    proModel.insert(QStringLiteral("measured"), 1300000);
+    proModel.insert(QStringLiteral("estimated"), 128571);
+    proModel.insert(QStringLiteral("cache_read"), 466667);
+    proModel.insert(QStringLiteral("cache_write"), 1000);
+    proModel.insert(QStringLiteral("turns"), 33);
+    proModel.insert(QStringLiteral("sessions"), 1);
+
+    QVariantMap chatModel;
+    chatModel.insert(QStringLiteral("model"), QStringLiteral("deepseek/deepseek-chat"));
+    chatModel.insert(QStringLiteral("provider"), QStringLiteral("deepseek"));
+    chatModel.insert(QStringLiteral("label"), QStringLiteral("deepseek-chat"));
+    chatModel.insert(QStringLiteral("total"), 200000);
+    chatModel.insert(QStringLiteral("input"), 170000);
+    chatModel.insert(QStringLiteral("output"), 30000);
+    chatModel.insert(QStringLiteral("measured"), 180000);
+    chatModel.insert(QStringLiteral("estimated"), 20000);
+    chatModel.insert(QStringLiteral("cache_read"), 40000);
+    chatModel.insert(QStringLiteral("cache_write"), 0);
+    chatModel.insert(QStringLiteral("turns"), 5);
+    chatModel.insert(QStringLiteral("sessions"), 1);
+
+    QVariantList providers;
+    providers << QVariantMap{ { QStringLiteral("provider"), QStringLiteral("gridstar") },
+                              { QStringLiteral("label"), QStringLiteral("GridStar 网关") },
+                              { QStringLiteral("total"), 1428571 },
+                              { QStringLiteral("input"), 1200000 },
+                              { QStringLiteral("output"), 228571 },
+                              { QStringLiteral("measured"), 1300000 },
+                              { QStringLiteral("estimated"), 128571 },
+                              { QStringLiteral("turns"), 33 } }
+              << QVariantMap{ { QStringLiteral("provider"), QStringLiteral("deepseek") },
+                              { QStringLiteral("label"), QStringLiteral("deepseek") },
+                              { QStringLiteral("total"), 200000 },
+                              { QStringLiteral("input"), 170000 },
+                              { QStringLiteral("output"), 30000 },
+                              { QStringLiteral("measured"), 180000 },
+                              { QStringLiteral("estimated"), 20000 },
+                              { QStringLiteral("turns"), 5 } };
+
+    QVariantList buckets;
+    const QStringList stamps{ QStringLiteral("2026-09-20T09"), QStringLiteral("2026-09-20T10"),
+                              QStringLiteral("2026-09-20T11") };
+    for (const QString &stamp : stamps) {
+        buckets << QVariantMap{ { QStringLiteral("t"), stamp },
+                                { QStringLiteral("input"), 400000 },
+                                { QStringLiteral("output"), 80000 },
+                                { QStringLiteral("total"), 480000 },
+                                { QStringLiteral("measured"), 460000 },
+                                { QStringLiteral("estimated"), 20000 },
+                                { QStringLiteral("turns"), 3 } };
+    }
+
+    QVariantMap out;
+    out.insert(QStringLiteral("range"),
+               QVariantMap{ { QStringLiteral("start"), start },
+                            { QStringLiteral("end"), end },
+                            { QStringLiteral("resolution"), QStringLiteral("hour") } });
+    out.insert(QStringLiteral("totals"),
+               QVariantMap{ { QStringLiteral("total"), 1628571 },
+                            { QStringLiteral("input"), 1370000 },
+                            { QStringLiteral("output"), 258571 },
+                            { QStringLiteral("measured"), 1480000 },
+                            { QStringLiteral("estimated"), 148571 },
+                            { QStringLiteral("cache_read"), 506667 },
+                            { QStringLiteral("cache_write"), 1000 },
+                            { QStringLiteral("reasoning"), 5000 },
+                            { QStringLiteral("turns"), 38 },
+                            { QStringLiteral("sessions"), 2 } });
+    out.insert(QStringLiteral("buckets"), buckets);
+    out.insert(QStringLiteral("providers"), providers);
+    out.insert(QStringLiteral("models"), QVariantList{ proModel, chatModel });
+    out.insert(QStringLiteral("candidates"),
+               QVariantMap{ { QStringLiteral("providers"), providers },
+                            { QStringLiteral("models"), QVariantList{ proModel, chatModel } } });
+    return out;
+}
+
 } // namespace
 
 class TestChartWidget : public QObject
@@ -275,6 +365,11 @@ private slots:
     void escScopedToOwnWidget();
     void zoomShortcutScopedToWidget();
     void keyboardReachability();
+    void turnRailPanelHover();
+    void usagePanelTab();
+    void usageStaleResponseIgnored();
+    // 回归：整张样式表必须能被 Qt 完整解析（不支持的选择器会丢弃其后所有规则）
+    void appStyleSheetParsesFully();
     void guiThreadGuard();
     void renderPerformance();
     void trajectoryLedgerVirtualization();
@@ -331,13 +426,17 @@ void TestChartWidget::themeSwitchAndSignal()
     QCOMPARE(m_chart->theme(), QStringLiteral("silver"));
     QCOMPARE(spy.count(), 1);
     QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("silver"));
+    // 换肤必须真正重设 QSS（--bg-grad-a 三套皮肤各不相同），只有 id 变了不算数
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#f7f8f9")));
 
     m_chart->setTheme(QStringLiteral("blue"));
     QCOMPARE(m_chart->theme(), QStringLiteral("blue"));
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#eaf2fa")));
 
     // 未知皮肤回退深色
     m_chart->setTheme(QStringLiteral("nope"));
     QCOMPARE(m_chart->theme(), QStringLiteral("dark"));
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#15212a")));
 }
 
 void TestChartWidget::zoomSteps()
@@ -1306,6 +1405,271 @@ void TestChartWidget::keyboardReachability()
     QVERIFY(eyebrow);
     QCOMPARE(eyebrow->font().letterSpacingType(), QFont::AbsoluteSpacing);
     QVERIFY(qAbs(eyebrow->font().letterSpacing() - 1.4) < 0.05);
+}
+
+// 轮次导航轨：鼠标移入轨道展开整轮列表（一轮一行，序号 + 提问摘要），
+// 点行跳转并收起；离开留 180ms 延迟再收起（app.js renderTurnRail / showTurnRailPanel）
+void TestChartWidget::turnRailPanelHover()
+{
+    QVariantList history = historyFixture();
+    history << QVariantMap{ { QStringLiteral("role"), QStringLiteral("user") },
+                            { QStringLiteral("content"), QStringLiteral("改为甩负荷方案处理") },
+                            { QStringLiteral("display_content"),
+                              QStringLiteral("改为甩负荷方案处理") } }
+            << QVariantMap{ { QStringLiteral("role"), QStringLiteral("assistant") },
+                            { QStringLiteral("content"), QStringLiteral("已改为甩负荷方案。") } };
+    m_chart->setHistory(history);
+    QTest::qWait(30);
+
+    QWidget *rail = m_chart->findChild<QWidget *>(QStringLiteral("turnRail"));
+    QVERIFY(rail);
+    QVERIFY(rail->isVisible());
+    QCOMPARE(widgetsByClass(rail, QStringLiteral("turnRailDot")).size(), 2);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("turnRailPanel"));
+    QVERIFY(panel);
+    QVERIFY(!panel->isVisible()); // 未悬停时不展开
+
+    QEvent enter(QEvent::Enter);
+    QApplication::sendEvent(rail, &enter);
+    QTest::qWait(20);
+    QVERIFY(panel->isVisible());
+
+    const QList<QWidget *> rows = widgetsByClass(panel, QStringLiteral("turnRailRow"));
+    QCOMPARE(rows.size(), 2);
+    QVERIFY(rowSignature(rows.first()).contains(QStringLiteral("城南线")));
+    QVERIFY2(rowSignature(rows.at(1)).contains(QStringLiteral("甩负荷")),
+             qPrintable(rowSignature(rows.at(1))));
+    // 行的先后与轮次一致，且都落在面板内（不会被裁到面板之外）
+    QVERIFY(rowSignature(rows.at(1)).startsWith(QStringLiteral("2|")));
+    for (QWidget *row : rows) {
+        const QPoint topLeft = row->mapTo(panel, QPoint(0, 0));
+        QVERIFY(panel->rect().contains(topLeft));
+        QVERIFY(panel->rect().contains(topLeft + QPoint(0, row->height() - 1)));
+    }
+
+    // 当前轮次在列表行上高亮（与轨道白点同步）
+    int activeRows = 0;
+    for (QWidget *row : rows) {
+        if (row->property("active").toBool())
+            ++activeRows;
+    }
+    QCOMPARE(activeRows, 1);
+
+    // 点击行即跳转并收起面板
+    clickWidget(rows.at(1));
+    QTest::qWait(20);
+    QVERIFY(!panel->isVisible());
+
+    // 行是键盘可达的：Enter / Space 与点击等价（webui 里这是一枚 <button>）
+    for (Qt::Key key : { Qt::Key_Return, Qt::Key_Space }) {
+        QApplication::sendEvent(rail, &enter);
+        QTest::qWait(20);
+        QVERIFY(panel->isVisible());
+        QWidget *row = widgetsByClass(panel, QStringLiteral("turnRailRow")).at(1);
+        row->setFocus();
+        QTest::keyClick(row, key);
+        QTest::qWait(20);
+        QVERIFY(!panel->isVisible());
+    }
+
+    // 离开轨道后在 180ms 延迟窗口内保持，之后收起
+    QApplication::sendEvent(rail, &enter);
+    QTest::qWait(20);
+    QVERIFY(panel->isVisible());
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(rail, &leave);
+    QVERIFY(panel->isVisible());
+    QTest::qWait(260);
+    QVERIFY(!panel->isVisible());
+}
+
+// 设置中心「用量」页：懒加载、默认筛选、M 单位概览、三图、可排序明细表
+void TestChartWidget::usagePanelTab()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->setModels(QVariantList{
+        QVariantMap{ { QStringLiteral("provider"), QStringLiteral("gridstar") },
+                     { QStringLiteral("provider_name"), QStringLiteral("GridStar 网关") },
+                     { QStringLiteral("id"), QStringLiteral("gs-pro-32k") },
+                     { QStringLiteral("name"), QStringLiteral("GS-Pro 32K") },
+                     { QStringLiteral("enabled"), true } },
+        QVariantMap{ { QStringLiteral("provider"), QStringLiteral("deepseek") },
+                     { QStringLiteral("provider_name"), QStringLiteral("DeepSeek") },
+                     { QStringLiteral("id"), QStringLiteral("deepseek-chat") },
+                     { QStringLiteral("name"), QStringLiteral("DeepSeek Chat") },
+                     { QStringLiteral("enabled"), true } } });
+
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::usageStatsRequested);
+    m_chart->openSettings(QStringLiteral("usage"));
+    QTest::qWait(30);
+    // 切到用量 Tab 才发起首次请求
+    QCOMPARE(spy.count(), 1);
+    const QString requestId = spy.at(0).at(0).toString();
+    QVERIFY(!requestId.isEmpty());                 // 请求 ID 由组件生成，宿主须原样带回
+    QVERIFY(!spy.at(0).at(1).toString().isEmpty()); // start
+    QVERIFY(!spy.at(0).at(2).toString().isEmpty()); // end
+    QVERIFY(spy.at(0).at(3).toString().isEmpty());  // 默认全部供应商
+    QVERIFY(spy.at(0).at(4).toString().isEmpty());  // 默认全部模型
+
+    QWidget *dialog = m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog"));
+    QVERIFY(dialog);
+
+    // 默认筛选：模型用量 / 全部供应商 / 全部模型 / 按天 / 最近 7 天
+    QCOMPARE(labelText(dialog->findChild<QWidget *>(QStringLiteral("usageGroup")),
+                       QStringLiteral("usageSelectText")),
+             QStringLiteral("模型用量"));
+    QCOMPARE(labelText(dialog->findChild<QWidget *>(QStringLiteral("usageProvider")),
+                       QStringLiteral("usageSelectText")),
+             QStringLiteral("全部供应商"));
+    QCOMPARE(labelText(dialog->findChild<QWidget *>(QStringLiteral("usageModel")),
+                       QStringLiteral("usageSelectText")),
+             QStringLiteral("全部模型"));
+    QCOMPARE(labelText(dialog->findChild<QWidget *>(QStringLiteral("usageGranularity")),
+                       QStringLiteral("usageSelectText")),
+             QStringLiteral("按天"));
+    QCOMPARE(labelText(dialog->findChild<QWidget *>(QStringLiteral("usageRange")),
+                       QStringLiteral("usageSelectText")),
+             QStringLiteral("最近 7 天"));
+
+    m_chart->setUsageStats(requestId,
+                           usageFixture(spy.at(0).at(1).toString(), spy.at(0).at(2).toString()));
+    QTest::qWait(30);
+
+    // 概览卡一律以百万（M）为单位；缓存命中率按 cache_read / (cache_read + input)
+    QWidget *overview = dialog->findChild<QWidget *>(QStringLiteral("usageOverview"));
+    QVERIFY(overview);
+    QCOMPARE(labelTexts(overview, QStringLiteral("usageStatValue")),
+             QStringList({ QStringLiteral("1.63M"), QStringLiteral("1.37M"),
+                           QStringLiteral("0.26M"), QStringLiteral("1.48M / 0.15M"),
+                           QStringLiteral("27%"), QStringLiteral("2") }));
+
+    // 三个图表容器都已渲染
+    QVERIFY(dialog->findChild<QWidget *>(QStringLiteral("usageLine")));
+    QVERIFY(dialog->findChild<QWidget *>(QStringLiteral("usageBar")));
+    QVERIFY(dialog->findChild<QWidget *>(QStringLiteral("usagePie")));
+
+    // 明细表：显示名取配置、token 列按 M、轮次按原值
+    auto *table = dialog->findChild<QTableWidget *>(QStringLiteral("usageTable"));
+    QVERIFY(table);
+    QCOMPARE(table->columnCount(), 8);
+    QCOMPARE(table->rowCount(), 2);
+    QCOMPARE(table->item(0, 0)->text(), QStringLiteral("GS-Pro 32K"));
+    QCOMPARE(table->item(0, 1)->text(), QStringLiteral("GridStar 网关"));
+    QCOMPARE(table->item(0, 2)->text(), QStringLiteral("1.43M"));
+    QCOMPARE(table->item(0, 7)->text(), QStringLiteral("33")); // 轮次是计数，不换算成 M
+
+    // 点表头「总量」切换为升序：小用量排到前面
+    QHeaderView *header = table->horizontalHeader();
+    const int x = header->sectionViewportPosition(2) + header->sectionSize(2) / 2;
+    QTest::mouseClick(header->viewport(), Qt::LeftButton, Qt::NoModifier, QPoint(x, 8));
+    QTest::qWait(20);
+    QCOMPARE(table->item(0, 0)->text(), QStringLiteral("DeepSeek Chat"));
+
+    // 日期浮层：日历在左、预设在右，确定钮压到预设列底部（.usage-range-panel 的 DOM 顺序）
+    clickWidget(dialog->findChild<QWidget *>(QStringLiteral("usageRange")));
+    QTest::qWait(30);
+    QWidget *rangePanel = widgetByClass(m_chart.data(), QStringLiteral("usageRangePanel"));
+    QVERIFY(rangePanel);
+    QWidget *calGrid = widgetByClass(rangePanel, QStringLiteral("usageCalGrid"));
+    const QList<QWidget *> presets = widgetsByClass(rangePanel, QStringLiteral("usageRangePreset"));
+    QVERIFY(calGrid);
+    QCOMPARE(presets.size(), 5);
+    QVERIFY(calGrid->mapTo(rangePanel, QPoint(0, 0)).x()
+            < presets.first()->mapTo(rangePanel, QPoint(0, 0)).x());
+    QWidget *confirm = widgetByClass(rangePanel, QStringLiteral("usageCalConfirm"));
+    QVERIFY(confirm);
+    QVERIFY(confirm->mapTo(rangePanel, QPoint(0, 0)).y()
+            > presets.last()->mapTo(rangePanel, QPoint(0, 0)).y());
+    rangePanel->hide();
+
+    // 窗口 ≤900：概览收到 3 列、饼图与柱状改上下堆叠（style.css 的媒体查询）
+    dialog->resize(780, dialog->height());
+    QTest::qWait(40);
+    const QList<QWidget *> cards = widgetsByClass(overview, QStringLiteral("usageStat"));
+    QCOMPARE(cards.size(), 6);
+    const QPoint first = cards.first()->mapTo(overview, QPoint(0, 0));
+    const QPoint fourth = cards.at(3)->mapTo(overview, QPoint(0, 0));
+    QCOMPARE(fourth.x(), first.x());
+    QVERIFY(fourth.y() > first.y());
+    QWidget *pieChart = dialog->findChild<QWidget *>(QStringLiteral("usagePie"));
+    QWidget *barChart = dialog->findChild<QWidget *>(QStringLiteral("usageBar"));
+    QVERIFY(barChart->mapTo(dialog, QPoint(0, 0)).y() > pieChart->mapTo(dialog, QPoint(0, 0)).y());
+}
+
+// 用量请求竞态：晚到的旧响应（requestId 对不上）既不能覆盖当前视图，也不能把当前视图打成错误态
+void TestChartWidget::usageStaleResponseIgnored()
+{
+    m_chart->setConfigLoaded(true);
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::usageStatsRequested);
+    m_chart->openSettings(QStringLiteral("usage"));
+    QTest::qWait(30);
+    QCOMPARE(spy.count(), 1);
+    const QString firstId = spy.at(0).at(0).toString();
+    const QString start = spy.at(0).at(1).toString();
+    const QString end = spy.at(0).at(2).toString();
+    QVERIFY(!firstId.isEmpty());
+
+    QWidget *dialog = m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog"));
+    QVERIFY(dialog);
+    QWidget *refresh = widgetByClass(dialog, QStringLiteral("usageRefresh"));
+    QVERIFY(refresh);
+
+    // 刷新即同一区间再发一次：requestId 必须换新（区间相同也要能分辨先后）
+    clickWidget(refresh);
+    QTest::qWait(20);
+    QCOMPARE(spy.count(), 2);
+    const QString secondId = spy.at(1).at(0).toString();
+    QVERIFY(!secondId.isEmpty());
+    QVERIFY(secondId != firstId);
+
+    // 当前请求先回：概览按新数据渲染
+    m_chart->setUsageStats(secondId, usageFixture(start, end));
+    QTest::qWait(30);
+    QWidget *overview = dialog->findChild<QWidget *>(QStringLiteral("usageOverview"));
+    QVERIFY(overview);
+    QCOMPARE(labelTexts(overview, QStringLiteral("usageStatValue")).value(0),
+             QStringLiteral("1.63M"));
+    QVERIFY(!labelText(dialog, QStringLiteral("usageStatus")).contains(QStringLiteral("失败")));
+
+    // 旧请求晚到：整包数据必须被丢弃（否则概览会被旧值覆盖）
+    QVariantMap stale = usageFixture(start, end);
+    QVariantMap staleTotals = stale.value(QStringLiteral("totals")).toMap();
+    staleTotals.insert(QStringLiteral("total"), 999);
+    stale.insert(QStringLiteral("totals"), staleTotals);
+    m_chart->setUsageStats(firstId, stale);
+    QTest::qWait(30);
+    QCOMPARE(labelTexts(overview, QStringLiteral("usageStatValue")).value(0),
+             QStringLiteral("1.63M"));
+
+    // 旧请求的失败回调同样被丢弃：不能把已渲染好的视图打成错误态
+    m_chart->setUsageLoadFailed(firstId, QStringLiteral("连接超时"));
+    QTest::qWait(30);
+    QVERIFY(!labelText(dialog, QStringLiteral("usageStatus")).contains(QStringLiteral("失败")));
+    QCOMPARE(labelTexts(overview, QStringLiteral("usageStatValue")).value(0),
+             QStringLiteral("1.63M"));
+}
+
+// 回归防护：Qt QSS 遇到它不认识的选择器（CSS3 的 :not(...)、:!state）时，不只是跳过那一条，
+// 而是会丢弃其后所有规则 —— 曾让 #choiceSubmit 之后的半张样式表（设置中心、用量页、各浮层…）
+// 全部失效。这里既做静态检查，又把探针规则追加到真实样式表末尾做动态复核。
+void TestChartWidget::appStyleSheetParsesFully()
+{
+    const QString sheet = m_chart->styleSheet();
+    QVERIFY2(!sheet.contains(QStringLiteral(":not(")), "样式表含 Qt 不支持的 :not(...) 选择器");
+    QVERIFY2(!sheet.contains(QStringLiteral(":!")), "样式表含 Qt 不支持的 :!state 选择器");
+
+    // 追加到末尾的探针规则必须命中（命中→ max-width=24）；中段一旦再混入坏选择器即失效。
+    const QString probe = QStringLiteral("QPushButton.qssParseProbe { min-width: 24px; max-width: 24px; }");
+    QScopedPointer<QWidget> holder(new QWidget);
+    holder->setStyleSheet(sheet + probe);
+    auto *button = new QPushButton(QString::fromUtf8("x"), holder.data());
+    button->setProperty("class", QStringLiteral("qssParseProbe"));
+    button->style()->unpolish(button);
+    button->style()->polish(button);
+    button->ensurePolished();
+    button->adjustSize();
+    QCOMPARE(button->maximumWidth(), 26);
 }
 
 void TestChartWidget::guiThreadGuard()

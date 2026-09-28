@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QIcon>
 #include <QImage>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -35,6 +36,13 @@ FlowLayout::~FlowLayout()
 }
 
 void FlowLayout::addItem(QLayoutItem *item) { m_items.append(item); }
+
+void FlowLayout::setSpacings(int horizontal, int vertical)
+{
+    m_hSpace = horizontal;
+    m_vSpace = vertical;
+    invalidate();
+}
 
 int FlowLayout::horizontalSpacing() const
 {
@@ -666,6 +674,7 @@ void ThemeSwatch::paintEvent(QPaintEvent *)
 
 TurnRailDot::TurnRailDot(int turn, QWidget *parent) : QWidget(parent), m_turn(turn)
 {
+    setClass(this, QStringLiteral("turnRailDot"));
     setFixedSize(12, 12);
     setCursor(Qt::PointingHandCursor);
     setAttribute(Qt::WA_Hover, true);
@@ -718,6 +727,81 @@ void TurnRailDot::paintEvent(QPaintEvent *)
     }
     p.setBrush(color);
     p.drawEllipse(QPointF(rect().center()), m_active ? 3.5 : 2.5, m_active ? 3.5 : 2.5);
+}
+
+// --------------------------------------------------------------- TurnRailRow
+
+TurnRailRow::TurnRailRow(int turn, const QString &text, QWidget *parent)
+    : QWidget(parent), m_turn(turn), m_text(text)
+{
+    setClass(this, QStringLiteral("turnRailRow"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setCursor(Qt::PointingHandCursor);
+    // webui 里这是一枚 <button>，键盘可达（Enter / Space 等价点击）
+    setFocusPolicy(Qt::TabFocus);
+    setAccessibleName(QStringLiteral("第 %1 轮：%2").arg(turn + 1).arg(text));
+    setToolTip(text);
+
+    auto *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(7, 6, 7, 6);
+    layout->setSpacing(8);
+
+    m_index = new QLabel(QString::number(turn + 1), this);
+    setClass(m_index, QStringLiteral("turnRailIndex"));
+    m_index->setAlignment(Qt::AlignCenter);
+    m_index->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_index->setMinimumWidth(20);
+    m_index->setFixedHeight(18);
+    layout->addWidget(m_index, 0, Qt::AlignVCenter);
+
+    m_label = new ElidedLabel(this);
+    setClass(m_label, QStringLiteral("turnRailText"));
+    m_label->setFullText(text);
+    // 省略后原文保留在 toolTip（与账本行同一口径）
+    m_label->setToolTip(text);
+    layout->addWidget(m_label, 1);
+}
+
+void TurnRailRow::setTurnText(const QString &text)
+{
+    if (m_text == text)
+        return;
+    m_text = text;
+    m_label->setFullText(text);
+    m_label->setToolTip(text);
+    setToolTip(text);
+    setAccessibleName(QStringLiteral("第 %1 轮：%2").arg(m_turn + 1).arg(text));
+}
+
+void TurnRailRow::setRowActive(bool active)
+{
+    if (m_active == active)
+        return;
+    m_active = active;
+    setProperty("active", active);
+    restyle(this);
+}
+
+QSize TurnRailRow::sizeHint() const
+{
+    return QSize(280, 30);
+}
+
+void TurnRailRow::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
+        emit activated(m_turn);
+    QWidget::mouseReleaseEvent(event);
+}
+
+void TurnRailRow::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter
+        || event->key() == Qt::Key_Space) {
+        emit activated(m_turn);
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 // ------------------------------------------------------------------- MiniBar

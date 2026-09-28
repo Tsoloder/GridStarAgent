@@ -25,6 +25,8 @@ class FlowLayout : public QLayout
 public:
     explicit FlowLayout(QWidget *parent = nullptr, int margin = 0, int hSpacing = 6, int vSpacing = 6);
     ~FlowLayout() override;
+    // 运行时改间距（窄屏下 .usage-filters 从 gap:8px 收到 5px）
+    void setSpacings(int horizontal, int vertical);
 
     void addItem(QLayoutItem *item) override;
     int horizontalSpacing() const;
@@ -288,6 +290,37 @@ private:
     int m_turn = 0;
     bool m_active = false;
     bool m_hover = false;
+};
+
+// 轮次列表面板中的一行（.turn-rail-row）：序号徽标 + 单行省略的提问摘要。
+// 悬浮 / 当前态高亮由 QSS 的 :hover 与 [active="true"] 承担，这里只管点击与省略。
+class TurnRailRow : public QWidget
+{
+    Q_OBJECT
+public:
+    TurnRailRow(int turn, const QString &text, QWidget *parent = nullptr);
+    int turn() const { return m_turn; }
+    QString turnText() const { return m_text; }
+    // 正文可能在行创建之后才回填（createMessage 收尾时就重建了轨道），
+    // 所以允许就地改写文案，不必整条重建
+    void setTurnText(const QString &text);
+    void setRowActive(bool active);
+    bool isRowActive() const { return m_active; }
+    QSize sizeHint() const override;
+
+signals:
+    void activated(int turn);
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+
+private:
+    int m_turn = 0;
+    QString m_text;
+    QLabel *m_index = nullptr;
+    ElidedLabel *m_label = nullptr;
+    bool m_active = false;
 };
 
 // 轨迹行内耗时条（.traj-row-bar）：带边框的胶囊轨道 + 按比例填充

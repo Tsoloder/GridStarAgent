@@ -364,6 +364,10 @@ static qreal letterSpacingBase(const QWidget *widget)
         { "trajBadge", 0.5 },        // .traj-badge
         { "trajInspSection", 1.2 },  // .traj-insp-section
         { "skillSource", 0.4 },      // .skill-source
+        { "turnRailHeadTitle", 1.0 },// .turn-rail-panel-head
+        { "usageFilterLabel", 0.4 }, // .usage-filter-label
+        { "usageStatLabel", 0.6 },   // .usage-stat span
+        { "usageCalMonth", 0.4 },    // .usage-cal-month
     };
 
     const QString objectName = widget->objectName();
@@ -697,7 +701,7 @@ QPushButton#choiceSubmit {
     border: 1px solid %LINESTRONG%; border-radius: 8px; background: %SURFACE3%; color: %TEXTBRIGHT%;
     font-size: 12px; padding: 0 12px;
 }
-QPushButton#choiceSubmit:hover:not(:disabled) { border-color: %CYANMID%; background: %ACCENTTINT%; }
+QPushButton#choiceSubmit:hover:enabled { border-color: %CYANMID%; background: %ACCENTTINT%; }
 QPushButton#choiceSubmit:disabled { color: %MUTED2%; }
 QLabel.choiceHint { color: %MUTED2%; font-size: 9px; background: transparent; }
 QLabel.choiceCaret { color: %MUTED2%; font-size: 11px; background: transparent; }
@@ -745,7 +749,7 @@ QPushButton#settingsButton:hover { border-color: %LINESTRONG%; background: %SURF
 QPushButton#attachButton, QPushButton#voiceButton {
     border: 1px solid transparent; background: transparent; color: %MUTED2%; border-radius: 4px;
 }
-QPushButton#attachButton:hover, QPushButton#voiceButton:hover:!disabled {
+QPushButton#attachButton:hover, QPushButton#voiceButton:hover:enabled {
     border-color: %LINESTRONG%; background: %SURFACE2%; color: %CYAN%;
 }
 QPushButton#voiceButton:disabled { color: %MUTED2%; }
@@ -821,15 +825,32 @@ QLabel#dropOverlayText {
     color: %CYAN%; font-size: 14px; background: transparent;
 }
 
-/* ===== 轮次导航轨（.turn-rail） ===== */
+/* ===== 轮次导航轨（.turn-rail）与轮次列表面板（.turn-rail-panel） ===== */
 QWidget#turnRail {
     background: transparent; border: 0;
 }
 QWidget.turnRailDot { background: transparent; border: 0; }
-QFrame#turnRailTip {
-    border: 1px solid %LINESTRONG%; border-radius: 4px; background: %PANEL%;
+QFrame.turnRailPanel {
+    border: 1px solid %LINESTRONG%; border-radius: 8px; background: %PANEL%;
 }
-QLabel#turnRailTipText { color: %TEXT%; font-size: 11px; background: transparent; }
+QWidget.turnRailHead { background: %BAND3%; border-bottom: 1px solid %LINE%; }
+QLabel.turnRailHeadTitle { color: %MUTED%; font-size: 10px; font-weight: 700; background: transparent; }
+QLabel.turnRailHeadCount { color: %MUTED2%; font-size: 10px; background: transparent; }
+QScrollArea#turnRailScroll { border: 0; background: transparent; }
+QWidget#turnRailList { background: transparent; }
+QWidget.turnRailRow { border: 0; border-radius: 4px; background: transparent; }
+QWidget.turnRailRow:hover, QWidget.turnRailRow[active="true"] { background: %ACCENTTINT%; }
+QLabel.turnRailIndex {
+    border: 1px solid %LINE%; border-radius: 9px; background: %INSET%; color: %MUTED%;
+    font-size: 10px; font-weight: 600;
+}
+QWidget.turnRailRow:hover QLabel.turnRailIndex,
+QWidget.turnRailRow[active="true"] QLabel.turnRailIndex {
+    border-color: %CYANMID%; background: %CYANDARK%; color: %TEXTBRIGHT%;
+}
+QLabel.turnRailText { color: %TEXT%; font-size: 11px; background: transparent; }
+QWidget.turnRailRow:hover QLabel.turnRailText,
+QWidget.turnRailRow[active="true"] QLabel.turnRailText { color: %TEXTBRIGHT%; }
 
 /* ===== 轨迹视图 ===== */
 QWidget#trajectoryView { background: transparent; }
@@ -838,8 +859,11 @@ QPushButton.trajViewButton {
     border: 1px solid transparent; background: transparent; color: %MUTED%; font-size: 11px;
     padding: 0 10px; min-height: 26px;
 }
-QPushButton.trajViewButton:hover:not([active="true"]) { background: %SURFACE2%; color: %TEXT%; }
-QPushButton.trajViewButton[active="true"] { border: 1px solid %CYANMID%; background: %ACCENTTINT%; color: %CYAN%; }
+QPushButton.trajViewButton:hover { background: %SURFACE2%; color: %TEXT%; }
+QPushButton.trajViewButton[active="true"],
+QPushButton.trajViewButton[active="true"]:hover {
+    border: 1px solid %CYANMID%; background: %ACCENTTINT%; color: %CYAN%;
+}
 QLineEdit#trajSearch {
     border: 1px solid %LINE%; background: %INSET%; color: %TEXT%; padding: 0 8px;
     border-radius: 4px; font-size: 11px;
@@ -945,7 +969,7 @@ QLineEdit.settingsInput:focus, QComboBox.settingsInput:focus { border-color: %CY
 /* 键盘焦点可见：QSS 没有浏览器那样的默认 focus 环，按钮与自绘可点区域都要显式给 */
 QPushButton:focus, QToolButton:focus { outline: 1px solid %CYAN%; outline-offset: 1px; }
 QWidget.trajRow:focus, QWidget.trajGroup:focus, QWidget.trajSummary:focus,
-QWidget.procRowHead:focus, QWidget.toolItemSummary:focus,
+QWidget.procRowHead:focus, QWidget.toolItemSummary:focus, QWidget.turnRailRow:focus,
 QWidget.choiceItem:focus, QWidget.sessionSelect:focus {
     outline: 1px solid %CYAN%; outline-offset: -1px;
 }
@@ -1028,6 +1052,74 @@ QWidget.mcpParamList { background: transparent; border-top: 1px solid %LINE%; pa
 
 QWidget#settingsActions { background: %BAND3%; border-top: 1px solid %LINE%; }
 QLabel#settingsStatus { color: %WARNTEXT%; font-size: 11px; background: transparent; }
+
+/* ===== 设置中心 · 用量（.usage-*，对应 app.js renderUsagePanel + charts.js） ===== */
+QScrollArea.usagePanelScroll { border: 0; background: transparent; }
+QWidget.usagePanel, QWidget.usageFilters, QWidget.usageFilter,
+QWidget.usageOverview, QWidget.usageCalGrid, QWidget.usageCalWeek { background: transparent; }
+QLabel.usageFilterLabel { color: %MUTED2%; font-size: 10px; background: transparent; }
+QWidget.usageSelect { border: 1px solid %LINE%; border-radius: 15px; background: %SURFACE2%; }
+QWidget.usageSelect:hover { border-color: %CYANMID%; }
+QWidget.usageSelect[open="true"] { border-color: %CYAN%; }
+QWidget.usageSelect[open="true"] QLabel.usageSelectText { color: %TEXTBRIGHT%; }
+QLabel.usageSelectText { color: %TEXT%; font-size: 11px; background: transparent; }
+QLabel.usageSelectIcon { background: transparent; }
+QPushButton.usageRefresh { min-height: 30px; }
+
+QFrame.usageListbox { border: 1px solid %LINESTRONG%; border-radius: 8px; background: %INSET%; }
+QScrollArea#usageListScroll { border: 0; background: transparent; }
+QWidget#usageListInner { background: transparent; }
+QPushButton.usageOption { border: 1px solid transparent; border-radius: 4px; background: transparent; text-align: left; }
+QPushButton.usageOption:hover:enabled { border-color: %CYANMID%; background: %ACCENTTINT%; }
+QPushButton.usageOption[selected="true"] { color: %CYAN%; }
+QPushButton.usageOption:disabled { color: %MUTED2%; }
+QLabel.usageOptionLabel { color: %TEXT%; font-size: 11px; background: transparent; }
+QLabel.usageOptionNote { color: %MUTED2%; font-size: 9px; background: transparent; font-family: %MONO%; }
+
+QFrame.usageRangePanel { border: 1px solid %LINESTRONG%; border-radius: 8px; background: %INSET%; }
+QPushButton.usageRangePreset {
+    border: 1px solid %LINE%; border-radius: 15px; background: %SURFACE2%; color: %MUTED%;
+    font-size: 11px; min-height: 30px; padding: 0 12px;
+}
+QPushButton.usageRangePreset:hover { border-color: %CYANMID%; color: %TEXT%; }
+QPushButton.usageRangePreset[active="true"] { border-color: %CYANMID%; background: %ACCENTTINT%; color: %CYAN%; }
+QPushButton.usageCalConfirm {
+    border: 1px solid %CYANMID%; border-radius: 15px; background: %CYANDARK%; color: %TEXTBRIGHT%;
+    font-size: 11px; min-height: 30px; padding: 0 12px;
+}
+QPushButton.usageCalConfirm:disabled { border-color: %LINE%; background: %SURFACE2%; color: %MUTED2%; }
+QLabel.usageCalTitle { color: %TEXTBRIGHT%; font-size: 12px; background: transparent; }
+QPushButton.usageCalStep {
+    border: 1px solid %LINE%; border-radius: 4px; background: %SURFACE2%; color: %MUTED%;
+    min-width: 24px; max-width: 24px; min-height: 24px; max-height: 24px;
+}
+QPushButton.usageCalStep:hover { border-color: %CYANMID%; color: %CYAN%; }
+QLabel.usageCalMonth { color: %MUTED%; font-size: 10px; background: transparent; padding-bottom: 6px; }
+QLabel.usageCalWeekCell { color: %MUTED2%; font-size: 9px; background: transparent; }
+QPushButton.usageCalDay { border: 0; border-radius: 4px; background: transparent; color: %TEXT%; font-size: 11px; }
+QPushButton.usageCalDay:hover { background: %ACCENTTINT%; }
+QPushButton.usageCalDay[other="true"] { color: %MUTED2%; }
+QPushButton.usageCalDay[state="in"] { background: %ACCENTTINT%; color: %CYAN%; }
+QPushButton.usageCalDay[state="start"], QPushButton.usageCalDay[state="end"],
+QPushButton.usageCalDay[state="single"] { background: %CYANDARK%; color: %TEXTBRIGHT%; font-weight: 600; }
+
+QLabel.usageStatus { color: %MUTED%; font-size: 11px; background: transparent; }
+QFrame.usageStat { border: 1px solid %LINE%; border-radius: 8px; background: %BAND2%; }
+QLabel.usageStatLabel { color: %MUTED2%; font-size: 9px; background: transparent; }
+QLabel.usageStatValue { color: %TEXTBRIGHT%; font-size: 14px; background: transparent; }
+QFrame.usageCard { border: 1px solid %LINE%; border-radius: 8px; background: %BAND2%; }
+QLabel.usageCardTitle { color: %TEXTBRIGHT%; font-size: 13px; background: transparent; }
+QLabel.usageCardHint { color: %MUTED2%; font-size: 9px; background: transparent; }
+
+QTableWidget#usageTable { border: 0; background: transparent; gridline-color: %LINE%; }
+QTableWidget#usageTable::item { border-bottom: 1px solid %LINE%; padding: 6px 8px; font-size: 11px; }
+QTableWidget#usageTable::item:hover { background: %ACCENTTINT%; }
+QTableWidget#usageTable QHeaderView { background: transparent; }
+QTableWidget#usageTable QHeaderView::section {
+    background: %BAND3%; border: 0; border-bottom: 1px solid %LINE%; padding: 6px 8px;
+    color: %MUTED%; font-size: 10px;
+}
+QTableWidget#usageTable QTableCornerButton::section { background: %BAND3%; border: 0; }
 
 /* ===== 确认对话框 ===== */
 QDialog#confirmDialog { background: %PANEL%; border: 1px solid %LINESTRONG%; border-radius: 12px; }

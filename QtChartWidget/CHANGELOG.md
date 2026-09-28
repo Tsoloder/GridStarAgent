@@ -3,6 +3,41 @@
 版本号遵循语义化版本：**公开头 `include/chartwidget.h` 有破坏性改动时主版本号 +1**。
 版本字符串在 `src/chartwidget.cpp` 的 `qtchartwidget_version()`，改这里时同步改本文件。
 
+## 2.1.0
+
+对齐 `webui/` 自 `4d5e742` 之后的四个提交（轮次导航轨改为悬浮展开整轮列表、
+设置中心新增「用量」Tab、用量统一以 M 显示、会话流状态清理）。公开头只增不改，故次版本号 +1。
+
+### 新增
+
+- 设置中心第四个 Tab「用量」（`#panel-usage`）：筛选（分组 / 供应商 / 模型 / 粒度 / 日期）、
+  概览卡、折线（输入 / 输出趋势）、环形（占比，选中单个模型时改为看该模型的 token 构成）、
+  堆叠柱（实测 vs 估算）、可排序明细表
+- 公开 API：`setUsageStats(requestId, data)` / `setUsageLoadFailed(requestId, error)`
+  （`requestId` 由 `usageStatsRequested` 下发，回填时必须原样带回）
+- 公开信号：`usageStatsRequested(requestId, start, end, provider, model)`（宿主拉 `GET /usage/stats` 后回填）
+- 图表为自绘 `QWidget`：滚轮以鼠标为锚点缩放时间轴、拖拽平移、双击复位、
+  Shift + 滚轮缩放纵轴；折线与柱状共享同一时间视窗；图例可点击隐藏序列
+- 日期区间浮层：预设（最近 12 小时 / 24 小时 / 3 天 / 7 天 / 30 天）+ 双月日历自选
+
+### 行为变化（签名不变，但宿主需要知道）
+
+- **轮次导航轨**：由「悬浮单个白点浮出该轮摘要」改为「鼠标移入轨道即向右展开整轮列表
+  （序号 + 提问摘要，一行一轮）」，点击行或白点都能直达该轮，当前轮次在点与行上同步高亮；
+  轨道与面板各自算悬停区，跨间隙留 180ms 延迟收起；行可 Tab 聚焦，Enter / Space 与点击等价
+- 用量数值一律以百万（M）显示（`Charts.formatMillions` 口径：不足 1M 也写小数，不退回 K）；
+  轮次是计数，仍按原值显示；模型设置页的上下文窗口保持 K/M 自适应（两者口径不同是刻意的）
+- 宿主若要在用量页看到正确的模型 / 供应商显示名，需在打开设置前推过 `setModels`
+  （库按 `provider_name` 与模型名映射；历史遗留模型标注「未在配置中」）
+- 用量请求按 `requestId` 去重：晚到的旧响应 / 旧失败一律丢弃（同区间连续刷新也能分辨先后）
+  结果缓存与 app.js 同口径：满 32 条整体清空，长时间切换筛选不会无限累积
+- **样式表根因修复**：`#choiceSubmit:hover:not(:disabled)` 里的 `:not(...)` 是 Qt QSS 不支持的选择器，
+  会让 Qt **丢弃其后所有规则** —— 于是设置中心 / 用量页 / 各浮层等半张样式表长时间静默失效
+  （这些区域的控件落回平台原生样式）。已把三处不受支持的选择器改成 Qt 语法：`:not(:disabled)` /
+  `:!disabled` → `:enabled`；`trajViewButton:hover:not([active="true"])` → `:hover`，并把 `[active="true"]`
+  规则同时挂上 `:hover`，让它优先级更高、不再依赖书写顺序。用量页浮层随之恢复主题皮肤；新增回归测试
+  `appStyleSheetParsesFully` 兜底
+
 ## 2.0.0
 
 相对 `1.0.0`（b17d5ea「新增 QtChartWidget Qt5 原生聊天界面动态库」）的全部改动。
