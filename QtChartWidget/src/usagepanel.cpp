@@ -270,8 +270,13 @@ int UsageListPopup::preferredContentWidth() const
     int content = 0;
     for (int i = 0; i < m_layout->count(); ++i) {
         QWidget *option = m_layout->itemAt(i)->widget();
-        if (option && option->layout())
-            content = qMax(content, option->layout()->sizeHint().width());
+        if (!option || !option->layout())
+            continue;
+        // QSS 的 font-size/font-family 要等 polish 才落到控件上，布局 sizeHint 也才有定稿字体：
+        // 不先定稿就会用未套样式表的字体量宽（实测同一下拉在 169 / 196 之间跳，webui 是 167.8）
+        option->ensurePolished();
+        option->layout()->activate();
+        content = qMax(content, option->layout()->sizeHint().width());
     }
     // .usage-listbox{padding:5px;border:1px}：内容宽 + 左右内边距与边框
     return content + 12;

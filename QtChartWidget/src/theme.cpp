@@ -1195,6 +1195,34 @@ QString appStyleSheet()
         out.replace(QLatin1Char('%') + QLatin1String(token.name) + QLatin1Char('%'), token.value);
     }
 
+    // 只写 font-size 的 QSS 规则会让 Qt 按「应用字体」重建字体族——中文 Windows 上是宋体
+    // （SimSun），与 webui 的 html{font-family:"Bahnschrift","Microsoft YaHei UI"} 不一致：
+    // 拉丁字形变宽（实测同一串模型名宽 30px）、行盒变矮（会话行 13/11px vs webui 18/16px）。
+    // 这里给每条声明了字号却没有字体族的规则补上 %UI%，等价于 webui 的字体继承。
+    {
+        static const QRegularExpression blockRe(QStringLiteral("\\{[^{}]*\\}"));
+        QString patched;
+        int pos = 0;
+        QRegularExpressionMatch m;
+        while ((m = blockRe.match(out, pos)).hasMatch()) {
+            patched += out.mid(pos, m.capturedStart() - pos);
+            const QString block = m.captured(0);
+            if (block.contains(QLatin1String("font-size:"))
+                && !block.contains(QLatin1String("font-family:"))) {
+                QString body = block;
+                body.chop(1); // 去掉 '}'
+                if (!body.endsWith(QLatin1Char(';')) && !body.endsWith(QLatin1Char(' ')))
+                    body += QLatin1Char(';');
+                patched += body + QLatin1String(" font-family: ") + uiFont() + QLatin1String("; }");
+            } else {
+                patched += block;
+            }
+            pos = m.capturedEnd();
+        }
+        patched += out.mid(pos);
+        out = patched;
+    }
+
     // 缩放系数 ≠ 1 时把所有 font-size: Npx 按比例放大（按「皮肤 + 缩放档」缓存，两者都是离散值）
     const qreal factor = zoomFactor();
     if (!qFuzzyCompare(factor, 1.0)) {

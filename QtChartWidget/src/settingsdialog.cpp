@@ -286,9 +286,15 @@ void SettingsDialog::buildUi()
     auto *titleBox = new QVBoxLayout;
     titleBox->setContentsMargins(0, 0, 0, 0);
     titleBox->setSpacing(2);
-    titleBox->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("CONFIGURATION")));
+    QLabel *eyebrow = plainLabel(QStringLiteral("eyebrow"), QStringLiteral("CONFIGURATION"));
+    // .eyebrow 是行内 span，占的是所在行盒（13px 基础字体的 18px），不是 9px 的字形高；
+    // .settings-head h2 是 18px 字体 / 行盒 24。QSS 没有 line-height，按 webui 量到的行盒补足，
+    // 表头 67 → 76（webui 920 宽视口实测 75）
+    eyebrow->setMinimumHeight(18);
+    titleBox->addWidget(eyebrow);
     auto *title = plainLabel(QString(), QStringLiteral("设置中心"));
     title->setObjectName(QStringLiteral("settingsTitle"));
+    title->setMinimumHeight(24);
     titleBox->addWidget(title);
     hl->addLayout(titleBox, 1);
     auto *closeButton = new IconPushButton(this);

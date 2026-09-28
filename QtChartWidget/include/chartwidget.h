@@ -242,6 +242,7 @@ private:
     void updateEmptyState();
     void updateTitleElide();
     void scrollToEnd(bool force = false);
+    void pinToBottom(int retries);
     bool atBottom() const;
     void toggleSessionPanel();
     void closeSessionPanel();

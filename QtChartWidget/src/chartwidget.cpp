@@ -27,6 +27,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QFontMetrics>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
@@ -642,8 +643,15 @@ QWidget *ChartWidget::createEmptyState()
     hint->setObjectName(QStringLiteral("emptyHint"));
     hint->setAlignment(Qt::AlignCenter);
     hint->setWordWrap(true);
-    hint->setMaximumWidth(270); // .empty-state p { max-width:270px; margin:7px 0 }
+    // .empty-state p { max-width:270px; margin:7px 0 }：只给 max-width 时 QLabel 的 sizeHint
+    // 会收到单行宽（实测 120px），两行文本被裁成一行且右侧截断；这里定宽再按字体度量给最小高
+    hint->setFixedWidth(270);
     hint->setContentsMargins(0, 7, 0, 7);
+    {
+        const QFontMetrics metrics(hint->font());
+        const QRect needed = metrics.boundingRect(QRect(0, 0, 270, 0), Qt::TextWordWrap, hint->text());
+        hint->setMinimumHeight(needed.height() + 14); // + margin:7px 上下
+    }
 
     layout->addStretch(1);
     layout->addWidget(symbol, 0, Qt::AlignHCenter);
@@ -728,7 +736,23 @@ void ChartWidget::scrollToEnd(bool force)
     else if (!m_followBottom)
         return; // 贴底才跟随
     QScrollBar *bar = m_messages->verticalScrollBar();
-    QTimer::singleShot(0, this, [bar] { bar->setValue(bar->maximum()); });
+    pinToBottom(3);
+}
+
+// 立刻跳到当前最大值，并在随后几轮事件循环里补跳：实时载入历史时消息控件是刚建出来的，
+// 布局/滚动条范围要等 LayoutRequest 处理完才生效，单次 singleShot(0) 会读到 maximum()==0
+// 而停在顶部（webui 载入历史后停在最新消息）。retries 次链式回调保证在范围定稿后贴底。
+void ChartWidget::pinToBottom(int retries)
+{
+    QScrollBar *bar = m_messages->verticalScrollBar();
+    bar->setValue(bar->maximum());
+    if (retries <= 0)
+        return;
+    QTimer::singleShot(0, this, [this, retries] {
+        if (!m_followBottom)
+            return; // 用户已经往上滚了，别再抢滚动条
+        pinToBottom(retries - 1);
+    });
 }
 
 bool ChartWidget::atBottom() const
@@ -1566,8 +1590,11 @@ void ChartWidget::setHistory(const QVariantList &messages)
                 if (!turnTiming.isEmpty())
                     turn->setTiming(turnTiming);
             }
-            if (turn && turn->property("awaiting").toBool())
-                lastAsk = turn->property("pendingAsk").toMap();
+            // 只有「最后一轮」停在未作答询问上才恢复浮层：后一轮结束时必须清掉，
+            // 否则历史里早期已作答的询问会一直粘着（对齐 app.js:1418 的 last.awaitingInput 判断）
+            lastAsk = (turn && turn->property("awaiting").toBool())
+                          ? turn->property("pendingAsk").toMap()
+                          : QVariantMap();
         }
         turn = nullptr;
         turnText.clear();

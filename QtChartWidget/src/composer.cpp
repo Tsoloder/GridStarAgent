@@ -323,6 +323,19 @@ void Composer::layoutChoiceOverlay()
     m_choice->setGeometry(QRect(topLeft, QSize(cardWidth, cardHeight)));
     m_choice->raise();
 
+    // 第一遍量高时正文还没按最终宽度定稿（sizeHint 偏小），卡片会被压矮、候选列表挤出滚动条。
+    // 落位后再按定稿宽度量一次：需要更高就保持底边不动、向上生长（只增不减，避免来回震荡）。
+    int settledHeight = 0;
+    {
+        QSignalBlocker blocker(m_choice);
+        settledHeight = m_choice->heightForCardWidth(cardWidth);
+    }
+    settledHeight = qBound(0, settledHeight, qMax(0, cardBottom - host->rect().top()));
+    if (settledHeight > cardHeight) {
+        m_choice->setGeometry(QRect(mapTo(host, QPoint(9, height() - 12 - settledHeight)),
+                                    QSize(cardWidth, settledHeight)));
+    }
+
     m_choiceLayingOut = false;
 }
 

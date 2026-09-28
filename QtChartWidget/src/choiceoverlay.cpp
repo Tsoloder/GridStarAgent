@@ -194,8 +194,10 @@ ChoiceOverlay::ChoiceOverlay(QWidget *parent) : QFrame(parent)
     m_scroll->setFrameShape(QFrame::NoFrame);
     m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scroll->setFocusPolicy(Qt::NoFocus);
-    // 卡片比宿主矮时由正文自己滚动：竖直方向允许一直缩到 0，让标题行和底部作答区不被压掉
-    m_scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
+    // 竖直方向用 Preferred：sizeHint 跟着正文自然高走，卡片按自然高排布时标题行/底部作答区
+    // 才能各就各位（Ignored 会让它们吃掉正文的高度，实测标题行 93→正文只剩 94）；
+    // minimumHeight 仍为 0，宿主太矮时第一步先压正文，标题行和作答区不至于被挤掉
+    m_scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     m_scroll->setMinimumHeight(0);
     m_scroll->viewport()->setAutoFillBackground(false);
     m_body = new QWidget(m_scroll);
@@ -426,12 +428,14 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
         QLabel *name = makeLabel(QStringLiteral("choiceItemName"), label, text);
         name->setWordWrap(true);
         name->setTextInteractionFlags(Qt::NoTextInteraction);
+        name->setMinimumHeight(18); // .choice-text strong：12px / 行盒 18（QSS 无 line-height）
         tl->addWidget(name);
         const QString desc = option.value(QStringLiteral("description")).toString();
         if (!desc.isEmpty()) {
             QLabel *small = makeLabel(QStringLiteral("choiceItemDesc"), desc, text);
             small->setWordWrap(true);
             small->setTextInteractionFlags(Qt::NoTextInteraction);
+            small->setMinimumHeight(16); // .choice-text small：11px / line-height 1.45 → 行盒 16
             tl->addWidget(small);
         }
         il->addWidget(dot, 0);
@@ -469,6 +473,7 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
         dot->setAttribute(Qt::WA_StyledBackground, true);
         QLabel *name = makeLabel(QStringLiteral("choiceItemName"), entry.label, widget);
         name->setTextInteractionFlags(Qt::NoTextInteraction);
+        name->setMinimumHeight(18); // 与带说明的选项一致：.choice-item 单行行盒 18（webui 32）
         il->addWidget(dot, 0);
         il->addWidget(name, 1);
         entry.item = widget;
@@ -574,6 +579,9 @@ QSize ChoiceOverlay::sizeHint() const
         height += m_collapsed ? 0 : m_bodyNatural;
     if (m_foot && m_foot->isVisible())
         height += m_foot->sizeHint().height();
+    // .choiceCard 的边框（theme.cpp：border:1px）会吃掉内容区高度，不补上的话
+    // 正文比自然高少 2px，候选列表底部被切掉并冒出滚动条
+    height += 2;
 
     QLayout *cardLayout = layout();
     const int hintedWidth = width() > 0 ? width()

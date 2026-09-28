@@ -1161,9 +1161,41 @@ void TestChartWidget::choiceOverlayFitsNarrowWindow()
     QVERIFY(scroll);
     QWidget *body = scroll->widget();
     QVERIFY(body);
-    QVERIFY2(scroll->verticalScrollBar()->maximum() > 0,
-             qPrintable(QStringLiteral("choice body %1 fits viewport %2, scrollbar missing")
-                            .arg(body->height()).arg(scroll->viewport()->height())));
+    // 卡片按正文自然高排布：放得下就不该有滚动条，放不下（宿主太矮）必须能滚动，
+    // 两种情况下选项都不能被卡片底边裁掉（对齐 webui：内容高时 .choice-list 也不滚动，整卡长到宿主上限）
+    if (body->height() > scroll->viewport()->height()) {
+        QVERIFY2(scroll->verticalScrollBar()->maximum() > 0,
+                 qPrintable(QStringLiteral("choice body %1 overflows viewport %2, scrollbar missing")
+                                .arg(body->height()).arg(scroll->viewport()->height())));
+    } else {
+        QCOMPARE(scroll->verticalScrollBar()->maximum(), 0);
+    }
+
+    // 宿主再矮一截：卡片被宿主上限截断，正文必须转成滚动而不是把选项裁掉
+    m_chart->resize(420, 360);
+    QTest::qWait(40);
+    {
+        const QRect narrowRect(card->mapTo(m_chart.data(), QPoint(0, 0)), card->size());
+        QVERIFY2(m_chart->rect().contains(narrowRect),
+                 qPrintable(QStringLiteral("narrow choice card %1,%2 %3x%4 outside host %5x%6")
+                                .arg(narrowRect.x()).arg(narrowRect.y())
+                                .arg(narrowRect.width()).arg(narrowRect.height())
+                                .arg(m_chart->width()).arg(m_chart->height())));
+        const int narrowComposerBottom =
+            composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
+        QCOMPARE(narrowRect.y() + narrowRect.height(), narrowComposerBottom - 12);
+        if (body->height() > scroll->viewport()->height()) {
+            QVERIFY2(scroll->verticalScrollBar()->maximum() > 0,
+                     qPrintable(QStringLiteral("capped card: body %1 over viewport %2, scrollbar missing")
+                                    .arg(body->height()).arg(scroll->viewport()->height())));
+        }
+        const QList<QWidget *> narrowItems = widgetsByClass(card, QStringLiteral("choiceItem"));
+        QVERIFY(!narrowItems.isEmpty());
+        const QWidget *narrowLast = narrowItems.last();
+        const int narrowLastBottom =
+            narrowLast->mapTo(body, QPoint(0, narrowLast->height())).y();
+        QVERIFY(body->height() >= narrowLastBottom);
+    }
 
     const QList<QWidget *> items = widgetsByClass(card, QStringLiteral("choiceItem"));
     QCOMPARE(items.size(), options.size() + 1); // 末尾自动补「其他」
@@ -1930,7 +1962,12 @@ void TestChartWidget::expandKeepsScrollPosition()
     auto *bar = m_chart->findChild<QScrollArea *>(QStringLiteral("messages"))
                     ->verticalScrollBar();
     QVERIFY(bar);
-    QVERIFY(bar->maximum() > bar->value()); // 内容可滚动，且当前贴底
+    // 载入历史后停在最新一条（webui renderHistory 末尾贴底，对应 scrollToEnd/pinToBottom）
+    QCOMPARE(bar->value(), bar->maximum());
+    // 制造「用户不在底部」的前提：手动上滚
+    bar->setValue(0);
+    QTest::qWait(30);
+    QVERIFY(bar->maximum() > bar->value()); // 内容可滚动，且用户已离开底部
 
     // 展开工具项会把内容顶高：应重判为「不贴底」（webui 在下一帧重判）
     QWidget *summary = widgetByClass(m_chart.data(), QStringLiteral("toolItemSummary"));

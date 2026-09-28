@@ -522,17 +522,22 @@ void SessionPanel::render()
         select->setCursor(Qt::PointingHandCursor);
         auto *selectLayout = new QVBoxLayout(select);
         selectLayout->setContentsMargins(7, 9, 7, 9);
-        selectLayout->setSpacing(2);
+        // webui 的 .session-text 里 strong/small 是紧邻的块，没有间隙（实测 18+16=34）
+        selectLayout->setSpacing(0);
         QLabel *titleLabel = makeLabel(QStringLiteral("sessionTitle"),
                                        title.isEmpty() ? QStringLiteral("未命名会话") : title, select);
         titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
         titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        // QSS 没有 line-height：Chromium 的 normal 行盒是 1.38em（13px→18、11px→16），
+        // Qt 只有 1.23em（13px→16、11px→13），这里按 webui 实测行盒补足最小值（会话行 44→53）
+        titleLabel->setMinimumHeight(18);
         QString stamp = session.value(QStringLiteral("updated_at")).toString();
         if (stamp.isEmpty())
             stamp = session.value(QStringLiteral("created_at")).toString();
         stamp = stamp.left(16).replace(QLatin1Char('T'), QLatin1Char(' '));
         QLabel *meta = makeLabel(QStringLiteral("sessionMeta"), stamp, select);
         meta->setTextInteractionFlags(Qt::NoTextInteraction);
+        meta->setMinimumHeight(16); // .session-select small：11px / 行盒 16
 
         // 状态徽标（.session-badge）：前端实时状态优先，刷新后靠服务端 active/waiting 兜底
         QString status = session.value(QStringLiteral("status")).toString();
