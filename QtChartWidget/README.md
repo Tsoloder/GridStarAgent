@@ -110,6 +110,9 @@ nmake
 `demo.exe` 依赖 Qt 运行时 DLL（含图标渲染所需的 `Qt5Svg.dll`）与本目录的 `QtChartWidget.dll`，
 运行前把两者加入 PATH：
 
+也可以直接双击 `start_demo.bat` 一键启动；缺少 `bin` 构建产物时，脚本会先调用 `build.bat`。
+需要传参时可在终端执行 `.\start_demo.bat --tab usage`。
+
 ```powershell
 $env:PATH = 'D:\Application\Qt\Qt5.12.2\5.12.2\msvc2017_64\bin;<工程>\QtChartWidget\bin;' + $env:PATH
 demo.exe                 # 交互窗口，预载一段示例历史
@@ -449,7 +452,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 测试进程自行设置 `QT_QPA_PLATFORM=offscreen`，不需要显示器；也不需要把 Qt 的 `bin`
 加进 PATH（`QtChartWidget.dll` 与测试同目录）。
 
-覆盖范围（38 项，含 init/cleanup）：
+覆盖范围（39 项，含 init/cleanup）：
 
 | 分组 | 用例 |
 | --- | --- |
@@ -460,7 +463,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 | 卡片 | `workflowProposalRun`、`phasePlanCollapsesWhenComplete`（跑完收起 / 执行中不收起）、`phasePlanSurvivesViewTabSwitch`（切轨迹再切回仍恢复） |
 | 轨迹 / 会话 | `trajectoryViewTabSwitch`（页签互斥 + 账本渲染）、`trajectoryInspectorResponsive`（380/300/88vw 三档）、`sessionBadgeStatus`（状态徽标含布尔回退） |
 | 轮次轨 / 用量 | `turnRailPanelHover`（移入轨道展开整轮列表、行序与当前轮高亮、点行/Enter/Space 跳转并收起、离开 180ms 延迟收起、行不越出面板）、`usagePanelTab`（切 Tab 才请求、默认筛选、M 单位概览、三图渲染、明细表显示名与排序、轮次不换算成 M）、`usageStaleResponseIgnored`（同区间刷新换 requestId；晚到的旧响应/旧失败不覆盖当前视图） |
-| 排版与动效 | `letterSpacingApplied`（Polish 时补字距、其他控件不受影响）、`trajectoryRowElides`（省略并保留全文）、`hoverRevealsCopyButton`（悬浮 .5→1）、`overlayAndCardTransitions`（浮层淡入淡出 + 卡片一次性 effect） |
+| 排版与动效 | `letterSpacingApplied`（Polish 时补字距、其他控件不受影响）、`trajectoryRowElides`（省略并保留全文）、`hoverRevealsCopyButton`（悬浮 .5→1）、`processAndToolHoverAccent`（过程摘要 / 工具名悬停转青，运行态橙色优先）、`overlayAndCardTransitions`（浮层淡入淡出 + 卡片一次性 effect） |
 | 工具项与口径 | `toolArgsTableAndResultFormat`（参数表、JSON 美化、失败判定、限高滚动容器）、`askUserToolCallIsNotRendered`（询问类调用不落成工具条目）、`usageModelLabelMapping`（用量弹层自动映射供应商名称） |
 | 嵌入作用域 | `escScopedToOwnWidget`（宿主窗口的 Esc 不被吞、也不误关浮层）、`zoomShortcutScopedToWidget`（快捷键限定 WidgetWithChildren） |
 | 可达性 / 线程 | `keyboardReachability`（图标按钮可 Tab + `accessibleName` 取 toolTip、过程行 Enter 展开、`.session-select` 键盘选中）、`guiThreadGuard`（非 GUI 线程推送被丢弃，仅发布构建有效） |

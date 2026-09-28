@@ -57,6 +57,7 @@ class Chevron : public QWidget
 public:
     explicit Chevron(QWidget *parent = nullptr);
     void setOpen(bool open);
+    void setHovered(bool hovered);
     bool isOpen() const { return m_open; }
     QSize sizeHint() const override { return QSize(10, 10); }
     QSize minimumSizeHint() const override { return QSize(10, 10); }
@@ -66,6 +67,7 @@ protected:
 
 private:
     bool m_open = false;
+    bool m_hovered = false;
 };
 
 // 工具项状态圆点（.tool-dot）：执行中橙色带光晕，成功绿色，失败红色

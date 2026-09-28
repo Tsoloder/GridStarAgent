@@ -10,6 +10,7 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QColor>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
@@ -340,6 +341,7 @@ private slots:
 
     void historyMergesTurnWithUsageAndTiming();
     void historyToolResultBackfill();
+    void processAndToolHoverAccent();
 
     void optionsOverlayChooseAndEsc();
     void optionsOverlayFreeText();
@@ -609,6 +611,77 @@ void TestChartWidget::historyToolResultBackfill()
                 .contains(QStringLiteral("1820")));
     // 参数表（.tool-args-table 的容器）
     QVERIFY(m_chart->findChild<QWidget *>(QStringLiteral("toolArgsBox")));
+}
+
+void TestChartWidget::processAndToolHoverAccent()
+{
+    m_chart->setHistory(historyFixture());
+    QTest::qWait(30);
+
+    QWidget *thinkRow = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("procRow"))) {
+        if (candidate->property("proc").toString() == QStringLiteral("think")) {
+            thinkRow = candidate;
+            break;
+        }
+    }
+    QVERIFY(thinkRow);
+    QWidget *thinkHead = widgetByClass(thinkRow, QStringLiteral("procRowHead"));
+    auto *thinkSum = qobject_cast<QLabel *>(widgetByClass(thinkRow, QStringLiteral("procSum")));
+    auto *thinkLabel = qobject_cast<QLabel *>(widgetByClass(thinkRow, QStringLiteral("procLabel")));
+    QVERIFY(thinkHead && thinkSum && thinkLabel);
+
+    // webui .proc-row:hover：摘要与箭头转青，.proc-label 仍保持 muted
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#78909d")));
+    QEvent enter(QEvent::HoverEnter);
+    QApplication::sendEvent(thinkHead, &enter);
+    QVERIFY(thinkRow->property("hovered").toBool());
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#50badf")));
+    QCOMPARE(thinkLabel->palette().color(QPalette::WindowText), QColor(QStringLiteral("#8499a6")));
+
+    QEvent leave(QEvent::HoverLeave);
+    QApplication::sendEvent(thinkHead, &leave);
+    QVERIFY(!thinkRow->property("hovered").toBool());
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#78909d")));
+
+    // 工具项：名称随 summary 悬停转青，状态标签仍保留自己的绿色
+    QWidget *toolItem = widgetByClass(m_chart.data(), QStringLiteral("toolItem"));
+    QVERIFY(toolItem);
+    QWidget *toolSummary = widgetByClass(toolItem, QStringLiteral("toolItemSummary"));
+    auto *toolName = qobject_cast<QLabel *>(widgetByClass(toolItem, QStringLiteral("toolItemName")));
+    auto *toolStatus = qobject_cast<QLabel *>(widgetByClass(toolItem, QStringLiteral("statusLabel")));
+    QVERIFY(toolSummary && toolName && toolStatus);
+    const QColor statusColor = toolStatus->palette().color(QPalette::WindowText);
+    QCOMPARE(statusColor, QColor(QStringLiteral("#50ce91")));
+
+    QApplication::sendEvent(toolSummary, &enter);
+    QVERIFY(toolSummary->property("hovered").toBool());
+    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#50badf")));
+    QCOMPARE(toolStatus->palette().color(QPalette::WindowText), statusColor);
+    QApplication::sendEvent(toolSummary, &leave);
+    QVERIFY(!toolSummary->property("hovered").toBool());
+    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#eaf6fa")));
+
+    // 运行中的工具行优先级高于 hover：摘要保持橙色
+    m_chart->appendToolCall(QStringLiteral("hover_running"),
+                            QStringLiteral("power_flow"), QVariantMap());
+    QTest::qWait(20);
+    QWidget *toolsRow = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("procRow"))) {
+        if (candidate->property("proc").toString() == QStringLiteral("tools")
+            && candidate->property("running").toBool()) {
+            toolsRow = candidate;
+            break;
+        }
+    }
+    QVERIFY(toolsRow);
+    QVERIFY(toolsRow->property("running").toBool());
+    QWidget *toolsHead = widgetByClass(toolsRow, QStringLiteral("procRowHead"));
+    auto *toolsSum = qobject_cast<QLabel *>(widgetByClass(toolsRow, QStringLiteral("procSum")));
+    QVERIFY(toolsHead && toolsSum);
+    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#e7a84d")));
+    QApplication::sendEvent(toolsHead, &enter);
+    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#e7a84d")));
 }
 
 // ---------------------------------------------------------------- 选择浮层

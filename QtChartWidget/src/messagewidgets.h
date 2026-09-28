@@ -80,6 +80,7 @@ private:
     QString m_state = QStringLiteral("running");
     QWidget *m_summary = nullptr;
     StatusDot *m_dot = nullptr;
+    QLabel *m_name = nullptr;
     QLabel *m_status = nullptr;
     QWidget *m_detail = nullptr;
     QWidget *m_resultWrap = nullptr;

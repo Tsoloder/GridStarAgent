@@ -148,13 +148,22 @@ void Chevron::setOpen(bool open)
     update();
 }
 
+void Chevron::setHovered(bool hovered)
+{
+    if (m_hovered == hovered)
+        return;
+    m_hovered = hovered;
+    update();
+}
+
 void Chevron::paintEvent(QPaintEvent *)
 {
     // CSS .tool-chevron：收起为 "›"，展开为 "⌄"，统一由 SVG 渲染并着色
     const int side = qRound(qMin(width(), height()) * 1.4);
+    const QColor color = m_hovered ? gs::palette().cyan : gs::palette().muted2;
     const QPixmap pm = iconPixmap(m_open ? QStringLiteral("chevron-down")
                                          : QStringLiteral("chevron-right"),
-                                  gs::palette().muted2, side);
+                                  color, side);
     QPainter p(this);
     p.drawPixmap((width() - pm.width()) / 2, (height() - pm.height()) / 2, pm);
 }

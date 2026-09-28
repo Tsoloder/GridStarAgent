@@ -74,6 +74,8 @@
 - **键盘可达性**：按钮 / 页签 / 下拉框统一 `Qt::TabFocus`（Tab 能到达，鼠标点完不留焦点环——
   近似 webui 的 `:focus-visible`）；自绘可点区域（过程行标题、工具项标题、计划窗头、选择项、
   轨迹行 / 分组 / 摘要、`.session-select`）支持 `Enter` / `Space` 等价于点击
+- 过程行与工具项标题补齐 webui 的悬停反馈：摘要 / 工具名与折叠箭头悬停转青；
+  运行态的青色 / 橙色和失败态红色保持更高优先级
 - 动画时长与 webui 对齐：选择浮层入场 180ms、**离场 240ms**（`app.js:842`），
   消息卡入场 180ms；浮层的 `QGraphicsOpacityEffect` 只在动画期间启用
 - 轨迹视图：`appendTrajectoryEvents` 改为**增量追加**（只构建新增行，不再整账本重建）；

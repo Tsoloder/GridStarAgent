@@ -412,6 +412,8 @@ void ProcRow::setRunning(bool running)
         m_summary->setAlignment(running ? (Qt::AlignRight | Qt::AlignVCenter)
                                         : (Qt::AlignLeft | Qt::AlignVCenter));
     restyle(this);
+    restyle(m_label);
+    restyle(m_summary);
 }
 
 void ProcRow::setFailed(bool failed)
@@ -420,11 +422,20 @@ void ProcRow::setFailed(bool failed)
         return;
     setProperty("failed", failed);
     restyle(this);
+    restyle(m_summary);
 }
 
 bool ProcRow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_head) {
+        if (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave) {
+            const bool hovered = event->type() == QEvent::HoverEnter;
+            setProperty("hovered", hovered);
+            m_chevron->setHovered(hovered);
+            // QSS 的父 :hover 不会驱动子选择器；重刷具体子标签才能让摘要继承行状态
+            restyle(this);
+            restyle(m_summary);
+        }
         if (event->type() == QEvent::MouseButtonRelease) {
             auto *me = static_cast<QMouseEvent *>(event);
             if (me->button() == Qt::LeftButton)
@@ -563,17 +574,18 @@ ToolItemWidget::ToolItemWidget(const QString &callId, const QString &name, const
     auto *summary = new QWidget(this);
     setClass(summary, QStringLiteral("toolItemSummary"));
     summary->setAttribute(Qt::WA_StyledBackground, true);
+    summary->setAttribute(Qt::WA_Hover, true);
     summary->setCursor(Qt::PointingHandCursor);
     auto *sl = new QHBoxLayout(summary);
     sl->setContentsMargins(0, 3, 0, 3);
     sl->setSpacing(8);
     m_dot = new StatusDot(summary);
     m_dot->setState(QStringLiteral("running"));
-    QLabel *nameLabel = headLabel(QStringLiteral("toolItemName"),
-                                  name.isEmpty() ? QStringLiteral("工具调用") : name, summary);
+    m_name = headLabel(QStringLiteral("toolItemName"),
+                       name.isEmpty() ? QStringLiteral("工具调用") : name, summary);
     m_status = headLabel(QStringLiteral("statusLabel"), QStringLiteral("执行中"), summary);
     sl->addWidget(m_dot, 0);
-    sl->addWidget(nameLabel, 1);
+    sl->addWidget(m_name, 1);
     sl->addWidget(m_status, 0);
     m_summary = summary;
     // 工具项标题行同样要能 Tab 到并用 Enter / Space 展开
@@ -644,6 +656,13 @@ void ToolItemWidget::setResult(const QString &result)
 bool ToolItemWidget::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_summary) {
+        if (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave) {
+            const bool hovered = event->type() == QEvent::HoverEnter;
+            m_summary->setProperty("hovered", hovered);
+            // 状态标签保留自己的成功 / 失败配色，只提亮工具名称
+            restyle(this);
+            restyle(m_name);
+        }
         if (event->type() == QEvent::MouseButtonRelease) {
             auto *me = static_cast<QMouseEvent *>(event);
             if (me->button() == Qt::LeftButton)

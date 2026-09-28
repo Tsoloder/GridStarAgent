@@ -564,6 +564,7 @@ QWidget.procRow:hover { background: transparent; }
 QLabel.procLabel { color: %MUTED%; font-size: 11px; font-weight: 500; background: transparent; }
 QWidget.procRow[running="true"] QLabel.procLabel { color: %TEXTBRIGHT%; }
 QLabel.procSum { color: %MUTED2%; font-size: 10px; background: transparent; font-family: %MONO%; }
+QWidget.procRow[hovered="true"] QLabel.procSum { color: %CYAN%; }
 QWidget.procRow[running="true"] QLabel.procSum { color: %CYAN%; }
 QWidget.procRow[proc="tools"][running="true"] QLabel.procSum { color: %ORANGE%; }
 QWidget.procRow[failed="true"] QLabel.procSum { color: %RED%; }
@@ -602,6 +603,7 @@ QWidget.toolItem { background: transparent; }
 QWidget.toolItemSummary { background: transparent; }
 QWidget.toolItemSummary:hover { background: transparent; }
 QLabel.toolItemName { color: %TEXTBRIGHT%; font-size: 11px; background: transparent; }
+QWidget.toolItemSummary[hovered="true"] QLabel.toolItemName { color: %CYAN%; }
 QLabel.statusLabel { color: %ORANGE%; font-size: 10px; background: transparent; }
 QLabel.statusLabel[status="succeeded"] { color: %GREEN%; }
 QLabel.statusLabel[status="failed"] { color: %RED%; }
