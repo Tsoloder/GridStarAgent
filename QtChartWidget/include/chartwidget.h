@@ -13,6 +13,7 @@ class QFrame;
 class QLabel;
 class QPushButton;
 class QScrollArea;
+class QSpacerItem;
 class QTimer;
 class QVBoxLayout;
 QT_END_NAMESPACE
@@ -281,6 +282,7 @@ private:
     QWidget *m_emptyState = nullptr;
     QWidget *m_phaseWrap = nullptr;
     PhasePanel *m_phasePanel = nullptr;
+    QSpacerItem *m_phaseLiftSpacer = nullptr;
     TrajectoryView *m_trajView = nullptr;
     Composer *m_composer = nullptr;
     QString m_viewTab = QStringLiteral("chat");

@@ -170,6 +170,8 @@ protected:
 private:
     void buildFoot();
     void applyMaxWidths();
+    // style.css：.bubble-attachments .attach-thumb{84px}；@media(max-width:640px){64px}
+    void applyAttachmentMetrics();
     void updateThinkSummary();
     ProcRow *ensureProcRow(const QString &key);
 
@@ -199,6 +201,7 @@ private:
     QTimer *m_liveTimer = nullptr;
     qint64 m_liveStart = 0;
     QString m_copyText;
+    QList<QLabel *> m_attachThumbs;
 };
 
 // JSON 工具（与 app.js valueForInput / coerceValue / coerceSchemaValue 对应）

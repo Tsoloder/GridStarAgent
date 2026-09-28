@@ -8,6 +8,9 @@ QT_BEGIN_NAMESPACE
 class QLabel;
 class QPushButton;
 class QTextEdit;
+class QHideEvent;
+class QMoveEvent;
+class QShowEvent;
 QT_END_NAMESPACE
 
 namespace gs {
@@ -26,6 +29,7 @@ class Composer : public QWidget
     Q_OBJECT
 public:
     explicit Composer(QWidget *parent = nullptr);
+    ~Composer() override;
 
     void setMode(const QString &mode);
     QString mode() const { return m_mode; }
@@ -82,12 +86,18 @@ signals:
     void choiceResized();
 
 protected:
+    void hideEvent(QHideEvent *event) override;
+    void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void updateSendState();
     void renderAttachments();
+    // style.css @media(max-width:640px)：附件 chip 收窄（见 AttachChip::setCompact）
+    bool compactAttachments() const;
+    void applyAttachmentCompact();
     void layoutChoiceOverlay();
     void autoGrowInput();
     void openModelList();
@@ -116,6 +126,8 @@ private:
     QPushButton *m_auto = nullptr;
     ComboTrigger *m_modelTrigger = nullptr;
     ComboTrigger *m_skillTrigger = nullptr;
+    QWidget *m_modelControl = nullptr;
+    QWidget *m_skillControl = nullptr;
     ListBoxPopup *m_modelList = nullptr;
     ListBoxPopup *m_skillList = nullptr;
     IconPushButton *m_attach = nullptr;
@@ -125,6 +137,8 @@ private:
     QLabel *m_busyLabel = nullptr;
     ChoiceOverlay *m_choice = nullptr;
     bool m_choiceOpen = false;
+    // layoutChoiceOverlay() 量高时会改卡片几何 -> resizeEvent -> sizeChanged 回头调用本函数
+    bool m_choiceLayingOut = false;
 };
 
 } // namespace gs

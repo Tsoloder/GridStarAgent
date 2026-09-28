@@ -111,7 +111,8 @@ nmake
 运行前把两者加入 PATH：
 
 也可以直接双击 `start_demo.bat` 一键启动；缺少 `bin` 构建产物时，脚本会先调用 `build.bat`。
-需要传参时可在终端执行 `.\start_demo.bat --tab usage`。
+需要传参时可在终端执行 `.\start_demo.bat --tab usage`。不带 `--live` 时使用内置假后端，
+用于 UI 和交互回归；连接真实 Agent 后端时使用下面的 live 模式。
 
 ```powershell
 $env:PATH = 'D:\Application\Qt\Qt5.12.2\5.12.2\msvc2017_64\bin;<工程>\QtChartWidget\bin;' + $env:PATH
@@ -136,6 +137,45 @@ demo.exe --shot out.png  # 离屏渲染并截图后退出
 ```powershell
 $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
 ```
+
+### 连接真实后台（live 模式）
+
+先按根目录 README 启动 MCP 服务和 Agent 后端（两个独立终端）：
+
+```powershell
+# 终端 1：MCP 工具服务（默认 127.0.0.1:5656）
+cd .\agent
+python server.py
+```
+
+```powershell
+# 终端 2：Agent 后端（默认 127.0.0.1:1231）
+cd .\agent\agent
+python app.py --host 127.0.0.1 --port 1231
+```
+
+然后从工程根目录启动连接真实后端的 Qt Demo：
+
+```powershell
+.\QtChartWidget\start_demo.bat --live --api http://127.0.0.1:1231
+```
+
+`--api` 可省略，默认即为 `http://127.0.0.1:1231`；`start_demo.bat` 会把参数原样转发给
+`demo.exe`。live 模式启动后会真实调用 `/health`、`/config`、`/config/models`、`/skills`、
+`/mcp/tools`、`/sessions`，普通对话走 `POST /chat/stream` 的 SSE；会话切换、清空、重命名、
+轨迹、停止、审批、配置保存、Provider 测试、模型发现、Skill/MCP 刷新、附件上传和用量统计
+也都连接真实接口。
+
+窗口顶部的连接状态含义：
+
+| 状态 | 含义 |
+| --- | --- |
+| 红色 `offline / 服务不可用` | `/health` 无响应或返回非 2xx，后端不可达 |
+| 橙色 `checking` | 后端已响应，但 config、模型 runtime 或 MCP 尚未就绪 |
+| 绿色 `online / Agent 已连接` | `/health` 正常，且 config、runtime、MCP 均已就绪 |
+
+live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这些假数据指令不会执行；
+`/history` 改为重新载入当前真实会话，`/clear` 改为清空后台会话。
 
 ### 演示指令（在输入框中输入后回车）
 

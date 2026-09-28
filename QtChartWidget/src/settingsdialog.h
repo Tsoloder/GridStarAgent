@@ -7,11 +7,16 @@
 #include <QWidget>
 
 QT_BEGIN_NAMESPACE
+class QBoxLayout;
 class QCheckBox;
 class QComboBox;
+class QGridLayout;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QResizeEvent;
+class QSpacerItem;
 class QStackedWidget;
 class QVBoxLayout;
 QT_END_NAMESPACE
@@ -93,12 +98,15 @@ signals:
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     // Esc 走 reject()，脏检查要在两条路径上都生效
     void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void buildUi();
+    // style.css @media(max-width:640px)：设置窗口转紧凑布局
+    void applyCompactMode(bool compact);
     QWidget *buildModelsPage();
     QWidget *buildProviderSidebar();
     QWidget *buildProviderEditor();
@@ -153,6 +161,10 @@ private:
 
     // 框架
     QStackedWidget *m_stack = nullptr;
+    QHBoxLayout *m_headLayout = nullptr;
+    QHBoxLayout *m_tabsLayout = nullptr;
+    QSpacerItem *m_tabsSpacer = nullptr;
+    QHBoxLayout *m_actionsLayout = nullptr;
     QPushButton *m_tabModels = nullptr;
     QPushButton *m_tabSkills = nullptr;
     QPushButton *m_tabMcp = nullptr;
@@ -161,9 +173,20 @@ private:
     QLabel *m_status = nullptr;
 
     // 供应商侧栏
+    QWidget *m_providerSidebar = nullptr;
+    QVBoxLayout *m_providerSidebarLayout = nullptr;
     QVBoxLayout *m_providerNavLayout = nullptr;
 
     // 供应商编辑器
+    QWidget *m_providerEditor = nullptr;
+    QVBoxLayout *m_providerEditorLayout = nullptr;
+    QGridLayout *m_providerGrid = nullptr;
+    QList<QWidget *> m_providerFields;
+    // .form-grid：每个模型卡片一套，切紧凑模式时重排为单列
+    QList<QGridLayout *> m_modelGrids;
+    QList<QList<QWidget *>> m_modelGridFields;
+    QBoxLayout *m_providerActions = nullptr;
+    QSpacerItem *m_providerActionsSpacer = nullptr;
     QWidget *m_placeholder = nullptr;
     QFrame *m_sectionProvider = nullptr;
     QFrame *m_sectionModels = nullptr;
@@ -191,6 +214,8 @@ private:
     QPushButton *m_addManualButton = nullptr;
 
     // 技能 / MCP
+    QVBoxLayout *m_skillsPageLayout = nullptr;
+    QVBoxLayout *m_mcpPageLayout = nullptr;
     QLabel *m_skillCount = nullptr;
     QLabel *m_skillsStatus = nullptr;
     QVBoxLayout *m_skillsLayout = nullptr;
@@ -202,6 +227,8 @@ private:
 
     // 用量页
     UsagePanel *m_usagePanel = nullptr;
+
+    bool m_compact = false;
 };
 
 } // namespace gs

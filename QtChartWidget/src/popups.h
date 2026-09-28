@@ -32,6 +32,8 @@ public:
     QString searchText() const { return m_search; }
     void setSelected(bool selected);
     void setFocusedRow(bool focused);
+    // style.css @media(max-width:640px)：.model-option small{display:none}
+    void setCompact(bool compact);
 
 signals:
     void activated(const QString &value);
@@ -47,6 +49,7 @@ private:
     QLabel *m_check = nullptr;
     QLabel *m_name = nullptr;
     QLabel *m_id = nullptr;
+    bool m_compact = false;
 };
 
 // 模型 / Skill 下拉（.model-listbox）：Qt::Popup，在触发器上方弹出
@@ -81,6 +84,8 @@ private:
     QWidget *m_inner = nullptr;
     QVBoxLayout *m_innerLayout = nullptr;
     QList<ListOptionRow *> m_rows;
+    // webui：.model-listbox 默认 max-width:330px，.skill-control .model-listbox 固定 250px
+    int m_preferredWidth = 250;
     int m_focusIndex = 0;
     QString m_typeAhead;
     QTimer *m_typeTimer = nullptr;
@@ -113,7 +118,11 @@ protected:
 
 private:
     void render();
+    // 打开状态下内容变化后按宿主尺寸重排（webui max-height 只是上限）
+    void syncHostLayout();
 
+    QWidget *m_head = nullptr;
+    QWidget *m_list = nullptr;
     QLineEdit *m_search = nullptr;
     QVBoxLayout *m_listLayout = nullptr;
     QVariantList m_sessions;

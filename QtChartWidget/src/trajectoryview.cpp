@@ -2307,7 +2307,9 @@ void TrajectoryView::applyResponsiveLayout()
     if (!m_body || !m_bodyLayout || !m_inspector)
         return;
     const int w = width();
-    const bool overlay = w < 560;
+    if (m_search)
+        m_search->setFixedWidth(w <= 760 ? 140 : 220);
+    const bool overlay = w <= 560;
     if (overlay != m_overlayInspector) {
         m_overlayInspector = overlay;
         const bool wasVisible = m_inspector->isVisible();
@@ -2330,7 +2332,7 @@ void TrajectoryView::applyResponsiveLayout()
             m_inspector->setGeometry(m_body->width() - width, 0, width, m_body->height());
         });
     } else {
-        m_inspector->setFixedWidth(w < 760 ? 300 : 380);
+        m_inspector->setFixedWidth(w <= 760 ? 300 : 380);
     }
 }
 

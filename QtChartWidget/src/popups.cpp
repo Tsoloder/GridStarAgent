@@ -109,6 +109,14 @@ void ListOptionRow::setFocusedRow(bool focused)
     restyle(this);
 }
 
+void ListOptionRow::setCompact(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    m_id->setVisible(!compact);
+}
+
 void ListOptionRow::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
@@ -132,7 +140,6 @@ ListBoxPopup::ListBoxPopup(QWidget *parent)
     setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_StyledBackground, true);
     setFocusPolicy(Qt::StrongFocus);
-    setFixedWidth(250);
     setMaximumHeight(280);
 
     auto *outer = new QVBoxLayout(this);
@@ -207,6 +214,7 @@ ListOptionRow *ListBoxPopup::addRow(const QString &value, const QString &name, c
 
 void ListBoxPopup::setModelOptions(const QVariantList &models, const QString &selectedKey)
 {
+    m_preferredWidth = 330;
     reset();
     const QVariantList visible = visibleModels(models);
     // groups: provider -> items（保持出现顺序）
@@ -259,6 +267,7 @@ void ListBoxPopup::setModelOptions(const QVariantList &models, const QString &se
 
 void ListBoxPopup::setSkillOptions(const QVariantList &skills, const QString &selectedId)
 {
+    m_preferredWidth = 250;
     reset();
     QVariantList all;
     QVariantMap none;
@@ -313,16 +322,40 @@ void ListBoxPopup::openAbove(QWidget *anchor)
 {
     if (!anchor)
         return;
+    // webui：下拉 left:0 贴外层 .model-control 左缘、bottom:calc(100% + 7px)，
+    // 宽度 calc(100vw - 18px) 再被 max-width 截断（模型 330px / Skill 250px）
+    QWidget *host = anchor->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QApplication::desktop()->availableGeometry(anchor);
+    const bool compact = hostRect.width() <= 640;
+    for (ListOptionRow *row : m_rows)
+        row->setCompact(compact);
     m_inner->layout()->activate();
-    const int height = qMin(m_inner->sizeHint().height() + 12, 280);
-    const QRect screen = QApplication::desktop()->availableGeometry(anchor);
-    QPoint topLeft = anchor->mapToGlobal(QPoint(0, 0));
-    int x = qBound(screen.left(), topLeft.x(), screen.right() - width());
-    int y = topLeft.y() - height - 4;
-    if (y < screen.top())
-        y = qMin(topLeft.y() + anchor->height() + 4, screen.bottom() - height);
-    setGeometry(x, y, width(), height);
+    const int width = qMax(0, qMin(m_preferredWidth, hostRect.width() - 18));
+    // 绝对定位的包含块是 .model-control 的 padding box（border-box 内缩 1px 边框）
+    const QPoint topLeft = anchor->mapToGlobal(anchor->contentsRect().topLeft());
+    const int minX = hostRect.left();
+    const int maxX = qMax(minX, hostRect.right() - width);
+    const int x = qBound(minX, topLeft.x(), maxX);
+
+    const auto anchoredY = [&](int popupHeight) {
+        // bottom:calc(100% + 7px)：底边贴着控件上方 7px
+        int y = topLeft.y() - popupHeight - 7;
+        // 上方空间不够时翻到下面（webui 没有这一支，属于兜底）
+        if (y < hostRect.top())
+            y = qMin(anchor->mapToGlobal(QPoint(0, 0)).y() + anchor->height() + 7,
+                     hostRect.bottom() - popupHeight);
+        return y;
+    };
+
+    const int estimated = qMin(m_inner->sizeHint().height() + 12, 280);
+    setGeometry(x, anchoredY(estimated), width, estimated);
     show();
+    // 样式表要等 show() 之后才 polish，隐藏状态下量到的 sizeHint 偏小，窗口会被布局的最小高度顶大；
+    // 按定稿高度重贴一次，保持底边贴着锚点（webui 的弹层底边固定、向上生长）。
+    const int settled = height();
+    if (settled != estimated)
+        setGeometry(x, anchoredY(settled), width, settled);
     raise();
     setFocus(Qt::PopupFocusReason);
     applyFocus();
@@ -372,9 +405,10 @@ void ListBoxPopup::keyPressEvent(QKeyEvent *event)
 
 QRect SessionPanel::areaFor(const QSize &host)
 {
+    // webui .session-panel：top:126px;left/right:8px;max-height:calc(100% - 154px)
     const int width = qMax(0, host.width() - 16);
-    const int height = qMax(0, qMin(430, host.height() - 120));
-    return QRect(8, 92, width, height);
+    const int maxHeight = qMax(0, host.height() - 154);
+    return QRect(8, 126, width, maxHeight);
 }
 
 SessionPanel::SessionPanel(QWidget *parent)
@@ -389,6 +423,7 @@ SessionPanel::SessionPanel(QWidget *parent)
     outer->setSpacing(0);
 
     auto *head = new QWidget(this);
+    m_head = head;
     head->setObjectName(QStringLiteral("panelHead"));
     head->setAttribute(Qt::WA_StyledBackground, true);
     auto *headLayout = new QHBoxLayout(head);
@@ -417,6 +452,7 @@ SessionPanel::SessionPanel(QWidget *parent)
     scroll->viewport()->setAutoFillBackground(false);
     scroll->setStyleSheet(QStringLiteral("QScrollArea#sessionScroll{border:0;background:transparent;}"));
     auto *list = new QWidget(scroll);
+    m_list = list;
     list->setObjectName(QStringLiteral("sessionList"));
     list->setStyleSheet(QStringLiteral("QWidget#sessionList{background:transparent;}"));
     m_listLayout = new QVBoxLayout(list);
@@ -458,8 +494,11 @@ void SessionPanel::render()
     if (shown.isEmpty()) {
         QLabel *empty = makeLabel(QStringLiteral("listboxEmpty"), QStringLiteral("没有会话"), this);
         empty->setAlignment(Qt::AlignCenter);
+        empty->ensurePolished(); // QSS 的边距要先落地，量出的空状态高度才是最终值
         m_listLayout->addWidget(empty);
+        empty->show();
         m_listLayout->addStretch(1);
+        syncHostLayout();
         return;
     }
 
@@ -550,7 +589,13 @@ void SessionPanel::render()
 
         rowLayout->addWidget(select, 1);
         rowLayout->addWidget(actions);
+        // QSS（.session-badge 的 padding 等）要先落地：行刚建出来还没显示过时
+        // sizeHint 偏小，面板按它收缩会把最后一行截掉
+        row->ensurePolished();
         m_listLayout->addWidget(row);
+        // 隐藏控件在布局里算「空项」（QWidgetItem::isEmpty），sizeHint/heightForWidth 会把它当 0：
+        // 面板打开期间过滤出的新行、面板打开前 setSessions() 建的行，都要显式 show 才量得到高度
+        row->show();
 
         select->installEventFilter(this);
         select->setProperty("sessionId", id);
@@ -562,6 +607,17 @@ void SessionPanel::render()
         connect(buttons.at(2), &QPushButton::clicked, this, [this, id] { emit sessionDeleted(id); });
     }
     m_listLayout->addStretch(1);
+    syncHostLayout();
+}
+
+// 面板打开期间内容变换（搜索过滤、会话刷新）后要立刻跟着宿主重排：
+// webui 的 max-height 只是上限，内容变少时面板必须收缩，否则行会被旧高度留在半空/被底边截断。
+void SessionPanel::syncHostLayout()
+{
+    if (!m_open)
+        return;
+    if (QWidget *host = parentWidget())
+        layoutIn(host->size());
 }
 
 bool SessionPanel::eventFilter(QObject *watched, QEvent *event)
@@ -610,7 +666,15 @@ bool SessionPanel::isOpen() const
 
 void SessionPanel::layoutIn(const QSize &host)
 {
-    setGeometry(areaFor(host));
+    const QRect area = areaFor(host);
+    // 行刚增删完时列表布局还没跑过，先定稿再量自然高度
+    if (m_listLayout)
+        m_listLayout->activate();
+    // webui 面板没有固定高度：内容少时收到内容高，内容多时被 max-height 截断并滚动
+    const int naturalHeight = (m_head ? m_head->sizeHint().height() : 0)
+                              + (m_list ? m_list->sizeHint().height() : 0);
+    const int height = qMin(area.height(), qMax(sizeHint().height(), naturalHeight));
+    setGeometry(area.x(), area.y(), area.width(), height);
 }
 
 // ------------------------------------------------------- ThemeListPopup
@@ -662,17 +726,28 @@ void ThemeListPopup::openBelow(QWidget *anchor)
 {
     if (!anchor)
         return;
-    adjustSize();
+    // .theme-listbox{top:32px;right:0;width:132px}：28px 触发器 + 4px 间距，右缘与触发器对齐
+    QWidget *host = anchor->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QRect(anchor->mapToGlobal(QPoint(0, 0)), anchor->size());
     const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height() + 4));
-    int x = below.x() + anchor->width() - width();
-    int y = below.y();
-    if (QWidget *screenWidget = anchor->window()) {
-        const QRect host = screenWidget->geometry();
-        x = qBound(host.left() + 6, x, host.right() - width() - 6);
-        y = qMin(y, host.bottom() - height() - 6);
-    }
-    move(x, y);
+    const auto anchoredPos = [&](int popupHeight) {
+        const int minX = hostRect.left() + 6;
+        const int x = qBound(minX, below.x() + anchor->width() - width(),
+                             qMax(minX, hostRect.right() - width() - 6));
+        const int y = qMin(below.y(),
+                           qMax(hostRect.top() + 6, hostRect.bottom() - popupHeight - 6));
+        return QPoint(x, y);
+    };
+
+    adjustSize();
+    // 隐藏状态下量到的高度偏小，先落位，show() 之后按定稿高度重贴一次
+    const int estimated = height();
+    move(anchoredPos(estimated));
     show();
+    const int settled = height();
+    if (settled != estimated)
+        move(anchoredPos(settled));
     raise();
 }
 
@@ -752,7 +827,10 @@ ConfirmDialog::ConfirmDialog(const QString &title, const QString &message, const
     setObjectName(QStringLiteral("confirmDialog"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setModal(true);
-    setFixedWidth(380);
+    // CSS .confirm-dialog{width:92vw;max-width:380px}：设置中心最小宽 360（<380），
+    // 固定 380 会在窄宿主下溢出，这里按父窗口宽度收窄
+    const int hostWidth = parent ? parent->window()->width() : 0;
+    setFixedWidth(hostWidth > 0 ? qMin(380, qRound(hostWidth * 0.92)) : 380);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 16, 16, 16);

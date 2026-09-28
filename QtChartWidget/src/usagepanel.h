@@ -10,11 +10,13 @@
 #include <QWidget>
 
 QT_BEGIN_NAMESPACE
+class QBoxLayout;
 class QGridLayout;
 class QHideEvent;
 class QLabel;
 class QPushButton;
 class QResizeEvent;
+class QScrollArea;
 class QStackedWidget;
 class QTableWidget;
 class QVBoxLayout;
@@ -71,6 +73,10 @@ protected:
     void hideEvent(QHideEvent *event) override;
 
 private:
+    // 选项内容自然宽（label 全文 + note）：QPushButton::sizeHint 走样式、看不到内部布局，
+    // 直接问 sizeHint 会把长模型名量窄，浮层被压在 min-width 140 上
+    int preferredContentWidth() const;
+
     QVBoxLayout *m_layout = nullptr;
     QWidget *m_inner = nullptr;
 };
@@ -98,6 +104,7 @@ private:
     void rebuildPresets();
     void rebuildCalendar();
     void pickDay(const QDate &day);
+    void applyLayoutMode(bool compact);
 
     QString m_preset;
     QDateTime m_start;
@@ -105,10 +112,16 @@ private:
     QDate m_pendingStart;
     QDate m_pendingEnd;
     QDate m_anchor;
+    QBoxLayout *m_rootLayout = nullptr;
+    QScrollArea *m_scroll = nullptr;
+    QWidget *m_content = nullptr;
+    QWidget *m_calendar = nullptr;
     QWidget *m_presetBox = nullptr;
     QWidget *m_monthHost = nullptr;
+    QBoxLayout *m_monthLayout = nullptr;
     QLabel *m_title = nullptr;
     QPushButton *m_confirm = nullptr;
+    bool m_compact = false;
 };
 
 // 概览卡（.usage-stat）

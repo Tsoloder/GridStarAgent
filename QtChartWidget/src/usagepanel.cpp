@@ -7,6 +7,7 @@
 
 #include <QApplication>
 #include <QAbstractButton>
+#include <QBoxLayout>
 #include <QDateTime>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -17,6 +18,7 @@
 #include <QMouseEvent>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QtMath>
@@ -197,6 +199,7 @@ void UsageSelect::keyPressEvent(QKeyEvent *event)
 
 UsageListPopup::UsageListPopup(QWidget *parent) : QFrame(parent)
 {
+    setObjectName(QStringLiteral("usageListPopup"));
     setClass(this, QStringLiteral("usageListbox"));
     setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_StyledBackground, true);
@@ -232,6 +235,10 @@ void UsageListPopup::setItems(const QVariantList &items, const QString &current)
         const QString value = data.value(QStringLiteral("value")).toString();
         auto *button = new QPushButton(m_inner);
         setClass(button, QStringLiteral("usageOption"));
+        // .usage-listbox button 是 padding:7px + 11px 文字，浏览器实测行高 29–30px。
+        // 这里给显式下限：ElidedLabel 的文本要等首次 resize 才回填，
+        // 只靠字体度量在部分平台会把选项行压到 20px 出头。
+        button->setMinimumHeight(30);
         button->setProperty("selected", value == current);
         button->setEnabled(!data.value(QStringLiteral("disabled")).toBool());
         button->setCursor(Qt::PointingHandCursor);
@@ -254,8 +261,20 @@ void UsageListPopup::setItems(const QVariantList &items, const QString &current)
         m_layout->addWidget(button);
     }
     adjustSize();
-    setFixedWidth(qBound(140, sizeHint().width(), 340));
+    setFixedWidth(qBound(140, preferredContentWidth(), 340));
     setMaximumHeight(280);
+}
+
+int UsageListPopup::preferredContentWidth() const
+{
+    int content = 0;
+    for (int i = 0; i < m_layout->count(); ++i) {
+        QWidget *option = m_layout->itemAt(i)->widget();
+        if (option && option->layout())
+            content = qMax(content, option->layout()->sizeHint().width());
+    }
+    // .usage-listbox{padding:5px;border:1px}：内容宽 + 左右内边距与边框
+    return content + 12;
 }
 
 void UsageListPopup::openBelow(QWidget *anchor)
@@ -263,19 +282,38 @@ void UsageListPopup::openBelow(QWidget *anchor)
     if (!anchor)
         return;
     adjustSize();
-    const int width = qBound(140, sizeHint().width(), 340);
-    setFixedWidth(width);
-    const int height = qMin(sizeHint().height(), 280);
+    // .usage-listbox{left:0;top:calc(100% + 5px);min-width:140px;max-width:340px;max-height:280px}
+    // 锚点是 .usage-filter 容器（相对它定位），不是里面的按钮
+    // 先按 min-width 落位：样式表要等 show() 才 polish，那时量到的字体与内容宽才是定稿值
+    QWidget *host = anchor->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QRect(anchor->mapToGlobal(QPoint(0, 0)), anchor->size());
+    // webui 的 max-width 只约束了 340px，宿主更窄时仍有 absolute 定位可以溢出。
+    // 桌面窗口不能在宿主外显示，这里同时按宿主可用宽度收敛，长选项继续由 ElidedLabel 省略。
+    const int availableWidth = qMax(80, hostRect.width() - 12);
+    const int minWidth = qMin(140, availableWidth);
+    const int maxWidth = qMax(minWidth, qMin(340, availableWidth));
+    const int maxHeight = qMax(60, qMin(280, hostRect.height() - 12));
+    setFixedWidth(minWidth);
+    setMaximumHeight(maxHeight);
     const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height() + 5));
-    int x = below.x();
-    int y = below.y();
-    if (QWidget *host = anchor->window()) {
-        const QRect frame = host->geometry();
-        x = qBound(frame.left() + 6, x, frame.right() - width - 6);
-        y = qMin(y, frame.bottom() - height - 6);
-    }
-    setGeometry(x, y, width, height);
+    const auto anchoredPos = [&](int popupWidth, int popupHeight) {
+        const int minX = hostRect.left() + 6;
+        const int x = qBound(minX, below.x(), qMax(minX, hostRect.right() - popupWidth - 6));
+        const int y = qMin(below.y(),
+                           qMax(hostRect.top() + 6, hostRect.bottom() - popupHeight - 6));
+        return QPoint(x, y);
+    };
+
+    // 隐藏状态下量到的 height 偏小（样式表还没 polish），先按粗略高度落位，
+    // show() 后按内容定稿的宽高再贴一次
+    const int estimated = qMin(sizeHint().height(), maxHeight);
+    setGeometry(QRect(anchoredPos(minWidth, estimated), QSize(minWidth, estimated)));
     show();
+    const int width = qBound(minWidth, preferredContentWidth(), maxWidth);
+    setFixedWidth(width);
+    const int settled = qMin(qMax(height(), m_inner->sizeHint().height() + 12), maxHeight);
+    setGeometry(QRect(anchoredPos(width, settled), QSize(width, settled)));
     raise();
 }
 
@@ -293,16 +331,36 @@ UsageRangePopup::UsageRangePopup(QWidget *parent) : QFrame(parent)
     setClass(this, QStringLiteral("usageRangePanel"));
     setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_StyledBackground, true);
-    auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(12, 12, 12, 12);
-    layout->setSpacing(14);
+
+    // 面板内容放进滚动区：窄宿主下双月改为纵向后高度会超过设置窗口，
+    // 由滚动区承接溢出，避免像 absolute 浮层一样被宿主下缘裁掉。
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(0);
+    m_scroll = new QScrollArea(this);
+    m_scroll->setObjectName(QStringLiteral("usageRangeScroll"));
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_scroll->viewport()->setAutoFillBackground(false);
+    m_scroll->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_content = new QWidget(m_scroll);
+    m_content->setObjectName(QStringLiteral("usageRangeContent"));
+    m_content->setAttribute(Qt::WA_StyledBackground, false);
+    m_scroll->setWidget(m_content);
+    outer->addWidget(m_scroll);
+
+    m_rootLayout = new QBoxLayout(QBoxLayout::LeftToRight, m_content);
+    m_rootLayout->setContentsMargins(12, 12, 12, 12);
+    m_rootLayout->setSpacing(14);
 
     // DOM 顺序是日历在前、预设在右（.usage-range-panel{display:flex;gap:14px}）
-    auto *calendar = new QWidget(this);
-    auto *calendarLayout = new QVBoxLayout(calendar);
+    m_calendar = new QWidget(m_content);
+    auto *calendarLayout = new QVBoxLayout(m_calendar);
     calendarLayout->setContentsMargins(0, 0, 0, 0);
     calendarLayout->setSpacing(8);
-    auto *nav = new QWidget(calendar);
+    auto *nav = new QWidget(m_calendar);
     auto *navLayout = new QHBoxLayout(nav);
     navLayout->setContentsMargins(0, 0, 0, 0);
     navLayout->setSpacing(8);
@@ -330,17 +388,42 @@ UsageRangePopup::UsageRangePopup(QWidget *parent) : QFrame(parent)
     }
     navLayout->addWidget(steps, 0);
     calendarLayout->addWidget(nav);
-    m_monthHost = new QWidget(calendar);
+    m_monthHost = new QWidget(m_calendar);
+    m_monthLayout = new QBoxLayout(QBoxLayout::LeftToRight, m_monthHost);
+    m_monthLayout->setContentsMargins(0, 0, 0, 0);
+    m_monthLayout->setSpacing(16);
     calendarLayout->addWidget(m_monthHost);
-    layout->addWidget(calendar, 1);
+    m_rootLayout->addWidget(m_calendar, 1);
 
-    m_presetBox = new QWidget(this);
+    m_presetBox = new QWidget(m_content);
     m_presetBox->setFixedWidth(112);
     auto *presetLayout = new QVBoxLayout(m_presetBox);
     presetLayout->setContentsMargins(0, 0, 0, 0);
     presetLayout->setSpacing(6);
-    layout->addWidget(m_presetBox, 0, Qt::AlignTop);
+    m_rootLayout->addWidget(m_presetBox, 0, Qt::AlignTop);
     // 同下拉浮层：不自己铺样式表，直接继承父窗口（ChartWidget）的样式表
+}
+
+void UsageRangePopup::applyLayoutMode(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    // 与 style.css @media(max-width:640px) 对齐：
+    // .usage-range-panel{flex-direction:column} + .usage-cal-months{flex-direction:column;gap:8px}
+    m_rootLayout->setDirection(compact ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+    m_monthLayout->setDirection(compact ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
+    m_monthLayout->setSpacing(compact ? 8 : 16);
+    if (compact) {
+        // webui flex-direction:column 后预设列会被拉到面板同宽
+        m_presetBox->setMinimumWidth(112);
+        m_presetBox->setMaximumWidth(QWIDGETSIZE_MAX);
+    } else {
+        m_presetBox->setFixedWidth(112);
+    }
+    m_rootLayout->invalidate();
+    m_monthLayout->invalidate();
+    m_content->updateGeometry();
 }
 
 void UsageRangePopup::rebuildPresets()
@@ -393,13 +476,7 @@ void UsageRangePopup::rebuildCalendar()
                          .arg(second.year())
                          .arg(pad2(second.month())));
 
-    auto *hostLayout = qobject_cast<QHBoxLayout *>(m_monthHost->layout());
-    if (!hostLayout) {
-        hostLayout = new QHBoxLayout(m_monthHost);
-        hostLayout->setContentsMargins(0, 0, 0, 0);
-        hostLayout->setSpacing(16);
-    }
-    while (QLayoutItem *item = hostLayout->takeAt(0)) {
+    while (QLayoutItem *item = m_monthLayout->takeAt(0)) {
         if (QWidget *w = item->widget())
             w->deleteLater();
         delete item;
@@ -472,9 +549,10 @@ void UsageRangePopup::rebuildCalendar()
             cellsLayout->addWidget(button, index / 7, index % 7);
         }
         gridLayout->addWidget(cells);
-        hostLayout->addWidget(grid, 0, Qt::AlignTop);
+        m_monthLayout->addWidget(grid, 0, Qt::AlignTop);
     }
-    adjustSize();
+    if (!isVisible())
+        adjustSize();
 }
 
 void UsageRangePopup::pickDay(const QDate &day)
@@ -509,17 +587,53 @@ void UsageRangePopup::openBelowRight(QWidget *filtersRow)
 {
     if (!filtersRow)
         return;
-    adjustSize();
+    QWidget *host = filtersRow->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QRect(filtersRow->mapToGlobal(QPoint(0, 0)), filtersRow->size());
+
+    // 与 style.css 的窗口宽度媒体查询同口径：<=640 时转换为纵向双月
+    applyLayoutMode(hostRect.width() <= 640);
+    m_content->layout()->activate();
+    m_content->adjustSize();
+
+    const int edge = 12; // 左右 / 上下各留 6px
+    const int availableWidth = qMax(200, hostRect.width() - edge);
+    const int availableHeight = qMax(180, hostRect.height() - edge);
+    const auto fitted = [&](const QSize &content) {
+        int width = qMin(content.width(), availableWidth);
+        const int height = qMin(content.height(), availableHeight);
+        if (content.height() > height) {
+            // 纵向滚动条会占用内容宽度：提前补齐，避免再触发横向滚动条
+            const int bar = qMax(m_scroll->verticalScrollBar()->sizeHint().width(), 8);
+            width = qMin(content.width() + bar, availableWidth);
+        }
+        return QSize(qMax(1, width), qMax(1, height));
+    };
+
     const QPoint below = filtersRow->mapToGlobal(QPoint(0, filtersRow->height() + 5));
-    int x = below.x() + filtersRow->width() - width();
-    int y = below.y();
-    if (QWidget *host = filtersRow->window()) {
-        const QRect frame = host->geometry();
-        x = qBound(frame.left() + 6, x, frame.right() - width() - 6);
-        y = qMin(y, frame.bottom() - height() - 6);
-    }
-    move(x, y);
+    const auto anchoredPos = [&](const QSize &popupSize) {
+        const int minX = hostRect.left() + 6;
+        const int x = qBound(minX, below.x() + filtersRow->width() - popupSize.width(),
+                             qMax(minX, hostRect.right() - popupSize.width() - 6));
+        const int minY = hostRect.top() + 6;
+        const int y = qBound(minY, below.y(),
+                             qMax(minY, hostRect.bottom() - popupSize.height() - 6));
+        return QPoint(x, y);
+    };
+
+    // 先按布局自然尺寸落位，show() 触发 QSS polish 后再按定稿尺寸贴一次；
+    // 高度超出宿主时由内部滚动区承接，窗口本身不能越出宿主。
+    QSize natural = m_content->sizeHint().expandedTo(m_content->minimumSizeHint());
+    QSize popupSize = fitted(natural);
+    setGeometry(QRect(anchoredPos(popupSize), popupSize));
     show();
+    m_content->layout()->activate();
+    natural = m_content->sizeHint().expandedTo(m_content->minimumSizeHint());
+    const QSize settled = fitted(natural);
+    if (settled != popupSize) {
+        popupSize = settled;
+        setGeometry(QRect(anchoredPos(popupSize), popupSize));
+    }
     raise();
 }
 
@@ -772,8 +886,13 @@ QWidget *UsagePanel::buildFilters()
         }
         return false;
     };
+    // webui：.usage-listbox 相对 .usage-filter 容器 left:0 定位，而不是相对里面的按钮
+    auto filterAnchor = [](UsageSelect *select) -> QWidget * {
+        QWidget *box = select ? select->parentWidget() : nullptr;
+        return box ? box : static_cast<QWidget *>(select);
+    };
 
-    connect(m_groupSelect, &UsageSelect::clicked, this, [this, toggleOff] {
+    connect(m_groupSelect, &UsageSelect::clicked, this, [this, toggleOff, filterAnchor] {
         if (toggleOff(m_groupSelect))
             return;
         ensurePopups(m_groupSelect);
@@ -784,11 +903,11 @@ QWidget *UsagePanel::buildFilters()
               << QVariantMap{ { QStringLiteral("value"), QStringLiteral("provider") },
                               { QStringLiteral("label"), QStringLiteral("供应商用量") } };
         m_listPopup->setItems(items, m_groupBy);
-        m_listPopup->openBelow(m_groupSelect);
+        m_listPopup->openBelow(filterAnchor(m_groupSelect));
         m_groupSelect->setOpen(true);
         m_activeTrigger = m_groupSelect;
     });
-    connect(m_providerSelect, &UsageSelect::clicked, this, [this, toggleOff] {
+    connect(m_providerSelect, &UsageSelect::clicked, this, [this, toggleOff, filterAnchor] {
         if (toggleOff(m_providerSelect))
             return;
         ensurePopups(m_providerSelect);
@@ -802,11 +921,11 @@ QWidget *UsagePanel::buildFilters()
                                   { QStringLiteral("label"), row.value(QStringLiteral("label")) } };
         }
         m_listPopup->setItems(items, m_provider);
-        m_listPopup->openBelow(m_providerSelect);
+        m_listPopup->openBelow(filterAnchor(m_providerSelect));
         m_providerSelect->setOpen(true);
         m_activeTrigger = m_providerSelect;
     });
-    connect(m_modelSelect, &UsageSelect::clicked, this, [this, toggleOff] {
+    connect(m_modelSelect, &UsageSelect::clicked, this, [this, toggleOff, filterAnchor] {
         if (toggleOff(m_modelSelect))
             return;
         ensurePopups(m_modelSelect);
@@ -821,11 +940,11 @@ QWidget *UsagePanel::buildFilters()
                                   { QStringLiteral("note"), row.value(QStringLiteral("note")) } };
         }
         m_listPopup->setItems(items, m_model);
-        m_listPopup->openBelow(m_modelSelect);
+        m_listPopup->openBelow(filterAnchor(m_modelSelect));
         m_modelSelect->setOpen(true);
         m_activeTrigger = m_modelSelect;
     });
-    connect(m_granularitySelect, &UsageSelect::clicked, this, [this, toggleOff] {
+    connect(m_granularitySelect, &UsageSelect::clicked, this, [this, toggleOff, filterAnchor] {
         if (toggleOff(m_granularitySelect))
             return;
         ensurePopups(m_granularitySelect);
@@ -845,7 +964,7 @@ QWidget *UsagePanel::buildFilters()
         }
         items << hour;
         m_listPopup->setItems(items, m_granularity);
-        m_listPopup->openBelow(m_granularitySelect);
+        m_listPopup->openBelow(filterAnchor(m_granularitySelect));
         m_granularitySelect->setOpen(true);
         m_activeTrigger = m_granularitySelect;
     });

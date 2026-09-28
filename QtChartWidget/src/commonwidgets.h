@@ -189,14 +189,21 @@ public:
     // item 与 attachments 的条目同构：{name, size, ext, uploading, kind, path[, url]}
     explicit AttachChip(const QVariantMap &item, QWidget *parent = nullptr);
     void setUploading(bool uploading);
+    // style.css：.attach-chip{max-width:230px}；@media(max-width:640px) 收到 150px。
+    // Qt 侧用文件名省略宽度兑现这条约束（宽屏 140 即 230 减去固定件后的余量）
+    void setCompact(bool compact);
 
 signals:
     void removeClicked();
 
 private:
+    void updateNameElide();
+
     QLabel *m_name = nullptr;
     QLabel *m_size = nullptr;
+    QString m_fullName;
     qint64 m_bytes = 0;
+    bool m_compact = false;
 };
 
 // SVG 图标按钮：图标经 iconPixmap 着色后设置，hover/禁用态自动换色。

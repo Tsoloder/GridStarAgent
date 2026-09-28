@@ -11,12 +11,14 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QColor>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFont>
 #include <QFrame>
 #include <QGraphicsOpacityEffect>
+#include <QGridLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QLayout>
@@ -24,16 +26,19 @@
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPixmap>
+#include <QPointer>
 #include <QPushButton>
 #include <QScopedPointer>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSharedPointer>
 #include <QShortcut>
 #include <QStyle>
 #include <QTableWidget>
 #include <QTextEdit>
 #include <QSignalSpy>
 #include <QTest>
+#include <QTimer>
 
 #include <thread>
 
@@ -80,6 +85,16 @@ QStringList labelTexts(QWidget *root, const QString &cls)
     for (QWidget *widget : widgetsByClass(root, cls)) {
         if (auto *label = qobject_cast<QLabel *>(widget))
             out << label->text();
+    }
+    return out;
+}
+
+QStringList fullLabelTexts(QWidget *root, const QString &cls)
+{
+    QStringList out;
+    for (QWidget *widget : widgetsByClass(root, cls)) {
+        if (auto *label = qobject_cast<QLabel *>(widget))
+            out << (label->toolTip().isEmpty() ? label->text() : label->toolTip());
     }
     return out;
 }
@@ -323,6 +338,39 @@ QVariantMap usageFixture(const QString &start, const QString &end)
     return out;
 }
 
+// 设置中心用例共用的最小草稿：一个 provider + 一个 model（进模型页需要至少一份配置）
+QVariantMap settingsDraftFixture()
+{
+    QVariantMap capabilities;
+    const char *const capKeys[5] = { "tools", "parallel_tools", "reasoning", "vision",
+                                     "stream_usage" };
+    for (const char *key : capKeys)
+        capabilities.insert(QLatin1String(key), false);
+
+    const QVariantMap model{
+        { QStringLiteral("id"), QStringLiteral("gs-pro-32k") },
+        { QStringLiteral("provider"), QStringLiteral("gridstar") },
+        { QStringLiteral("name"), QStringLiteral("GS-Pro 32K") },
+        { QStringLiteral("enabled"), true },
+        { QStringLiteral("context_window"), 32768 },
+        { QStringLiteral("max_output_tokens"), 4096 },
+        { QStringLiteral("capabilities"), capabilities },
+    };
+    const QVariantMap provider{
+        { QStringLiteral("id"), QStringLiteral("gridstar") },
+        { QStringLiteral("name"), QStringLiteral("GridStar 网关") },
+        { QStringLiteral("type"), QStringLiteral("openai") },
+        { QStringLiteral("base_url"), QStringLiteral("https://llm.gridstar.local/v1") },
+        { QStringLiteral("api_key"), QStringLiteral("") },
+        { QStringLiteral("enabled"), true },
+    };
+    QVariantMap config;
+    config.insert(QStringLiteral("providers"), QVariantList{ provider });
+    config.insert(QStringLiteral("models"), QVariantList{ model });
+    config.insert(QStringLiteral("default_model"), QStringLiteral("gridstar/gs-pro-32k"));
+    return config;
+}
+
 } // namespace
 
 class TestChartWidget : public QObject
@@ -338,13 +386,19 @@ private slots:
     void modeModelSkillSignals();
     void inputSendRoundTrip();
     void attachmentChipPreview();
+    void attachChipFitsNarrowWindow();
+    void bubbleAttachmentThumbFitsNarrowWindow();
 
     void historyMergesTurnWithUsageAndTiming();
     void historyToolResultBackfill();
     void processAndToolHoverAccent();
+    void bubbleDetailPopupAnchoring();
+    void bubbleDetailPopupFitsNarrowHost();
 
     void optionsOverlayChooseAndEsc();
     void optionsOverlayFreeText();
+    void choiceOverlayShowsAboveComposer();
+    void choiceOverlayFitsNarrowWindow();
     void toolParamsOverlaySubmit();
     void approvalOverlayRoundTrip();
 
@@ -368,8 +422,15 @@ private slots:
     void zoomShortcutScopedToWidget();
     void keyboardReachability();
     void turnRailPanelHover();
+    void overlayGeometryMatchesWebui();
+    void sessionPanelReflowsWhileOpen();
+    void toastFitsWrappedText();
     void usagePanelTab();
     void usageStaleResponseIgnored();
+    void usagePopupsFitNarrowHost();
+    void settingsDialogCompactLayout();
+    void confirmDialogFitsNarrowSettings();
+    void markdownTableSizesToContent();
     // 回归：整张样式表必须能被 Qt 完整解析（不支持的选择器会丢弃其后所有规则）
     void appStyleSheetParsesFully();
     void guiThreadGuard();
@@ -554,6 +615,72 @@ void TestChartWidget::attachmentChipPreview()
     QFile::remove(imagePath);
 }
 
+// style.css：.attach-chip{max-width:230px}；@media(max-width:640px){max-width:150px}
+void TestChartWidget::attachChipFitsNarrowWindow()
+{
+    const QString longName = QStringLiteral(
+        "gridstar-load-flow-analysis-report-2026-09-final-version.pdf");
+    m_chart->resize(420, 820);
+    m_chart->addAttachments(QVariantList{ QVariantMap{ { QStringLiteral("id"), 1 },
+                                                       { QStringLiteral("name"), longName },
+                                                       { QStringLiteral("size"), 10240 },
+                                                       { QStringLiteral("ext"),
+                                                         QStringLiteral("pdf") } } });
+    QTest::qWait(20);
+
+    QWidget *chip = widgetByClass(m_chart.data(), QStringLiteral("attachChip"));
+    QVERIFY(chip);
+    QWidget *nameWidget = widgetByClass(chip, QStringLiteral("attachName"));
+    QVERIFY(nameWidget);
+    auto *name = qobject_cast<QLabel *>(nameWidget);
+    QVERIFY(name);
+    QCOMPARE(name->toolTip(), longName);
+
+    // 窄屏：名称省略收紧到 64（宽屏 140 的 150/230 近似）
+    QCOMPARE(name->maximumWidth(), 64);
+    const QString narrowText = name->text();
+    QVERIFY(narrowText.length() < longName.length());
+    QVERIFY(narrowText.endsWith(QChar(0x2026)));
+
+    m_chart->resize(900, 820);
+    QTest::qWait(20);
+    QCOMPARE(name->maximumWidth(), 140);
+    QVERIFY(name->text().length() > narrowText.length());
+}
+
+// style.css：.bubble-attachments .attach-thumb{84px}；@media(max-width:640px){64px}
+void TestChartWidget::bubbleAttachmentThumbFitsNarrowWindow()
+{
+    const QString imagePath = QDir::temp().filePath(QStringLiteral("gs_bubble_attach_test.png"));
+    QPixmap pixmap(120, 120);
+    pixmap.fill(Qt::blue);
+    QVERIFY(pixmap.save(imagePath));
+
+    m_chart->resize(900, 820);
+    m_chart->appendUserMessage(QStringLiteral("看一下这张图"),
+                               QVariantList{ QVariantMap{ { QStringLiteral("name"),
+                                                            QStringLiteral("shot.png") },
+                                                          { QStringLiteral("kind"),
+                                                            QStringLiteral("image") },
+                                                          { QStringLiteral("url"), imagePath } } });
+    QTest::qWait(30);
+
+    auto *thumb = qobject_cast<QLabel *>(
+        widgetByClass(m_chart.data(), QStringLiteral("attachThumb")));
+    QVERIFY(thumb);
+    QCOMPARE(thumb->size(), QSize(84, 84));
+
+    m_chart->resize(560, 820);
+    QTest::qWait(30);
+    QCOMPARE(thumb->size(), QSize(64, 64));
+
+    m_chart->resize(900, 820);
+    QTest::qWait(30);
+    QCOMPARE(thumb->size(), QSize(84, 84));
+
+    QFile::remove(imagePath);
+}
+
 // ---------------------------------------------------------------- 历史渲染
 
 void TestChartWidget::historyMergesTurnWithUsageAndTiming()
@@ -684,6 +811,151 @@ void TestChartWidget::processAndToolHoverAccent()
     QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#e7a84d")));
 }
 
+// ---------------------------------------------------------------- 气泡明细浮层
+
+// .bubble-timing-pop/.bubble-usage-pop：left:0;bottom:calc(100% + 7px)，
+// 贴按钮左缘并在其上方 7px 落底、整体向上生长
+void TestChartWidget::bubbleDetailPopupAnchoring()
+{
+    m_chart->setHistory(historyFixture());
+    QTest::qWait(30);
+
+    QPushButton *usagePill = nullptr;
+    QPushButton *timingPill = nullptr;
+    for (QWidget *widget : m_chart->findChildren<QPushButton *>()) {
+        if (!hasClass(widget, QStringLiteral("bubblePill")))
+            continue;
+        auto *button = qobject_cast<QPushButton *>(widget);
+        if (button->text().contains(QStringLiteral("tokens")))
+            usagePill = button;
+        else if (button->text().contains(QStringLiteral("用时")))
+            timingPill = button;
+    }
+    QVERIFY(usagePill && timingPill);
+
+    auto openPop = [this](QWidget *pill) -> QWidget * {
+        clickWidget(pill);
+        QTest::qWait(30);
+        for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("bubblePop"))) {
+            if (candidate->isVisible())
+                return candidate;
+        }
+        return nullptr;
+    };
+    auto checkAbove = [](QWidget *pop, QWidget *pill) {
+        const QPoint anchor = pill->mapToGlobal(QPoint(0, 0));
+        const QPoint popTop = pop->mapToGlobal(QPoint(0, 0));
+        // 高度必须在 show() 之后定稿：隐藏状态量到的高度偏小会把浮层压到按钮上
+        QCOMPARE(anchor.y() - (popTop.y() + pop->height()), 7);
+        QVERIFY(pop->height() > 0);
+    };
+
+    QWidget *pop = openPop(usagePill);
+    QVERIFY(pop);
+    checkAbove(pop, usagePill);
+    // 明细行的值按 .pop-row 右对齐，说明行已排布
+    QVERIFY(!labelTexts(pop, QStringLiteral("popRowValue")).isEmpty());
+    pop->hide();
+    QTest::qWait(20);
+
+    pop = openPop(timingPill);
+    QVERIFY(pop);
+    checkAbove(pop, timingPill);
+    pop->hide();
+    QTest::qWait(20);
+}
+
+void TestChartWidget::bubbleDetailPopupFitsNarrowHost()
+{
+    m_chart->resize(420, 820);
+    m_chart->appendAssistantText(QStringLiteral("用量明细的窄屏回归测试。"));
+    QTest::qWait(20);
+
+    const QString longModel =
+        QStringLiteral("Very Long Provider With A Model Name That Must Be Elided / "
+                       "gridstar-extended-reasoning-model-with-an-extremely-long-version-name");
+    QVariantMap usage;
+    usage.insert(QStringLiteral("total"), 123456);
+    usage.insert(QStringLiteral("input"), 100000);
+    usage.insert(QStringLiteral("output"), 23456);
+    usage.insert(QStringLiteral("estimated"), false);
+    usage.insert(QStringLiteral("label"), QStringLiteral("123.5k tokens"));
+    usage.insert(QStringLiteral("model_label"), longModel);
+    m_chart->setTokenUsageDetail(usage);
+    QTest::qWait(20);
+
+    QPushButton *usagePill = nullptr;
+    for (QWidget *widget : m_chart->findChildren<QPushButton *>()) {
+        if (!hasClass(widget, QStringLiteral("bubblePill")))
+            continue;
+        auto *button = qobject_cast<QPushButton *>(widget);
+        if (button && button->text().contains(QStringLiteral("tokens"))) {
+            usagePill = button;
+            break;
+        }
+    }
+    QVERIFY(usagePill);
+
+    clickWidget(usagePill);
+    QTest::qWait(30);
+
+    QWidget *pop = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("bubblePop"))) {
+        if (candidate->isVisible()) {
+            pop = candidate;
+            break;
+        }
+    }
+    QVERIFY(pop);
+
+    QWidget *host = usagePill->window();
+    const QRect hostRect(host->mapToGlobal(QPoint(0, 0)), host->size());
+    const QRect popupRect = pop->geometry();
+    QVERIFY2(hostRect.contains(popupRect),
+             qPrintable(QStringLiteral("popup %1,%2 %3x%4 outside host %5,%6 %7x%8")
+                            .arg(popupRect.x())
+                            .arg(popupRect.y())
+                            .arg(popupRect.width())
+                            .arg(popupRect.height())
+                            .arg(hostRect.x())
+                            .arg(hostRect.y())
+                            .arg(hostRect.width())
+                            .arg(hostRect.height())));
+    QVERIFY(popupRect.left() >= hostRect.left() + 6);
+    QVERIFY(popupRect.right() <= hostRect.right() - 6);
+
+    QLabel *modelValue = nullptr;
+    for (QLabel *label : pop->findChildren<QLabel *>()) {
+        if (label->toolTip() == longModel) {
+            modelValue = label;
+            break;
+        }
+    }
+    QVERIFY(modelValue);
+    QVERIFY(modelValue->width() > 0);
+    QVERIFY(modelValue->text() != modelValue->toolTip());
+    QVERIFY(modelValue->text().endsWith(QChar(0x2026)));
+
+    QLabel *total = nullptr;
+    for (QLabel *label : pop->findChildren<QLabel *>()) {
+        if (!hasClass(label, QStringLiteral("popTotal")))
+            continue;
+        total = label;
+        if (label->isVisible())
+            QVERIFY(label->width() > 0);
+    }
+    QVERIFY(total && total->isVisible());
+
+    for (QLabel *label : pop->findChildren<QLabel *>()) {
+        if (hasClass(label, QStringLiteral("popRowValue")) && label->isVisible()) {
+            QVERIFY(label->width() > 0);
+            QVERIFY(!label->text().isEmpty());
+        }
+    }
+
+    pop->hide();
+}
+
 // ---------------------------------------------------------------- 选择浮层
 
 void TestChartWidget::optionsOverlayChooseAndEsc()
@@ -746,6 +1018,188 @@ void TestChartWidget::optionsOverlayFreeText()
     QTest::keyClick(m_chart.data(), Qt::Key_Escape);
     waitOverlayClosed();
     QVERIFY(!choiceCard()->isVisible());
+}
+
+void TestChartWidget::choiceOverlayShowsAboveComposer()
+{
+    QVariantMap running;
+    running.insert(QStringLiteral("id"), QStringLiteral("p1"));
+    running.insert(QStringLiteral("title"), QStringLiteral("running phase"));
+    running.insert(QStringLiteral("status"), QStringLiteral("running"));
+    QVariantMap plan;
+    plan.insert(QStringLiteral("title"), QStringLiteral("phase plan"));
+    plan.insert(QStringLiteral("phases"), QVariant(QVariantList{ running }));
+    m_chart->setPhasePlan(plan);
+    QTest::qWait(20);
+    QVERIFY(m_chart->findChild<QWidget *>(QStringLiteral("phasePanel"))->isVisible());
+
+    QWidget *composer = m_chart->findChild<QWidget *>(QStringLiteral("composer"));
+    QWidget *inputWrap = m_chart->findChild<QWidget *>(QStringLiteral("inputWrap"));
+    QVERIFY(composer && inputWrap);
+    const int normalHeight = composer->height();
+    QVERIFY(normalHeight > 80);
+
+    openOptionsOverlay();
+    QWidget *card = choiceCard();
+    QVERIFY(card && card->isVisible());
+    QVERIFY(!inputWrap->isVisible());
+    QTest::qWait(20);
+
+    QCOMPARE(composer->height(), normalHeight);
+    QVERIFY(card->parentWidget() != composer);
+    QCOMPARE(card->height(), card->sizeHint().height());
+
+    const QRect cardRect(card->mapTo(m_chart.data(), QPoint(0, 0)), card->size());
+    QVERIFY(m_chart->rect().contains(cardRect));
+    QVERIFY(cardRect.top()
+            < composer->mapTo(m_chart.data(), QPoint(0, 0)).y());
+
+    const int composerBottom =
+        composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
+    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 12);
+
+    const QList<QWidget *> items = widgetsByClass(card, QStringLiteral("choiceItem"));
+    QCOMPARE(items.size(), 3);
+    for (QWidget *item : items) {
+        QVERIFY(item->isVisible());
+        QVERIFY(cardRect.contains(
+            QRect(item->mapTo(m_chart.data(), QPoint(0, 0)), item->size())));
+    }
+    QWidget *hint = widgetByClass(card, QStringLiteral("choiceHint"));
+    QVERIFY(hint && hint->isVisible());
+    QVERIFY(cardRect.contains(
+        QRect(hint->mapTo(m_chart.data(), QPoint(0, 0)), hint->size())));
+
+    QWidget *phasePanel = m_chart->findChild<QWidget *>(QStringLiteral("phasePanel"));
+    QVERIFY(phasePanel && phasePanel->isVisible());
+    const QRect phaseRect(phasePanel->mapTo(m_chart.data(), QPoint(0, 0)),
+                          phasePanel->size());
+    QVERIFY(!phaseRect.intersects(cardRect));
+    QCOMPARE(cardRect.top() - (phaseRect.y() + phaseRect.height()), 8);
+
+    // 折叠时卡片必须跟随 sizeHint 收缩；它由 Composer 绝对定位，不会自动变矮
+    QWidget *head = card->findChild<QWidget *>(QStringLiteral("choiceHead"));
+    QVERIFY(head && head->isVisible());
+    const int expandedHeight = card->height();
+    clickWidget(head);
+    QTest::qWait(20);
+
+    const int collapsedHeight = card->height();
+    QVERIFY(collapsedHeight < expandedHeight);
+    QCOMPARE(collapsedHeight, card->sizeHint().height());
+    QCOMPARE(card->mapTo(m_chart.data(), QPoint(0, collapsedHeight)).y(),
+             composerBottom - 12);
+    QCOMPARE(labelText(card, QStringLiteral("choiceCaret")), QString::fromUtf8("⌃"));
+    QWidget *list = widgetByClass(card, QStringLiteral("choiceList"));
+    QVERIFY(list && !list->isVisible());
+    QVERIFY(!hint->isVisible());
+    for (QWidget *item : items)
+        QVERIFY(!item->isVisible());
+
+    const QRect collapsedRect(card->mapTo(m_chart.data(), QPoint(0, 0)), card->size());
+    const QRect collapsedPhaseRect(phasePanel->mapTo(m_chart.data(), QPoint(0, 0)),
+                                   phasePanel->size());
+    QVERIFY(!collapsedPhaseRect.intersects(collapsedRect));
+    QCOMPARE(collapsedRect.top()
+                 - (collapsedPhaseRect.y() + collapsedPhaseRect.height()),
+             8);
+
+    // 再展开，内容与高度恢复
+    clickWidget(head);
+    QTest::qWait(20);
+    QVERIFY(card->height() > collapsedHeight);
+    QCOMPARE(card->height(), card->sizeHint().height());
+    QVERIFY(list->isVisible());
+    QVERIFY(hint->isVisible());
+}
+
+// 窄窗口 + 长问题 + 多条长描述：卡片高度必须按定稿宽度重算一次。
+// 若沿用隐藏状态或旧宽度下的 sizeHint，描述文字和底部提示会被卡片底边裁掉。
+void TestChartWidget::choiceOverlayFitsNarrowWindow()
+{
+    m_chart->resize(420, 460);
+    QTest::qWait(30);
+
+    const QString paragraph = QStringLiteral(
+        "分区内多条馈线同时重载，新能源出力仍在快速上升；需要先校验联络开关与保护定值，"
+        "确认转供后的电压和电流不过限，再决定下一阶段的处置顺序。");
+    QVariantList options;
+    for (int i = 0; i < 3; ++i) {
+        options << QVariantMap{
+            { QStringLiteral("label"), QStringLiteral("方案%1：调整联络开关并转移负荷").arg(i + 1) },
+            { QStringLiteral("value"), QStringLiteral("plan-%1").arg(i + 1) },
+            { QStringLiteral("description"), paragraph },
+        };
+    }
+    QVariantMap payload;
+    payload.insert(QStringLiteral("question"), paragraph + paragraph);
+    payload.insert(QStringLiteral("options"), options);
+
+    m_chart->showChoice(payload);
+    QTest::qWait(40);
+
+    QWidget *card = choiceCard();
+    QVERIFY(card && card->isVisible());
+    QWidget *composer = m_chart->findChild<QWidget *>(QStringLiteral("composer"));
+    QVERIFY(composer);
+
+    const QRect cardRect(card->mapTo(m_chart.data(), QPoint(0, 0)), card->size());
+    const QRect hostRect(m_chart->rect());
+    QVERIFY2(hostRect.contains(cardRect),
+             qPrintable(QStringLiteral("choice card %1,%2 %3x%4 outside host %5x%6")
+                            .arg(cardRect.x()).arg(cardRect.y())
+                            .arg(cardRect.width()).arg(cardRect.height())
+                            .arg(hostRect.width()).arg(hostRect.height())));
+
+    const int composerBottom =
+        composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
+    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 12);
+
+    // 内容比可视区高时正文自己滚动：选项必须完整躺在滚动内容里（不被压扁/裁掉），
+    // 并且能滚到最后一项，而不是被卡片底边吃掉一半。
+    QScrollArea *scroll = card->findChild<QScrollArea *>(QStringLiteral("choiceScroll"));
+    QVERIFY(scroll);
+    QWidget *body = scroll->widget();
+    QVERIFY(body);
+    QVERIFY2(scroll->verticalScrollBar()->maximum() > 0,
+             qPrintable(QStringLiteral("choice body %1 fits viewport %2, scrollbar missing")
+                            .arg(body->height()).arg(scroll->viewport()->height())));
+
+    const QList<QWidget *> items = widgetsByClass(card, QStringLiteral("choiceItem"));
+    QCOMPARE(items.size(), options.size() + 1); // 末尾自动补「其他」
+    for (QWidget *item : items) {
+        QVERIFY(item->isVisible());
+        const QRect itemRect(item->mapTo(body, QPoint(0, 0)), item->size());
+        QVERIFY2(body->rect().contains(itemRect),
+                 qPrintable(QStringLiteral("choice item %1,%2 %3x%4 outside body %5x%6")
+                                .arg(itemRect.x()).arg(itemRect.y())
+                                .arg(itemRect.width()).arg(itemRect.height())
+                                .arg(body->width()).arg(body->height())));
+        for (QLabel *label : item->findChildren<QLabel *>()) {
+            const int needed = label->heightForWidth(label->width());
+            if (label->text().isEmpty() || needed < 0)
+                continue;
+            QVERIFY2(label->height() >= needed,
+                     qPrintable(QStringLiteral("clipped label '%1': h=%2 need=%3 w=%4")
+                                    .arg(label->text().left(12)).arg(label->height())
+                                    .arg(needed).arg(label->width())));
+        }
+    }
+    QWidget *lastItem = items.last();
+    const int lastBottom = lastItem->mapTo(body, QPoint(0, lastItem->height())).y();
+    QVERIFY2(body->height() >= lastBottom,
+             qPrintable(QStringLiteral("scrollable body %1 shorter than last item bottom %2")
+                            .arg(body->height()).arg(lastBottom)));
+
+    QWidget *hint = widgetByClass(card, QStringLiteral("choiceHint"));
+    QVERIFY(hint && hint->isVisible());
+    const QRect hintRect(hint->mapTo(card, QPoint(0, 0)), hint->size());
+    QVERIFY(card->rect().contains(hintRect));
+
+    QWidget *submit = card->findChild<QWidget *>(QStringLiteral("choiceSubmit"));
+    QVERIFY(submit && submit->isVisible());
+    const QRect submitRect(submit->mapTo(card, QPoint(0, 0)), submit->size());
+    QVERIFY(card->rect().contains(submitRect));
 }
 
 void TestChartWidget::toolParamsOverlaySubmit()
@@ -1150,7 +1604,7 @@ void TestChartWidget::usageModelLabelMapping()
     clickWidget(pill); // 打开用量明细弹层
     QTest::qWait(20);
     // 「提供方 / 模型」把 provider ID 自动换成供应商名称（app.js usageModelLabel）
-    const QStringList values = labelTexts(m_chart.data(), QStringLiteral("popRowValue"));
+    const QStringList values = fullLabelTexts(m_chart.data(), QStringLiteral("popRowValue"));
     QVERIFY(values.contains(QStringLiteral("我的供应商 / gs-mini")));
     QVERIFY(values.contains(QStringLiteral("300"))); // 输出行：无推理 token 时只给数字
 }
@@ -1221,7 +1675,8 @@ void TestChartWidget::trajectoryInspectorResponsive()
 
     QWidget *traj = m_chart->findChild<QWidget *>(QStringLiteral("trajectoryView"));
     QWidget *inspector = m_chart->findChild<QWidget *>(QStringLiteral("trajInspector"));
-    QVERIFY(traj && inspector);
+    QLineEdit *search = m_chart->findChild<QLineEdit *>(QStringLiteral("trajSearch"));
+    QVERIFY(traj && inspector && search);
 
     // 选中一行 → 详情面板出现
     QWidget *row = widgetByClass(traj, QStringLiteral("trajRow"));
@@ -1234,17 +1689,30 @@ void TestChartWidget::trajectoryInspectorResponsive()
     m_chart->resize(900, 820);
     QTest::qWait(50);
     QCOMPARE(inspector->width(), 380);
-    m_chart->resize(700, 820);
+    QCOMPARE(search->width(), 220);
+    m_chart->resize(761, 820);
+    QTest::qWait(50);
+    QCOMPARE(inspector->width(), 380);
+    QCOMPARE(search->width(), 220);
+    m_chart->resize(760, 820);
     QTest::qWait(50);
     QCOMPARE(inspector->width(), 300);
+    QCOMPARE(search->width(), 140);
 
-    // webui @media(max-width:560px)：88vw 覆盖式浮层（脱离布局）
-    m_chart->resize(500, 820);
-    QTest::qWait(70);
-    QCOMPARE(inspector->width(), 440); // 500 * 0.88
-    QVERIFY(inspector->isVisible());
+    // 560 是覆盖式的边界：561 仍走 760 档的内嵌布局
     QWidget *body = inspector->parentWidget();
     QVERIFY(body);
+    m_chart->resize(561, 820);
+    QTest::qWait(70);
+    QCOMPARE(inspector->width(), 300);
+    QCOMPARE(search->width(), 140);
+    QVERIFY(body->layout() && body->layout()->indexOf(inspector) >= 0);
+
+    // webui @media(max-width:560px)：88vw 覆盖式浮层（脱离布局）
+    m_chart->resize(560, 820);
+    QTest::qWait(70);
+    QCOMPARE(inspector->width(), 493); // 560 * 0.88
+    QVERIFY(inspector->isVisible());
     QVERIFY(!body->layout() || body->layout()->indexOf(inspector) < 0);
 
     // 回到宽屏：放回布局并恢复宽度
@@ -1252,6 +1720,104 @@ void TestChartWidget::trajectoryInspectorResponsive()
     QTest::qWait(70);
     QCOMPARE(inspector->width(), 380);
     QVERIFY(inspector->parentWidget()->layout()->indexOf(inspector) >= 0);
+}
+
+// style.css @media(max-width:640px)：设置中心侧栏 210→118、.form-grid 双列→单列
+void TestChartWidget::settingsDialogCompactLayout()
+{
+    const QVariantMap config = settingsDraftFixture();
+    m_chart->setConfigLoaded(true);
+    m_chart->setSettingsDraft(config, 1);
+    m_chart->openSettings(QStringLiteral("models"));
+    QTest::qWait(50);
+
+    auto *dialog = qobject_cast<QDialog *>(m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog")));
+    QVERIFY(dialog);
+    QWidget *sidebar = dialog->findChild<QWidget *>(QStringLiteral("providerSidebar"));
+    auto *providerGrid = dialog->findChild<QGridLayout *>(QStringLiteral("providerFormGrid"));
+    auto *modelGrid = dialog->findChild<QGridLayout *>(QStringLiteral("modelFormGrid"));
+    QVERIFY(sidebar);
+    QVERIFY(providerGrid);
+    QVERIFY(modelGrid);
+
+    int row = -1;
+    int col = -1;
+    int rowSpan = 0;
+    int colSpan = 0;
+
+    // 宽屏：侧栏 210，第二个字段落在第一行第二列
+    dialog->resize(900, 700);
+    QTest::qWait(50);
+    QCOMPARE(sidebar->width(), 210);
+    QVERIFY(!dialog->property("compact").toBool());
+    providerGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    QCOMPARE(row, 0);
+    QCOMPARE(col, 1);
+    modelGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    QCOMPARE(row, 0);
+    QCOMPARE(col, 1);
+
+    // 紧凑：侧栏 118，第二个字段换到第二行第一列
+    dialog->resize(620, 700);
+    QTest::qWait(50);
+    QCOMPARE(sidebar->width(), 118);
+    // style.css @media(max-width:640px)：.settings-dialog{border:0;border-radius:0}
+    QVERIFY(dialog->property("compact").toBool());
+    QVERIFY(m_chart->styleSheet().contains(
+        QStringLiteral("QDialog#settingsDialog[compact=\"true\"]")));
+    providerGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    QCOMPARE(row, 1);
+    QCOMPARE(col, 0);
+    modelGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    QCOMPARE(row, 1);
+    QCOMPARE(col, 0);
+}
+
+// .confirm-dialog{width:92vw;max-width:380px}：设置中心最小宽 360（<380），
+// 固定 380 的确认框会横向溢出父窗口
+void TestChartWidget::confirmDialogFitsNarrowSettings()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->setSettingsDraft(settingsDraftFixture(), 1);
+    m_chart->openSettings(QStringLiteral("models"));
+    QTest::qWait(50);
+
+    auto *settings =
+        qobject_cast<QDialog *>(m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog")));
+    QVERIFY(settings);
+    // 最小宽必须能到 360，否则这个回归在 ChartWidget（最小宽 420）下不可达
+    settings->resize(360, 700);
+    QTest::qWait(50);
+    QCOMPARE(settings->width(), 360);
+
+    // 制造脏状态：改 provider 名字（textChanged -> markDirty）
+    QLineEdit *nameEdit = nullptr;
+    for (QLineEdit *edit : settings->findChildren<QLineEdit *>()) {
+        if (edit->text() == QStringLiteral("GridStar 网关")) {
+            nameEdit = edit;
+            break;
+        }
+    }
+    QVERIFY(nameEdit);
+    nameEdit->setText(QStringLiteral("GridStar 网关 2"));
+
+    // 确认框走模态 exec()：用 0 延时定时器在嵌套事件循环里量宽并收掉
+    QPointer<QWidget> host(settings);
+    auto confirmWidth = QSharedPointer<int>::create(0);
+    QTimer::singleShot(0, m_chart.data(), [host, confirmWidth] {
+        if (!host)
+            return;
+        QWidget *confirm = host->findChild<QWidget *>(QStringLiteral("confirmDialog"));
+        if (!confirm)
+            return;
+        *confirmWidth = confirm->width();
+        confirm->close();
+    });
+    m_chart->closeSettings();
+
+    QVERIFY2(*confirmWidth > 0, "未捕获到二次确认框");
+    QVERIFY(*confirmWidth <= 380);
+    QVERIFY(*confirmWidth <= qRound(360 * 0.92));
 }
 
 void TestChartWidget::hoverRevealsCopyButton()
@@ -1557,6 +2123,300 @@ void TestChartWidget::turnRailPanelHover()
     QVERIFY(!panel->isVisible());
 }
 
+// 浮层几何与 webui 的 CSS 口径一致：
+//   .session-panel      top:126px;left/right:8px;max-height:calc(100% - 154px)（无固定高度，内容少时收缩）
+//   .model-listbox      left:0;bottom:calc(100% + 7px);width:calc(100vw - 18px);max-width:330px（Skill 250px）
+//   .turn-rail-panel    width:300px;max-width:min(300px,calc(100vw - 26px));max-height:min(62vh,420px)
+void TestChartWidget::overlayGeometryMatchesWebui()
+{
+    const int hostWidth = m_chart->width();
+    const int hostHeight = m_chart->height();
+
+    // --- 会话面板 ---
+    QVariantList sessions;
+    for (int i = 0; i < 20; ++i) {
+        sessions << QVariantMap{ { QStringLiteral("id"), QStringLiteral("s%1").arg(i) },
+                                 { QStringLiteral("title"), QStringLiteral("会话 %1").arg(i) },
+                                 { QStringLiteral("updated_at"),
+                                   QStringLiteral("2026-09-28T10:00:00") } };
+    }
+    m_chart->setSessions(sessions);
+    QWidget *sessionTrigger = m_chart->findChild<QWidget *>(QStringLiteral("sessionTrigger"));
+    QVERIFY(sessionTrigger);
+    clickWidget(sessionTrigger);
+    QTest::qWait(20);
+
+    QWidget *sessionPanel = m_chart->findChild<QWidget *>(QStringLiteral("sessionPanel"));
+    QVERIFY(sessionPanel && sessionPanel->isVisible());
+    QCOMPARE(sessionPanel->mapTo(m_chart.data(), QPoint(0, 0)).y(), 126);
+    QCOMPARE(sessionPanel->width(), hostWidth - 16);
+    // 内容远超上限 → 高度正好是 max-height，底边距宿主 28px
+    QCOMPARE(sessionPanel->height(), hostHeight - 154);
+
+    clickWidget(sessionTrigger); // 收起
+    m_chart->setSessions(QVariantList{ sessions.first() });
+    clickWidget(sessionTrigger);
+    QTest::qWait(20);
+    // 只有一条会话时按内容收缩（webui 两条 max-height 里后写的生效，430px 那条已被覆盖）
+    QVERIFY(sessionPanel->isVisible());
+    QVERIFY(sessionPanel->height() < hostHeight - 154);
+    QVERIFY(sessionPanel->height() > 0);
+    // 单条会话时面板按内容收缩：这一行必须完整落在面板内（首次展开时面板还是隐藏的，
+    // 尺寸只能来自 sizeHint，量少了就会把最后一行截掉）
+    QWidget *sessionHead = sessionPanel->findChild<QWidget *>(QStringLiteral("panelHead"));
+    QWidget *sessionRow = widgetByClass(sessionPanel, QStringLiteral("sessionRow"));
+    QVERIFY(sessionHead && sessionRow);
+    QVERIFY(sessionPanel->height() >= sessionHead->height() + sessionRow->height() + 10);
+    QVERIFY(sessionRow->mapTo(sessionPanel, QPoint(0, 0)).y() + sessionRow->height()
+            <= sessionPanel->height());
+    clickWidget(sessionTrigger);
+    QTest::qWait(20);
+    QVERIFY(!sessionPanel->isVisible());
+
+    // --- 模型 / Skill 下拉 ---
+    const QList<QWidget *> controls = widgetsByClass(m_chart.data(), QStringLiteral("modelControl"));
+    const QList<QWidget *> triggers = widgetsByClass(m_chart.data(), QStringLiteral("comboTrigger"));
+    QCOMPARE(controls.size(), 2);
+    QCOMPARE(triggers.size(), 2);
+
+    // 先在宽窗口验证下拉左缘对齐；窄窗口下另有“限制在宿主内”的边界测试。
+    m_chart->resize(800, hostHeight);
+    QTest::qWait(20);
+
+    auto openPopup = [this](QWidget *trigger) -> QWidget * {
+        clickWidget(trigger);
+        QTest::qWait(20);
+        const QList<QWidget *> popups =
+            m_chart->findChildren<QWidget *>(QStringLiteral("listbox"));
+        for (QWidget *popup : popups) {
+            if (popup->isVisible())
+                return popup;
+        }
+        return nullptr;
+    };
+
+    QWidget *modelPopup = openPopup(triggers.at(0));
+    QVERIFY(modelPopup);
+    QCOMPARE(modelPopup->width(), qMin(330, hostWidth - 18));
+    const QWidget *modelControl = controls.at(0);
+    // left:0 贴外层 .model-control 左缘（不是内部按钮）；绝对定位的包含块是它的 padding box
+    const QPoint modelAnchor =
+        modelControl->mapToGlobal(modelControl->contentsRect().topLeft());
+    QCOMPARE(modelPopup->mapToGlobal(QPoint(0, 0)).x(),
+             modelAnchor.x());
+    // bottom:calc(100% + 7px)：弹层底边在控件上方 7px（弹层整体向上生长）
+    QCOMPARE(modelAnchor.y() - modelPopup->mapToGlobal(QPoint(0, 0)).y(),
+             modelPopup->height() + 7);
+    modelPopup->hide();
+    QTest::qWait(20);
+
+    QWidget *skillPopup = openPopup(triggers.at(1));
+    QVERIFY(skillPopup);
+    QCOMPARE(skillPopup->width(), qMin(250, hostWidth - 18));
+    const QWidget *skillControl = controls.at(1);
+    const QPoint skillAnchor =
+        skillControl->mapToGlobal(skillControl->contentsRect().topLeft());
+    QCOMPARE(skillPopup->mapToGlobal(QPoint(0, 0)).x(), skillAnchor.x());
+    QCOMPARE(skillAnchor.y() - skillPopup->mapToGlobal(QPoint(0, 0)).y(),
+             skillPopup->height() + 7);
+    skillPopup->hide();
+    QTest::qWait(20);
+
+    // 窄窗口：宽度按 calc(100vw - 18px) 收敛（仍不超过 max-width），且整体不越出宿主窗口
+    m_chart->setMinimumSize(0, 0); // 控件自带 420x460 下限，否则 resize 到不了 300
+    m_chart->resize(300, hostHeight);
+    QTest::qWait(20);
+    QCOMPARE(m_chart->width(), 300);
+    modelPopup = openPopup(triggers.at(0));
+    QVERIFY(modelPopup);
+    // 开浮层时内部控件会让位，宿主随后被布局下限撑回一点，所以这里量的是“不超过”而不是等值
+    QVERIFY(modelPopup->width() <= qMin(330, m_chart->width() - 18));
+    const QPoint hostOrigin = m_chart->mapToGlobal(QPoint(0, 0));
+    const int popupX = modelPopup->pos().x();
+    QVERIFY(popupX >= hostOrigin.x());
+    QVERIFY(popupX + modelPopup->width() <= hostOrigin.x() + m_chart->width());
+    modelPopup->hide();
+    QTest::qWait(20);
+    m_chart->setMinimumSize(420, 460);
+    m_chart->resize(hostWidth, hostHeight);
+    QTest::qWait(20);
+
+    // --- 轮次导航面板 ---
+    QWidget *rail = m_chart->findChild<QWidget *>(QStringLiteral("turnRail"));
+    QWidget *railPanel = m_chart->findChild<QWidget *>(QStringLiteral("turnRailPanel"));
+    QVERIFY(rail && railPanel);
+    QEvent enter(QEvent::Enter);
+
+    m_chart->setHistory(historyFixture()); // 1 轮
+    QTest::qWait(30);
+    QVERIFY(rail->isVisible());
+    QApplication::sendEvent(rail, &enter);
+    QTest::qWait(20);
+    QVERIFY(railPanel->isVisible());
+    QCOMPARE(railPanel->width(), 300);
+    // 高度按内容：head + (1 行 × 30 + 列表内边距 8)，没有旧的 60px 下限
+    QWidget *railHead = widgetByClass(railPanel, QStringLiteral("turnRailHead"));
+    QVERIFY(railHead);
+    QVERIFY(qAbs(railPanel->height() - (railHead->height() + 38)) <= 2);
+
+    // 窄窗口：max-width:min(300px,calc(100vw - 26px))，展开状态跟随重排
+    // （控件自带 420x460 下限，resize(260) 会被顶回 420，所以这里验的是“不超过”）
+    m_chart->resize(260, hostHeight);
+    QTest::qWait(20);
+    QVERIFY(railPanel->isVisible());
+    QCOMPARE(railPanel->width(), qMin(300, m_chart->width() - 26));
+
+    // 多轮：高度被 max-height:min(62vh,420px) 截断，列表内部滚动
+    QVariantList manyTurns;
+    for (int i = 0; i < 20; ++i) {
+        manyTurns << QVariantMap{ { QStringLiteral("role"), QStringLiteral("user") },
+                                  { QStringLiteral("content"),
+                                    QStringLiteral("第 %1 轮提问").arg(i + 1) },
+                                  { QStringLiteral("display_content"),
+                                    QStringLiteral("第 %1 轮提问").arg(i + 1) } };
+    }
+    m_chart->setHistory(manyTurns);
+    QTest::qWait(30);
+    QApplication::sendEvent(rail, &enter);
+    QTest::qWait(20);
+    QVERIFY(railPanel->isVisible());
+    QCOMPARE(railPanel->height(), qMin(qRound(m_chart->height() * 0.62), 420));
+
+    // --- 皮肤下拉 ---
+    // .theme-listbox{top:32px;right:0;width:132px}：28px 触发器 + 4px 间距，右缘与触发器对齐
+    m_chart->resize(hostWidth, hostHeight);
+    QTest::qWait(20);
+    QWidget *themeTrigger = m_chart->findChild<QWidget *>(QStringLiteral("themeTrigger"));
+    QVERIFY(themeTrigger);
+    clickWidget(themeTrigger);
+    QTest::qWait(20);
+    QWidget *themePopup = m_chart->findChild<QWidget *>(QStringLiteral("themeListbox"));
+    QVERIFY(themePopup && themePopup->isVisible());
+    QCOMPARE(themePopup->width(), 132);
+    const QPoint triggerBottom =
+        themeTrigger->mapToGlobal(QPoint(0, themeTrigger->height()));
+    const QPoint triggerRight =
+        themeTrigger->mapToGlobal(QPoint(themeTrigger->width(), 0));
+    const QPoint themeOrigin = themePopup->mapToGlobal(QPoint(0, 0));
+    QCOMPARE(themeOrigin.y() - triggerBottom.y(), 4);
+    QCOMPARE(themeOrigin.x() + themePopup->width(), triggerRight.x());
+    const QPoint themeHostOrigin = m_chart->mapToGlobal(QPoint(0, 0));
+    QVERIFY(themeOrigin.x() >= themeHostOrigin.x());
+    QVERIFY(themeOrigin.x() + themePopup->width()
+            <= themeHostOrigin.x() + m_chart->width());
+    // 三个主题选项都必须落在定稿高度内（隐藏状态量到的尺寸会把最后一行截掉）
+    const QList<QWidget *> themeOptions =
+        widgetsByClass(themePopup, QStringLiteral("themeOption"));
+    QCOMPARE(themeOptions.size(), 3);
+    QVERIFY(themeOptions.last()->mapTo(themePopup, QPoint(0, 0)).y()
+            + themeOptions.last()->height() <= themePopup->height());
+    themePopup->hide();
+    QTest::qWait(20);
+}
+
+// 会话面板打开后搜索过滤：webui 的 max-height 只是上限，内容变少时面板要立即收缩。
+// Qt 的 render() 只重建列表；若不给宿主重排信号，面板会一直保持过滤前的最大高度。
+void TestChartWidget::sessionPanelReflowsWhileOpen()
+{
+    QVariantList sessions;
+    for (int i = 0; i < 20; ++i) {
+        sessions << QVariantMap{ { QStringLiteral("id"), QStringLiteral("s%1").arg(i) },
+                                 { QStringLiteral("title"), QStringLiteral("会话 %1").arg(i) },
+                                 { QStringLiteral("updated_at"),
+                                   QStringLiteral("2026-09-28T10:00:00") } };
+    }
+    m_chart->setSessions(sessions);
+
+    QWidget *trigger = m_chart->findChild<QWidget *>(QStringLiteral("sessionTrigger"));
+    QVERIFY(trigger);
+    clickWidget(trigger);
+    QTest::qWait(30);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("sessionPanel"));
+    QVERIFY(panel && panel->isVisible());
+    const int maxHeight = m_chart->height() - 154;
+    QCOMPARE(panel->height(), maxHeight);
+    QCOMPARE(widgetsByClass(panel, QStringLiteral("sessionRow")).size(), sessions.size());
+
+    // 唯一标题过滤到一行：面板应收缩到内容高度，行不能被底边截断。
+    QLineEdit *search = panel->findChild<QLineEdit *>(QStringLiteral("sessionSearch"));
+    QVERIFY(search);
+    search->setText(QStringLiteral("会话 17"));
+    QTest::qWait(30);
+
+    QCOMPARE(widgetsByClass(panel, QStringLiteral("sessionRow")).size(), 1);
+    QVERIFY2(panel->height() < maxHeight,
+             qPrintable(QStringLiteral("session panel kept stale max height %1")
+                            .arg(panel->height())));
+    QWidget *row = widgetByClass(panel, QStringLiteral("sessionRow"));
+    QVERIFY(row);
+    const QRect rowRect(row->mapTo(panel, QPoint(0, 0)), row->size());
+    QVERIFY2(panel->rect().contains(rowRect),
+             qPrintable(QStringLiteral("session row %1,%2 %3x%4 outside panel %5x%6")
+                            .arg(rowRect.x()).arg(rowRect.y())
+                            .arg(rowRect.width()).arg(rowRect.height())
+                            .arg(panel->width()).arg(panel->height())));
+
+    // 无匹配结果时也要按空状态收缩。
+    search->setText(QStringLiteral("不存在的会话"));
+    QTest::qWait(30);
+    QCOMPARE(widgetsByClass(panel, QStringLiteral("sessionRow")).size(), 0);
+    QLabel *empty = qobject_cast<QLabel *>(
+        widgetByClass(panel, QStringLiteral("listboxEmpty")));
+    QVERIFY(empty && empty->isVisible());
+    QVERIFY(panel->height() < maxHeight);
+    const QRect emptyRect(empty->mapTo(panel, QPoint(0, 0)), empty->size());
+    QVERIFY(panel->rect().contains(emptyRect));
+}
+
+// Toast（#toast）：宽固定 = 宿主宽 - 20px、高随文字换行。
+// 高度来自 heightForWidth()，而样式表的 padding/border 要等 show() 之后才生效，
+// 隐藏状态下先算出来的高度偏小 → 多行提示的末行会被裁掉。
+void TestChartWidget::toastFitsWrappedText()
+{
+    const QString text =
+        QStringLiteral("附件上传失败：后台拒绝了这次上传，请检查文件大小、类型与网关配额后重试。");
+    m_chart->showToast(text);
+    QTest::qWait(30);
+
+    QWidget *toast = m_chart->findChild<QWidget *>(QStringLiteral("toast"));
+    QVERIFY(toast && toast->isVisible());
+    QCOMPARE(toast->width(), m_chart->width() - 20);
+    QCOMPARE(toast->mapTo(m_chart.data(), QPoint(0, 0)).x(), 10);
+
+    // 独立核算：QSS padding 8px 10px + 1px 边框，文本可用宽度就是窗口宽减掉这些
+    const QFontMetrics metrics(toast->font());
+    const int textWidth = toast->width() - 2 * 10 - 2;
+    const int textHeight = metrics
+                               .boundingRect(QRect(0, 0, textWidth, 10000),
+                                             Qt::TextWordWrap, text)
+                               .height();
+    const int needed = textHeight + 2 * 8 + 2;
+    QVERIFY2(toast->height() >= needed,
+             qPrintable(QStringLiteral("toast 高度 %1 装不下文本 %2（需要 %3）")
+                            .arg(toast->height())
+                            .arg(text)
+                            .arg(needed)));
+
+    // 同一份文本再走一次 heightForWidth：定稿后必须不比已分配的矮
+    QVERIFY2(toast->height() >= toast->heightForWidth(toast->width()),
+             qPrintable(QStringLiteral("height=%1 heightForWidth=%2")
+                            .arg(toast->height())
+                            .arg(toast->heightForWidth(toast->width()))));
+
+    // 提示条整体浮在输入区上方，且不越出宿主
+    QWidget *composer = m_chart->findChild<QWidget *>(QStringLiteral("composer"));
+    QVERIFY(composer);
+    const QRect toastRect(toast->mapTo(m_chart.data(), QPoint(0, 0)), toast->size());
+    QVERIFY(m_chart->rect().contains(toastRect));
+    QVERIFY(toastRect.bottom() <= composer->mapTo(m_chart.data(), QPoint(0, 0)).y() - 12 + 1);
+
+    // 短文本只占一行：高度应明显小于多行版本
+    m_chart->showToast(QStringLiteral("已复制到剪贴板"));
+    QTest::qWait(30);
+    QVERIFY(toast->height() < needed);
+}
+
 // 设置中心「用量」页：懒加载、默认筛选、M 单位概览、三图、可排序明细表
 void TestChartWidget::usagePanelTab()
 {
@@ -1654,7 +2514,51 @@ void TestChartWidget::usagePanelTab()
     QVERIFY(confirm);
     QVERIFY(confirm->mapTo(rangePanel, QPoint(0, 0)).y()
             > presets.last()->mapTo(rangePanel, QPoint(0, 0)).y());
+    // 面板挂在 .usage-filters 上：right:0 贴筛选行右缘、top:100% + 5px。
+    // 宽高必须取 show() 之后的定稿值，否则底部预设/日历会被截掉。
+    QWidget *filtersRow = widgetByClass(dialog, QStringLiteral("usageFilters"));
+    QVERIFY(filtersRow);
+    const QPoint filtersOrigin = filtersRow->mapToGlobal(QPoint(0, 0));
+    const QPoint filtersBelow = filtersRow->mapToGlobal(QPoint(0, filtersRow->height()));
+    const QPoint rangeOrigin = rangePanel->mapToGlobal(QPoint(0, 0));
+    QCOMPARE(rangeOrigin.y() - filtersBelow.y(), 5);
+    QCOMPARE(rangeOrigin.x() + rangePanel->width(), filtersOrigin.x() + filtersRow->width());
+    QVERIFY(confirm->mapTo(rangePanel, QPoint(0, confirm->height())).y()
+            <= rangePanel->height());
     rangePanel->hide();
+
+    // 下拉挂在 .usage-filter 容器上（含标签）：left:0 贴容器左缘，不是按钮左缘
+    QWidget *modelSelect = dialog->findChild<QWidget *>(QStringLiteral("usageModel"));
+    QVERIFY(modelSelect);
+    QWidget *modelBox = modelSelect->parentWidget();
+    QVERIFY(modelBox && hasClass(modelBox, QStringLiteral("usageFilter")));
+    clickWidget(modelSelect);
+    QTest::qWait(30);
+    QWidget *listPopup = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("usageListbox"))) {
+        if (candidate->isVisible())
+            listPopup = candidate;
+    }
+    QVERIFY(listPopup);
+    const QPoint boxOrigin = modelBox->mapToGlobal(QPoint(0, 0));
+    const QPoint boxBelow = modelBox->mapToGlobal(QPoint(0, modelBox->height()));
+    const QPoint listOrigin = listPopup->mapToGlobal(QPoint(0, 0));
+    QCOMPARE(listOrigin.x(), boxOrigin.x());
+    QCOMPARE(listOrigin.y() - boxBelow.y(), 5);
+    const QList<QWidget *> listOptions = widgetsByClass(listPopup, QStringLiteral("usageOption"));
+    QVERIFY(listOptions.size() >= 2);
+    QVERIFY(listOptions.last()->mapTo(listPopup, QPoint(0, 0)).y()
+            < listPopup->height());
+    // 选项行不能被压塌：ElidedLabel 的文本要等首次 resize 才回填，
+    // 隐藏状态下量高度时每个选项的最小高度必须是 webui 的 30px 行高
+    for (QWidget *option : listOptions) {
+        QVERIFY(option->height() >= 30);
+        auto *optionLabel = option->findChild<QLabel *>();
+        QVERIFY(optionLabel);
+        QVERIFY(optionLabel->height() > 0);
+    }
+    listPopup->hide();
+    QTest::qWait(20);
 
     // 窗口 ≤900：概览收到 3 列、饼图与柱状改上下堆叠（style.css 的媒体查询）
     dialog->resize(780, dialog->height());
@@ -1721,6 +2625,124 @@ void TestChartWidget::usageStaleResponseIgnored()
     QVERIFY(!labelText(dialog, QStringLiteral("usageStatus")).contains(QStringLiteral("失败")));
     QCOMPARE(labelTexts(overview, QStringLiteral("usageStatValue")).value(0),
              QStringLiteral("1.63M"));
+}
+
+// 回归：用量浮层必须跟 style.css 的 640px 媒体查询一致。
+// 窄宿主下双月改为纵向并被宿主约束；长下拉选项不能让浮层越出设置窗口。
+void TestChartWidget::usagePopupsFitNarrowHost()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->setModels(QVariantList{
+        QVariantMap{ { QStringLiteral("provider"), QStringLiteral("gridstar") },
+                     { QStringLiteral("provider_name"), QStringLiteral("很长的供应商显示名称") },
+                     { QStringLiteral("id"),
+                       QStringLiteral("gridstar-reasoning-model-with-a-very-long-id") },
+                     { QStringLiteral("name"),
+                       QStringLiteral("非常长的模型名称用于触发浮层宽度收敛") },
+                     { QStringLiteral("enabled"), true } } });
+    m_chart->openSettings(QStringLiteral("usage"));
+    QTest::qWait(50);
+    QWidget *dialog = m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog"));
+    QVERIFY(dialog);
+
+    dialog->setFixedSize(620, 460);
+    QTest::qWait(80);
+    const QRect hostRect(dialog->mapToGlobal(QPoint(0, 0)), dialog->size());
+
+    QWidget *rangeAnchor = dialog->findChild<QWidget *>(QStringLiteral("usageRange"));
+    QVERIFY(rangeAnchor);
+    clickWidget(rangeAnchor);
+    QTest::qWait(60);
+    QWidget *range = widgetByClass(m_chart.data(), QStringLiteral("usageRangePanel"));
+    QVERIFY(range);
+    const QList<QWidget *> grids = widgetsByClass(range, QStringLiteral("usageCalGrid"));
+    QCOMPARE(grids.size(), 2);
+    const QPoint first = grids.at(0)->mapTo(range, QPoint(0, 0));
+    const QPoint second = grids.at(1)->mapTo(range, QPoint(0, 0));
+    QVERIFY2(second.y() > first.y(), "窄宿主下双月日历仍横向排列");
+    const QRect rangeRect(range->mapToGlobal(QPoint(0, 0)), range->size());
+    QVERIFY2(hostRect.contains(rangeRect),
+             qPrintable(QStringLiteral("range popup %1,%2 %3x%4 outside host %5x%6")
+                            .arg(rangeRect.x())
+                            .arg(rangeRect.y())
+                            .arg(rangeRect.width())
+                            .arg(rangeRect.height())
+                            .arg(hostRect.width())
+                            .arg(hostRect.height())));
+    auto *rangeScroll = range->findChild<QScrollArea *>(QStringLiteral("usageRangeScroll"));
+    QVERIFY(rangeScroll);
+    QVERIFY2(rangeScroll->verticalScrollBar()->maximum() > 0,
+             "纵向双月超出 460px 宿主时没有可滚动区域");
+    range->hide();
+    QTest::qWait(30);
+
+    // 340px 宿主可用宽 328px：长选项自然宽 >340，也必须收敛到宿主内。
+    dialog->setFixedSize(340, 460);
+    QTest::qWait(80);
+    const QRect narrowHost(dialog->mapToGlobal(QPoint(0, 0)), dialog->size());
+    QWidget *modelSelect = dialog->findChild<QWidget *>(QStringLiteral("usageModel"));
+    QVERIFY(modelSelect);
+    clickWidget(modelSelect);
+    QTest::qWait(60);
+    QWidget *listPopup = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("usageListbox"))) {
+        if (candidate->isVisible())
+            listPopup = candidate;
+    }
+    QVERIFY(listPopup);
+    QVERIFY2(listPopup->width() <= narrowHost.width() - 12,
+             qPrintable(QStringLiteral("list popup width %1 exceeds narrow host %2")
+                            .arg(listPopup->width())
+                            .arg(narrowHost.width())));
+    const QRect listRect(listPopup->mapToGlobal(QPoint(0, 0)), listPopup->size());
+    QVERIFY2(narrowHost.contains(listRect),
+             qPrintable(QStringLiteral("list popup %1,%2 %3x%4 outside host %5x%6")
+                            .arg(listRect.x())
+                            .arg(listRect.y())
+                            .arg(listRect.width())
+                            .arg(listRect.height())
+                            .arg(narrowHost.width())
+                            .arg(narrowHost.height())));
+    listPopup->hide();
+}
+
+// 回归：.md-table-wrap 的高度应为「表格自然高度 + 实际可见的横向滚动条」，
+// 不能在没有横向滚动条时仍预留滚动条空白（webui 没有这行空白）。
+void TestChartWidget::markdownTableSizesToContent()
+{
+    m_chart->appendAssistantMessage(QStringLiteral(
+        "| 项目 | 数值 |\n| --- | --- |\n| 城南线跳闸 | 12.3 |\n| 城北线过载 | 4.5 |\n"));
+    QTest::qWait(80);
+    QWidget *shortTable = widgetByClass(m_chart.data(), QStringLiteral("mdTable"));
+    QVERIFY(shortTable);
+    auto *shortScroll = shortTable->findChild<QScrollArea *>();
+    QVERIFY(shortScroll);
+    QWidget *shortGrid = shortScroll->widget();
+    QVERIFY(shortGrid);
+    QVERIFY2(!shortScroll->horizontalScrollBar()->isVisible(),
+             "短表格不应出现横向滚动条");
+    QCOMPARE(shortScroll->height(), shortGrid->sizeHint().height());
+
+    m_chart->appendAssistantMessage(QStringLiteral(
+        "| 很长的项目名称列 | 很长的结果列 | 很长的备注列 | 很长的附加列 |\n"
+        "| --- | --- | --- | --- |\n"
+        "| 城南线跳闸导致的大面积停电事故 | 1234567890.123 | 需要立即处理的详细说明文本 | 额外信息 |\n"
+        "| 城北线过载保护动作 | 9876543210.987 | 复核后确认的详细处理结论 | 附加备注 |\n"));
+    QTest::qWait(80);
+    QWidget *wideTable = nullptr;
+    for (QWidget *candidate : widgetsByClass(m_chart.data(), QStringLiteral("mdTable"))) {
+        if (candidate != shortTable)
+            wideTable = candidate;
+    }
+    QVERIFY(wideTable);
+    auto *wideScroll = wideTable->findChild<QScrollArea *>();
+    QVERIFY(wideScroll);
+    QWidget *wideGrid = wideScroll->widget();
+    QVERIFY(wideGrid);
+    QVERIFY2(wideScroll->horizontalScrollBar()->isVisible(),
+             "宽表格应出现横向滚动条");
+    QCOMPARE(wideScroll->height(),
+             wideGrid->sizeHint().height() + wideScroll->horizontalScrollBar()->height());
 }
 
 // 回归防护：Qt QSS 遇到它不认识的选择器（CSS3 的 :not(...)、:!state）时，不只是跳过那一条，

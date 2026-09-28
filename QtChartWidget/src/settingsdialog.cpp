@@ -5,9 +5,11 @@
 #include "theme.h"
 #include "usagepanel.h"
 
+#include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDesktopWidget>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIntValidator>
@@ -15,8 +17,11 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QSet>
+#include <QSizePolicy>
+#include <QSpacerItem>
 #include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -109,6 +114,22 @@ QWidget *fieldRow(const QString &caption, QWidget *input)
     l->addWidget(plainLabel(QStringLiteral("fieldCaption"), caption));
     l->addWidget(input);
     return row;
+}
+
+// .form-grid：宽屏每行两个字段，@media(max-width:640px) 时变单列
+void placeFormFields(QGridLayout *grid, const QList<QWidget *> &fields, bool compact)
+{
+    for (int i = 0; i < fields.size(); ++i) {
+        QWidget *field = fields.at(i);
+        if (grid->indexOf(field) >= 0)
+            grid->removeWidget(field);
+        if (compact)
+            grid->addWidget(field, i, 0);
+        else
+            grid->addWidget(field, i / 2, i % 2);
+    }
+    grid->setColumnStretch(0, 1);
+    grid->setColumnStretch(1, compact ? 0 : 1);
 }
 
 QScrollArea *plainScroll(QWidget *content, const QString &objectName = QString(),
@@ -236,10 +257,14 @@ SettingsDialog::SettingsDialog(QWidget *parent)
 {
     setObjectName(QStringLiteral("settingsDialog"));
     setAttribute(Qt::WA_StyledBackground, true);
-    resize(920, 720);
-    setMinimumSize(680, 460);
+    // style.css：.settings-dialog{max-width:920px;max-height:720px}，高度按视口收敛。
+    // 下限放宽到 360，否则 <=640 的紧凑媒体查询永远不可达。
+    setMinimumSize(360, 360);
 
     buildUi();
+    const QRect avail = QApplication::desktop()->availableGeometry(parent);
+    resize(qMin(920, qMax(minimumWidth(), avail.width() - 28)),
+           qMin(720, qMax(minimumHeight(), avail.height() - 28)));
     switchTab(QStringLiteral("models"));
     renderSettings();
 }
@@ -257,6 +282,7 @@ void SettingsDialog::buildUi()
     auto *hl = new QHBoxLayout(head);
     hl->setContentsMargins(18, 16, 18, 16);
     hl->setSpacing(0);
+    m_headLayout = hl;
     auto *titleBox = new QVBoxLayout;
     titleBox->setContentsMargins(0, 0, 0, 0);
     titleBox->setSpacing(2);
@@ -285,6 +311,7 @@ void SettingsDialog::buildUi()
     auto *tl = new QHBoxLayout(tabs);
     tl->setContentsMargins(18, 0, 18, 0);
     tl->setSpacing(0);
+    m_tabsLayout = tl;
     const QString tabNames[4] = {QStringLiteral("模型"), QStringLiteral("技能"),
                                  QStringLiteral("MCP 工具"), QStringLiteral("用量")};
     QPushButton **tabPtrs[4] = {&m_tabModels, &m_tabSkills, &m_tabMcp, &m_tabUsage};
@@ -297,7 +324,8 @@ void SettingsDialog::buildUi()
         *tabPtrs[i] = button;
         tl->addWidget(button);
     }
-    tl->addStretch(1);
+    m_tabsSpacer = new QSpacerItem(0, 0, QSizePolicy::Expanding, QSizePolicy::Minimum);
+    tl->addSpacerItem(m_tabsSpacer);
     root->addWidget(tabs);
     connect(m_tabModels, &QPushButton::clicked, this,
             [this] { switchTab(QStringLiteral("models")); });
@@ -323,6 +351,7 @@ void SettingsDialog::buildUi()
     auto *al = new QHBoxLayout(actions);
     al->setContentsMargins(18, 10, 18, 10);
     al->setSpacing(8);
+    m_actionsLayout = al;
     m_status = plainLabel(QString(), QString());
     m_status->setObjectName(QStringLiteral("settingsStatus"));
     al->addWidget(m_status, 1);
@@ -344,6 +373,89 @@ void SettingsDialog::buildUi()
     });
 }
 
+// style.css @media(max-width:640px)：
+//   .models-panel{grid-template-columns:118px minmax(0,1fr)} / .form-grid{grid-template-columns:1fr}
+//   .settings-tabs{padding:0} 且按钮 flex:1 / .provider-actions{flex-wrap:wrap}
+//   .settings-head{padding:12px} / .settings-actions{padding:8px 10px}
+//   .provider-sidebar{padding:10px 5px} / .provider-editor{padding:10px} / 技能・MCP 面板 padding:10px
+void SettingsDialog::applyCompactMode(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    // webui 紧凑档去边框、圆角归零（QSS 靠动态属性切换，见 theme.cpp）
+    setProperty("compact", compact);
+    restyle(this);
+
+    if (m_headLayout) {
+        m_headLayout->setContentsMargins(compact ? 12 : 18, compact ? 12 : 16,
+                                         compact ? 12 : 18, compact ? 12 : 16);
+    }
+    if (m_actionsLayout) {
+        m_actionsLayout->setContentsMargins(compact ? 10 : 18, compact ? 8 : 10,
+                                            compact ? 10 : 18, compact ? 8 : 10);
+    }
+    if (m_tabsLayout) {
+        m_tabsLayout->setContentsMargins(compact ? 0 : 18, 0, compact ? 0 : 18, 0);
+        QPushButton *tabs[4] = {m_tabModels, m_tabSkills, m_tabMcp, m_tabUsage};
+        for (int i = 0; i < 4; ++i) {
+            if (!tabs[i])
+                continue;
+            tabs[i]->setSizePolicy(compact ? QSizePolicy::Expanding : QSizePolicy::Minimum,
+                                   QSizePolicy::Fixed);
+            m_tabsLayout->setStretch(i, compact ? 1 : 0);
+        }
+        if (m_tabsSpacer) {
+            m_tabsSpacer->changeSize(0, 0,
+                                     compact ? QSizePolicy::Fixed : QSizePolicy::Expanding,
+                                     QSizePolicy::Minimum);
+            m_tabsLayout->invalidate();
+        }
+    }
+
+    if (m_providerSidebar) {
+        m_providerSidebar->setFixedWidth(compact ? 118 : 210);
+        if (m_providerSidebarLayout) {
+            m_providerSidebarLayout->setContentsMargins(compact ? 5 : 10, compact ? 10 : 15,
+                                                        compact ? 5 : 10, compact ? 10 : 15);
+        }
+    }
+    if (m_providerEditorLayout) {
+        m_providerEditorLayout->setContentsMargins(compact ? 10 : 18, compact ? 10 : 18,
+                                                   compact ? 10 : 18, compact ? 10 : 18);
+    }
+    if (m_providerGrid)
+        placeFormFields(m_providerGrid, m_providerFields, compact);
+    for (int i = 0; i < m_modelGrids.size() && i < m_modelGridFields.size(); ++i)
+        placeFormFields(m_modelGrids.at(i), m_modelGridFields.at(i), compact);
+    if (m_providerActions) {
+        m_providerActions->setDirection(compact ? QBoxLayout::TopToBottom
+                                                : QBoxLayout::LeftToRight);
+        if (m_providerActionsSpacer) {
+            m_providerActionsSpacer->changeSize(0, 0,
+                                                compact ? QSizePolicy::Fixed
+                                                        : QSizePolicy::Expanding,
+                                                QSizePolicy::Minimum);
+        }
+        m_providerActions->invalidate();
+    }
+
+    const int pagePad = compact ? 10 : 18;
+    if (m_skillsPageLayout)
+        m_skillsPageLayout->setContentsMargins(pagePad, pagePad, pagePad, pagePad);
+    if (m_mcpPageLayout)
+        m_mcpPageLayout->setContentsMargins(pagePad, pagePad, pagePad, pagePad);
+
+    if (m_stack)
+        m_stack->updateGeometry();
+}
+
+void SettingsDialog::resizeEvent(QResizeEvent *event)
+{
+    QDialog::resizeEvent(event);
+    applyCompactMode(width() <= 640);
+}
+
 QWidget *SettingsDialog::buildModelsPage()
 {
     auto *page = new QWidget;
@@ -361,9 +473,11 @@ QWidget *SettingsDialog::buildProviderSidebar()
     side->setObjectName(QStringLiteral("providerSidebar"));
     side->setAttribute(Qt::WA_StyledBackground, true);
     side->setFixedWidth(210);
+    m_providerSidebar = side;
     auto *l = new QVBoxLayout(side);
     l->setContentsMargins(10, 15, 10, 15);
     l->setSpacing(0);
+    m_providerSidebarLayout = l;
     l->addWidget(plainLabel(QStringLiteral("sectionLabel"), QStringLiteral("供应商")));
 
     auto *nav = new QWidget;
@@ -395,9 +509,11 @@ QWidget *SettingsDialog::buildProviderEditor()
     auto *editor = new QWidget;
     editor->setObjectName(QStringLiteral("providerEditor"));
     editor->setAttribute(Qt::WA_StyledBackground, true);
+    m_providerEditor = editor;
     auto *el = new QVBoxLayout(editor);
     el->setContentsMargins(18, 18, 18, 18);
     el->setSpacing(14);
+    m_providerEditorLayout = el;
 
     // .placeholder-panel
     m_placeholder = new QWidget(editor);
@@ -436,11 +552,11 @@ QWidget *SettingsDialog::buildProviderEditor()
     sl->addSpacing(14);
 
     auto *grid = new QGridLayout;
+    grid->setObjectName(QStringLiteral("providerFormGrid"));
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setHorizontalSpacing(12);
     grid->setVerticalSpacing(12);
-    grid->setColumnStretch(0, 1);
-    grid->setColumnStretch(1, 1);
+    m_providerGrid = grid;
     m_nameEdit = settingsInput(QString());
     m_idEdit = settingsInput(QString());
     m_idEdit->setEnabled(false);
@@ -459,13 +575,16 @@ QWidget *SettingsDialog::buildProviderEditor()
                                QStringLiteral("openai-responses"));
     m_defaultApiCombo->addItem(QStringLiteral("Anthropic Messages"),
                                QStringLiteral("anthropic-messages"));
-    grid->addWidget(fieldRow(QStringLiteral("供应商名称"), m_nameEdit), 0, 0);
-    grid->addWidget(fieldRow(QStringLiteral("供应商 ID"), m_idEdit), 0, 1);
-    grid->addWidget(fieldRow(QStringLiteral("供应商类型"), m_discoveryCombo), 1, 0);
-    grid->addWidget(fieldRow(QStringLiteral("API 地址"), m_baseUrlEdit), 1, 1);
-    grid->addWidget(fieldRow(QStringLiteral("API Key 环境变量"), m_keyEnvEdit), 2, 0);
-    grid->addWidget(fieldRow(QStringLiteral("API Key"), m_apiKeyEdit), 2, 1);
-    grid->addWidget(fieldRow(QStringLiteral("默认 API 协议"), m_defaultApiCombo), 3, 0);
+    m_providerFields = {
+        fieldRow(QStringLiteral("供应商名称"), m_nameEdit),
+        fieldRow(QStringLiteral("供应商 ID"), m_idEdit),
+        fieldRow(QStringLiteral("供应商类型"), m_discoveryCombo),
+        fieldRow(QStringLiteral("API 地址"), m_baseUrlEdit),
+        fieldRow(QStringLiteral("API Key 环境变量"), m_keyEnvEdit),
+        fieldRow(QStringLiteral("API Key"), m_apiKeyEdit),
+        fieldRow(QStringLiteral("默认 API 协议"), m_defaultApiCombo),
+    };
+    placeFormFields(grid, m_providerFields, m_compact);
     sl->addLayout(grid);
 
     auto *acts = new QHBoxLayout;
@@ -474,13 +593,19 @@ QWidget *SettingsDialog::buildProviderEditor()
     m_clearKeyButton = styledButton(QStringLiteral("清除 Key"), QStringLiteral("secondary"));
     m_testButton = styledButton(QStringLiteral("测试连接"), QStringLiteral("secondary"));
     m_inlineResult = plainLabel(QStringLiteral("inlineResult"), QString());
+    // .inline-result{min-width:0;flex:1}：长文案不能反过来把窗口最小宽度撑大
+    m_inlineResult->setWordWrap(true);
+    m_inlineResult->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_deleteProviderButton =
         styledButton(QStringLiteral("删除供应商"), QStringLiteral("danger"));
     acts->addWidget(m_clearKeyButton);
     acts->addWidget(m_testButton);
     acts->addWidget(m_inlineResult, 0, Qt::AlignVCenter);
-    acts->addStretch(1);
+    m_providerActionsSpacer = new QSpacerItem(0, 0, QSizePolicy::Expanding,
+                                              QSizePolicy::Minimum);
+    acts->addSpacerItem(m_providerActionsSpacer);
     acts->addWidget(m_deleteProviderButton);
+    m_providerActions = acts;
     sl->addSpacing(14);
     sl->addLayout(acts);
     el->addWidget(m_sectionProvider);
@@ -680,6 +805,7 @@ QWidget *SettingsDialog::buildSkillsPage()
     auto *l = new QVBoxLayout(page);
     l->setContentsMargins(18, 18, 18, 18);
     l->setSpacing(0);
+    m_skillsPageLayout = l;
 
     auto *toolbar = new QHBoxLayout;
     toolbar->setContentsMargins(0, 0, 0, 0);
@@ -728,6 +854,7 @@ QWidget *SettingsDialog::buildMcpPage()
     auto *l = new QVBoxLayout(page);
     l->setContentsMargins(18, 18, 18, 18);
     l->setSpacing(0);
+    m_mcpPageLayout = l;
 
     auto *toolbar = new QHBoxLayout;
     toolbar->setContentsMargins(0, 0, 0, 0);
@@ -995,6 +1122,8 @@ void SettingsDialog::renderProviderEditor()
     m_updating = false;
 
     clearLayout(m_modelListLayout);
+    m_modelGrids.clear();
+    m_modelGridFields.clear();
     for (int i = 0; i < models.size(); ++i)
         renderModelCard(models.at(i).toMap());
     renderCandidates();
@@ -1041,11 +1170,10 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
     body->setContentsMargins(12, 12, 12, 12);
     body->setSpacing(0);
     auto *grid = new QGridLayout;
+    grid->setObjectName(QStringLiteral("modelFormGrid"));
     grid->setContentsMargins(0, 0, 0, 0);
     grid->setHorizontalSpacing(12);
     grid->setVerticalSpacing(12);
-    grid->setColumnStretch(0, 1);
-    grid->setColumnStretch(1, 1);
 
     auto *nameEdit = settingsInput(QString());
     nameEdit->setText(model.value(QStringLiteral("name")).toString());
@@ -1067,10 +1195,15 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
                       QStringLiteral("anthropic-messages"));
     selectComboData(apiCombo, model.value(QStringLiteral("api")).toString());
 
-    grid->addWidget(fieldRow(QStringLiteral("显示名称"), nameEdit), 0, 0);
-    grid->addWidget(fieldRow(QStringLiteral("Context window"), contextEdit), 0, 1);
-    grid->addWidget(fieldRow(QStringLiteral("Max output tokens"), outputEdit), 1, 0);
-    grid->addWidget(fieldRow(QStringLiteral("API 协议覆盖"), apiCombo), 1, 1);
+    QList<QWidget *> fields = {
+        fieldRow(QStringLiteral("显示名称"), nameEdit),
+        fieldRow(QStringLiteral("Context window"), contextEdit),
+        fieldRow(QStringLiteral("Max output tokens"), outputEdit),
+        fieldRow(QStringLiteral("API 协议覆盖"), apiCombo),
+    };
+    placeFormFields(grid, fields, m_compact);
+    m_modelGrids.append(grid);
+    m_modelGridFields.append(fields);
     body->addLayout(grid);
 
     auto *caps = new QWidget(card->body());

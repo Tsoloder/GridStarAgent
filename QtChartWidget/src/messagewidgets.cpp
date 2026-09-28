@@ -230,6 +230,16 @@ static QLabel *headLabel(const QString &className, const QString &text, QWidget 
     return l;
 }
 
+static ElidedLabel *makeElidedLabel(const QString &className, const QString &text,
+                                    QWidget *parent)
+{
+    auto *label = new ElidedLabel(parent);
+    setClass(label, className);
+    label->setTextInteractionFlags(Qt::NoTextInteraction);
+    label->setFullText(text);
+    return label;
+}
+
 // ------------------------------------------------------- 气泡明细弹层（Popup）
 
 // .bubble-timing-pop / .bubble-usage-pop：挂在信息行按钮上方的小浮层。
@@ -253,12 +263,11 @@ public:
         auto *tl = new QHBoxLayout(titleRow);
         tl->setContentsMargins(0, 0, 0, 7);
         tl->setSpacing(6);
-        m_title = makeLabel(QStringLiteral("popTitle"), QString(), titleRow);
-        m_title->setTextInteractionFlags(Qt::NoTextInteraction);
-        m_total = makeLabel(QStringLiteral("popTotal"), QString(), titleRow);
-        m_total->setTextInteractionFlags(Qt::NoTextInteraction);
-        tl->addWidget(m_title, 1);
-        tl->addWidget(m_total, 0);
+        m_title = headLabel(QStringLiteral("popTitle"), QString(), titleRow);
+        m_total = makeElidedLabel(QStringLiteral("popTotal"), QString(), titleRow);
+        m_total->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        tl->addWidget(m_title, 0);
+        tl->addWidget(m_total, 1);
         m_layout->addWidget(titleRow);
         m_titleRow = titleRow;
     }
@@ -276,12 +285,13 @@ public:
             auto *hl = new QHBoxLayout(widget);
             hl->setContentsMargins(0, 3, 0, 3);
             hl->setSpacing(18);
-            QLabel *key = makeLabel(QStringLiteral("popRowLabel"), row.second, widget);
-            key->setTextInteractionFlags(Qt::NoTextInteraction);
-            QLabel *value = makeLabel(QStringLiteral("popRowValue"), QString(), widget);
-            value->setTextInteractionFlags(Qt::NoTextInteraction);
-            hl->addWidget(key, 1);
-            hl->addWidget(value, 0);
+            // 左列是固定短标签，保留自然宽度；右值占用剩余宽度并在其中省略。
+            // 若两端都按 stretch=0/1 分布，ElidedLabel 的最小宽度为 0，取值端会被压成 0px。
+            QLabel *key = headLabel(QStringLiteral("popRowLabel"), row.second, widget);
+            ElidedLabel *value = makeElidedLabel(QStringLiteral("popRowValue"), QString(), widget);
+            value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            hl->addWidget(key, 0);
+            hl->addWidget(value, 1);
             m_layout->addWidget(widget);
             m_rows.insert(row.first, qMakePair(widget, value));
         }
@@ -294,39 +304,57 @@ public:
             const QVariant value = values.value(it.key());
             const QString text = value.toString();
             it.value().first->setVisible(!text.isEmpty());
-            it.value().second->setText(text);
+            it.value().second->setFullText(text);
         }
         adjustSize();
     }
 
     void setTitleTotal(const QString &text)
     {
-        m_total->setText(text);
+        m_total->setFullText(text);
         m_total->setVisible(!text.isEmpty());
     }
 
     void popupAbove(QWidget *anchor)
     {
-        adjustSize();
+        if (!anchor)
+            return;
+        m_layout->invalidate();
+        m_layout->activate();
+        // .bubble-timing-pop/.bubble-usage-pop：left:0；bottom:calc(100% + 7px)；min-width:216px
+        QWidget *host = anchor->window();
         const QPoint topLeft = anchor->mapToGlobal(QPoint(0, 0));
-        int x = topLeft.x();
-        int y = topLeft.y() - height() - 7;
-        if (QWidget *host = anchor->window()) {
-            const QRect hostRect = host->geometry();
-            x = qBound(hostRect.left() + 6, x, hostRect.right() - width() - 6);
-            y = qMax(hostRect.top() + 6, y);
-        }
-        move(x, y);
+        const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                    : QRect(topLeft, anchor->size());
+        const int availableWidth = qMax(1, hostRect.width() - 12);
+        setMinimumWidth(qMin(216, availableWidth));
+        setMaximumWidth(availableWidth);
+        const auto anchoredPos = [&](int popupWidth, int popupHeight) {
+            const int minX = hostRect.left() + 6;
+            const int x = qBound(minX, topLeft.x(), qMax(minX, hostRect.right() - popupWidth - 6));
+            const int y = qMax(hostRect.top() + 6, topLeft.y() - popupHeight - 7);
+            return QPoint(x, y);
+        };
+
+        adjustSize();
+        // 样式表要等 show() 之后才 polish：隐藏状态下量到的尺寸偏小，会把弹层压到按钮上。
+        // 先按粗略尺寸上去，再按定稿内容高度重算；max-width 由宿主宽度兜底。
+        move(anchoredPos(width(), height()));
         show();
+        m_layout->invalidate();
+        m_layout->activate();
+        adjustSize();
+        move(anchoredPos(width(), height()));
+        raise();
     }
 
 private:
     QVBoxLayout *m_layout = nullptr;
     QWidget *m_titleRow = nullptr;
     QLabel *m_title = nullptr;
-    QLabel *m_total = nullptr;
+    ElidedLabel *m_total = nullptr;
     // key → (行容器, 值标签)
-    QHash<QString, QPair<QWidget *, QLabel *>> m_rows;
+    QHash<QString, QPair<QWidget *, ElidedLabel *>> m_rows;
 };
 
 // ------------------------------------------------------------------ ProcRow
@@ -998,11 +1026,10 @@ void MessageWidget::setAttachments(const QVariantList &attachments)
         if (kind == QLatin1String("image") && !url.isEmpty() && QFile::exists(url)) {
             auto *thumb = new QLabel(wrap);
             setClass(thumb, QStringLiteral("attachThumb"));
-            thumb->setFixedSize(84, 84);
             QPixmap pixmap(url);
-            if (!pixmap.isNull())
-                thumb->setPixmap(pixmap.scaled(84, 84, Qt::KeepAspectRatioByExpanding,
-                                               Qt::SmoothTransformation));
+            // 原图留一份，窗口跨过 640 断点时要重新缩放（webui 靠 CSS 换尺寸，Qt 只能手动跟）
+            thumb->setProperty("attachPixmap", QVariant::fromValue(pixmap));
+            m_attachThumbs.append(thumb);
             thumb->setToolTip(name);
             flow->addWidget(thumb);
             continue;
@@ -1023,7 +1050,25 @@ void MessageWidget::setAttachments(const QVariantList &attachments)
         cl->addWidget(nameLabel);
         flow->addWidget(chip);
     }
+    applyAttachmentMetrics();
     m_bubbleLayout->insertWidget(0, wrap);
+}
+
+void MessageWidget::applyAttachmentMetrics()
+{
+    if (m_attachThumbs.isEmpty())
+        return;
+    const QWidget *host = window();
+    const int side = (host && host->width() <= 640) ? 64 : 84;
+    for (QLabel *thumb : m_attachThumbs) {
+        if (!thumb)
+            continue;
+        thumb->setFixedSize(side, side);
+        const QPixmap pixmap = thumb->property("attachPixmap").value<QPixmap>();
+        if (!pixmap.isNull())
+            thumb->setPixmap(pixmap.scaled(side, side, Qt::KeepAspectRatioByExpanding,
+                                           Qt::SmoothTransformation));
+    }
 }
 
 // ---- 过程区
@@ -1266,6 +1311,7 @@ void MessageWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     applyMaxWidths();
+    applyAttachmentMetrics();
 }
 
 void MessageWidget::enterEvent(QEvent *event)

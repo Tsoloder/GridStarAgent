@@ -680,6 +680,9 @@ QLabel.toolBody {
 QFrame#choiceCard {
     border: 1px solid %LINESTRONG%; border-radius: 12px; background: %BAND2%;
 }
+/* 正文滚动区不许画自己的底：卡片底色 + 圆角要保持一整块 */
+QScrollArea#choiceScroll { border: 0; background: transparent; }
+QWidget#choiceBody { background: transparent; }
 QWidget#choiceHead { background: transparent; }
 QWidget#choiceHead:hover { background: %ACCENTTINT%; }
 QLabel.choiceTitle { color: %MUTED2%; font-size: 10px; background: transparent; }
@@ -911,6 +914,8 @@ QPlainTextEdit.trajInspRaw, QLabel.trajInspRaw {
 
 /* ===== 设置中心 ===== */
 QDialog#settingsDialog { background: %GLASSBG2%; border: 1px solid %LINESTRONG%; border-radius: 12px; }
+/* style.css @media(max-width:640px)：.settings-dialog{border:0;border-radius:0} */
+QDialog#settingsDialog[compact="true"] { border: 0; border-radius: 0; }
 QWidget#settingsHead { background: %BAND2%; border-bottom: 1px solid %LINE%; }
 QLabel.eyebrow {
     color: %CYAN%; font-size: 9px; font-weight: 700; background: transparent;

@@ -32,6 +32,7 @@
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSpacerItem>
 #include <QStringList>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -45,6 +46,38 @@ namespace {
 
 // app.js ASK_USER_TOOL：询问类工具调用不落成工具条目，改由输入框上方的浮层承担
 const char kAskUserTool[] = "ask_user_question";
+
+// QLayout treats negative margins as "unset". Keep the normal flow size and
+// overlap the phase dock with the composer when WebUI's lift is negative.
+class PhaseLiftLayout : public QVBoxLayout
+{
+public:
+    explicit PhaseLiftLayout(QWidget *parent) : QVBoxLayout(parent) {}
+
+    void setPhaseWidget(QWidget *widget) { m_phaseWidget = widget; }
+
+    void setPhaseOverlap(int overlap)
+    {
+        if (m_overlap == overlap)
+            return;
+        m_overlap = qMax(0, overlap);
+        invalidate();
+    }
+
+    void setGeometry(const QRect &rect) override
+    {
+        QVBoxLayout::setGeometry(rect);
+        if (!m_phaseWidget || m_overlap <= 0)
+            return;
+        const QRect geometry = m_phaseWidget->geometry();
+        m_phaseWidget->move(geometry.x(), geometry.y() + m_overlap);
+        m_phaseWidget->raise();
+    }
+
+private:
+    QWidget *m_phaseWidget = nullptr;
+    int m_overlap = 0;
+};
 
 // app.js usageModelLabel：后端回传的是 provider ID（如 custom），这里换成用户配置的供应商名称
 QString usageModelLabel(const QVariantList &models, const QString &raw)
@@ -248,7 +281,8 @@ ChartWidget::ChartWidget(QWidget *parent)
     zoomResetShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(zoomResetShortcut, &QShortcut::activated, this, &ChartWidget::zoomReset);
 
-    m_root = new QVBoxLayout(this);
+    auto *rootLayout = new PhaseLiftLayout(this);
+    m_root = rootLayout;
     m_root->setContentsMargins(0, 0, 0, 0);
     m_root->setSpacing(0);
 
@@ -270,8 +304,11 @@ ChartWidget::ChartWidget(QWidget *parent)
     phaseLayout->setSpacing(0);
     m_phasePanel = new PhasePanel(m_phaseWrap);
     phaseLayout->addWidget(m_phasePanel);
+    m_phaseLiftSpacer = new QSpacerItem(0, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
+    phaseLayout->addSpacerItem(m_phaseLiftSpacer);
     m_phaseWrap->setVisible(false);
     m_root->addWidget(m_phaseWrap);
+    rootLayout->setPhaseWidget(m_phaseWrap);
 
     m_composer = new Composer(this);
     m_root->addWidget(m_composer);
@@ -534,7 +571,8 @@ void ChartWidget::buildTurnRail()
     m_turnRailPanel->setObjectName(QStringLiteral("turnRailPanel"));
     setClass(m_turnRailPanel, QStringLiteral("turnRailPanel"));
     m_turnRailPanel->setAttribute(Qt::WA_StyledBackground, true);
-    m_turnRailPanel->setFixedWidth(300);
+    // webui：width:300px;max-width:min(300px,calc(100vw - 26px))，宽度随窗口收缩
+    m_turnRailPanel->setMaximumWidth(300);
     auto *panelLayout = new QVBoxLayout(m_turnRailPanel);
     panelLayout->setContentsMargins(0, 0, 0, 0);
     panelLayout->setSpacing(0);
@@ -838,12 +876,14 @@ void ChartWidget::layoutTurnRailPanel()
     }
     const int listHeight = m_railRows.size() * 30 + 8;
     const int maxHeight = qMin(qRound(height() * 0.62), 420);
-    const int panelHeight = qBound(headHeight + 60, headHeight + listHeight, maxHeight);
+    // webui 只给 max-height：行数少时面板按内容收缩，行数多时截断并滚动
+    const int panelHeight = qMax(0, qMin(headHeight + listHeight, maxHeight));
+    const int panelWidth = qMin(300, qMax(0, width() - 26));
     const int x = m_turnRail->x() + m_turnRail->width() + 10;
     const int center = m_turnRail->y() + m_turnRail->height() / 2;
     int y = center - panelHeight / 2;
     y = qBound(8, y, qMax(8, height() - panelHeight - 8));
-    m_turnRailPanel->setGeometry(x, y, m_turnRailPanel->width(), panelHeight);
+    m_turnRailPanel->setGeometry(x, y, panelWidth, panelHeight);
 }
 
 void ChartWidget::focusTurn(int turn)
@@ -1445,15 +1485,18 @@ void ChartWidget::showToast(const QString &text)
 void ChartWidget::syncPhaseLift()
 {
     // 选择浮层浮在输入框上方，会盖住紧贴其上的计划窗口：浮层出现/变高时把计划窗口顶开
-    if (!m_phaseWrap)
+    if (!m_phaseWrap || !m_phaseLiftSpacer)
         return;
     auto *layout = qobject_cast<QVBoxLayout *>(m_phaseWrap->layout());
     if (!layout)
         return;
     const int lift = m_composer->choiceOpen()
-                         ? qMax(0, m_composer->choiceHeight() + 8 + 12 - m_composer->height())
+                         ? m_composer->choiceHeight() + 12 - m_composer->height()
                          : 0;
-    layout->setContentsMargins(9, 0, 9, 8 + lift);
+    m_phaseLiftSpacer->changeSize(0, qMax(0, lift), QSizePolicy::Fixed,
+                                  QSizePolicy::Fixed);
+    layout->invalidate();
+    static_cast<PhaseLiftLayout *>(m_root)->setPhaseOverlap(qMax(0, -lift));
 }
 
 void ChartWidget::setTrajectoryEvents(const QVariantList &events)
@@ -1862,6 +1905,10 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
         }
         break;
     case QEvent::MouseButtonPress:
+        // QWidget 默认会忽略按下事件并冒泡到父级；若不拦住，点击会话触发器时
+        // 父级会被误判为“面板外”，先关闭、松开又重开，表现为无法再次点击收起。
+        if (target && isSelfOrChildOf(target, m_sessionTrigger))
+            return true;
         if (m_sessionPanel->isOpen() && target
             && !isSelfOrChildOf(target, m_sessionTrigger)
             && !isSelfOrChildOf(target, m_sessionPanel)

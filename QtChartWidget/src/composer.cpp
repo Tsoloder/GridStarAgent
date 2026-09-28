@@ -9,10 +9,15 @@
 #include <QEvent>
 #include <QFocusEvent>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QMoveEvent>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QShowEvent>
+#include <QSignalBlocker>
+#include <QSizePolicy>
 #include <QTextEdit>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -55,6 +60,10 @@ Composer::Composer(QWidget *parent)
     m_inputWrap = new QFrame(this);
     m_inputWrap->setObjectName(QStringLiteral("inputWrap"));
     m_inputWrap->setAttribute(Qt::WA_StyledBackground, true);
+    // webui 在浮层打开时用 visibility:hidden 隐藏输入区，仍保留其布局占位。
+    QSizePolicy inputWrapPolicy = m_inputWrap->sizePolicy();
+    inputWrapPolicy.setRetainSizeWhenHidden(true);
+    m_inputWrap->setSizePolicy(inputWrapPolicy);
     auto *wl = new QVBoxLayout(m_inputWrap);
     wl->setContentsMargins(0, 0, 0, 0);
     wl->setSpacing(0);
@@ -117,8 +126,9 @@ Composer::Composer(QWidget *parent)
     m_manual->setProperty("active", true);
     leftFlow->addWidget(modeSwitch);
 
-    struct ControlDef { ComboTrigger **trigger; const char *tip; };
-    const ControlDef defs[2] = { { &m_modelTrigger, "模型" }, { &m_skillTrigger, "Skill" } };
+    struct ControlDef { ComboTrigger **trigger; QWidget **control; const char *tip; };
+    const ControlDef defs[2] = { { &m_modelTrigger, &m_modelControl, "模型" },
+                                 { &m_skillTrigger, &m_skillControl, "Skill" } };
     for (const ControlDef &def : defs) {
         auto *control = new QFrame(m_leftControls);
         setClass(control, QStringLiteral("modelControl"));
@@ -133,6 +143,7 @@ Composer::Composer(QWidget *parent)
         trigger->setFocusPolicy(Qt::TabFocus);
         layout->addWidget(trigger, 1);
         *def.trigger = trigger;
+        *def.control = control;
         leftFlow->addWidget(control);
     }
 
@@ -178,9 +189,12 @@ Composer::Composer(QWidget *parent)
     wl->addWidget(m_controls);
     outer->addWidget(m_inputWrap);
 
-    // 选择浮层（.choice-overlay）：绝对定位在输入框上方，不入布局
-    m_choice = new ChoiceOverlay(this);
+    // 选择浮层（.choice-overlay）：绝对定位在输入框上方，不入布局。
+    // Qt 会裁剪子控件，因此挂到 Composer 的顶层宿主上；布局时再映射回输入区坐标。
+    QWidget *overlayParent = parentWidget() ? parentWidget() : this;
+    m_choice = new ChoiceOverlay(overlayParent);
     m_choice->setVisible(false);
+    connect(m_choice, &QObject::destroyed, this, [this] { m_choice = nullptr; });
 
     m_modelList = new ListBoxPopup(this);
     m_skillList = new ListBoxPopup(this);
@@ -241,27 +255,75 @@ Composer::Composer(QWidget *parent)
     });
 }
 
+Composer::~Composer()
+{
+    // 浮层通常挂在宿主窗口下，Composer 被单独销毁时不能把它遗留在界面上。
+    delete m_choice;
+}
+
+void Composer::hideEvent(QHideEvent *event)
+{
+    if (m_choice)
+        m_choice->hide();
+    QWidget::hideEvent(event);
+}
+
+void Composer::moveEvent(QMoveEvent *event)
+{
+    QWidget::moveEvent(event);
+    layoutChoiceOverlay();
+}
+
 void Composer::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     // 宽度变化会改变输入框的换行数，高度必须跟着重算（webui 里是 window resize 监听）。
     // 要等 QTextEdit 自己收到 resize、文档宽度更新之后再算，否则拿到的还是旧行数
     QTimer::singleShot(0, this, [this] { autoGrowInput(); });
+    applyAttachmentCompact();
     layoutChoiceOverlay();
+}
+
+void Composer::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (m_choice && m_choiceOpen)
+        m_choice->show();
+    layoutChoiceOverlay();
+    if (m_choiceOpen)
+        emit choiceResized();
 }
 
 void Composer::layoutChoiceOverlay()
 {
-    if (!m_choice)
+    if (!m_choice || m_choiceLayingOut)
         return;
     if (!m_choiceOpen || !m_choice->isVisible()) {
         return;
     }
-    const int available = qMax(80, height() - 24);
-    const int wanted = m_choice->sizeHint().height();
-    const int cardHeight = qMin(wanted, available);
-    m_choice->setGeometry(9, height() - 12 - cardHeight, qMax(0, width() - 18), cardHeight);
+    QWidget *host = m_choice->parentWidget();
+    if (!host)
+        return;
+    // 下面按宽度量高时会再触发 resizeEvent -> sizeChanged -> 本函数，重的这层直接跳过
+    m_choiceLayingOut = true;
+
+    const int cardWidth = qMax(0, width() - 18);
+    // webui .choice-overlay{bottom:12px}：卡片底边贴在输入区上方 12px、向上生长
+    const int cardBottom = mapTo(host, QPoint(0, height() - 12)).y();
+    int cardHeight = 0;
+    {
+        // 隐藏态/旧宽度量出来的 sizeHint 偏小，窄窗口上底部的作答区会被卡片底边裁掉，
+        // 所以先按定稿宽度把内容重排一次再取高度（量高期间的 sizeChanged 不要外泄）
+        QSignalBlocker blocker(m_choice);
+        cardHeight = m_choice->heightForCardWidth(cardWidth);
+    }
+    // 内容比可视区还高时贴住宿主顶边，正文自己滚动；不能顶出宿主被裁掉
+    cardHeight = qBound(0, cardHeight, qMax(0, cardBottom - host->rect().top()));
+    const QPoint topLeft = mapTo(host, QPoint(9, height() - 12 - cardHeight));
+    m_choice->setGeometry(QRect(topLeft, QSize(cardWidth, cardHeight)));
     m_choice->raise();
+
+    m_choiceLayingOut = false;
 }
 
 void Composer::autoGrowInput()
@@ -394,14 +456,15 @@ void Composer::openModelList()
 {
     m_modelList->setModelOptions(m_models, m_model);
     m_modelTrigger->setOpen(true);
-    m_modelList->openAbove(m_modelTrigger);
+    // webui 下拉贴在外层 .model-control 左缘，而不是内部按钮
+    m_modelList->openAbove(m_modelControl ? m_modelControl : m_modelTrigger);
 }
 
 void Composer::openSkillList()
 {
     m_skillList->setSkillOptions(m_skills, m_skill);
     m_skillTrigger->setOpen(true);
-    m_skillList->openAbove(m_skillTrigger);
+    m_skillList->openAbove(m_skillControl ? m_skillControl : m_skillTrigger);
 }
 
 void Composer::addAttachments(const QVariantList &items)
@@ -442,6 +505,7 @@ void Composer::renderAttachments()
         auto *chip = new AttachChip(item, m_attachBar);
         chip->setProperty("attachId", item.value(QStringLiteral("id")));
         chip->setToolTip(item.value(QStringLiteral("name")).toString());
+        chip->setCompact(compactAttachments());
         connect(chip, &AttachChip::removeClicked, this, [this, id = item.value(QStringLiteral("id"))] {
             for (int i = 0; i < m_attachments.size(); ++i) {
                 if (m_attachments.at(i).toMap().value(QStringLiteral("id")) == id) {
@@ -456,6 +520,24 @@ void Composer::renderAttachments()
         m_attachLayout->addWidget(chip);
     }
     m_attachBar->setVisible(!m_attachments.isEmpty());
+}
+
+bool Composer::compactAttachments() const
+{
+    // 媒体查询落在窗口宽度上，与 webui 的 @media(max-width:640px) 同口径
+    const QWidget *host = window();
+    return host && host->width() <= 640;
+}
+
+void Composer::applyAttachmentCompact()
+{
+    if (!m_attachBar)
+        return;
+    const bool compact = compactAttachments();
+    const QList<AttachChip *> chips =
+        m_attachBar->findChildren<AttachChip *>(QString(), Qt::FindDirectChildrenOnly);
+    for (AttachChip *chip : chips)
+        chip->setCompact(compact);
 }
 
 void Composer::setVoiceEnabled(bool enabled)

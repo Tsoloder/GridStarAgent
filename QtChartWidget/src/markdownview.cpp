@@ -11,8 +11,10 @@
 #include <QLabel>
 #include <QPixmap>
 #include <QRegularExpression>
+#include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QVBoxLayout>
 
 namespace gs {
@@ -391,6 +393,56 @@ void MarkdownView::addImage(QVBoxLayout *layout, QWidget *parent, const QString 
     layout->addWidget(label);
 }
 
+namespace {
+
+// .md-table-wrap 只有横向滚动；高度跟随表格自然高度，
+// 不能像普通 QScrollArea 一样永久给横向滚动条预留一行空白。
+class TableScrollArea : public QScrollArea
+{
+public:
+    explicit TableScrollArea(QWidget *parent = nullptr) : QScrollArea(parent) {}
+
+    void setNaturalSize(const QSize &size)
+    {
+        m_natural = size;
+        syncHeight();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent *event) override
+    {
+        QScrollArea::resizeEvent(event);
+        syncHeight();
+    }
+
+    void showEvent(QShowEvent *event) override
+    {
+        QScrollArea::showEvent(event);
+        syncHeight();
+    }
+
+private:
+    void syncHeight()
+    {
+        QWidget *content = widget();
+        if (!content || m_natural.isEmpty())
+            return;
+        const int contentWidth = qMax(content->sizeHint().width(), content->minimumWidth());
+        const bool horizontal = contentWidth > viewport()->width();
+        const int barHeight =
+            horizontal ? qMax(horizontalScrollBar()->sizeHint().height(),
+                              horizontalScrollBar()->height())
+                       : 0;
+        const int target = m_natural.height() + barHeight;
+        if (height() != target)
+            setFixedHeight(target);
+    }
+
+    QSize m_natural;
+};
+
+} // namespace
+
 void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringList &head,
                             const QStringList &aligns, const QVector<QStringList> &rows)
 {
@@ -409,7 +461,7 @@ void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringL
     frameLayout->setContentsMargins(0, 0, 0, 0);
     frameLayout->setSpacing(0);
 
-    auto *scroll = new QScrollArea(frame);
+    auto *scroll = new TableScrollArea(frame);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setWidgetResizable(true);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -454,12 +506,11 @@ void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringL
     scroll->setWidget(grid);
     scroll->ensurePolished(); // 先把 QSS（表格 11px 字号）烙上，量出来的自然宽度才是最终渲染宽度
 
-    // 列宽取表头与单元格的自然宽度：宽度不够时由 QScrollArea 出横向滚动条，
-    // 高度取自然高度并预留横向滚动条的位置，保证 widgetResizable 下内容既不裁切也不多出空白
+    // 列宽取表头与单元格的自然宽度：宽度不够时由 QScrollArea 出横向滚动条。
+    // 高度由 TableScrollArea 随 viewport 宽度重算：没有横向滚动条时不会多留一行空白。
     const QSize natural = grid->sizeHint();
     grid->setMinimumWidth(natural.width());
-    scroll->setFixedHeight(natural.height()
-                           + qMax(scaledPx(8), scroll->horizontalScrollBar()->sizeHint().height()));
+    scroll->setNaturalSize(natural);
     frameLayout->addWidget(scroll);
 
     layout->addSpacing(scaledPx(8)); // CSS: .md-table-wrap margin 8px 0

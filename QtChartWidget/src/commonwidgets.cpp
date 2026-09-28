@@ -421,7 +421,10 @@ QSize ElidedLabel::sizeHint() const
 
 QSize ElidedLabel::minimumSizeHint() const
 {
-    return QSize(0, QLabel::minimumSizeHint().height());
+    // 宽度下限 0：允许被压到任意窄，省略号自己处理。
+    // 高度下限必须留一行文字：文本要等首次 resize 才回填，此前 QLabel 的最小高度是 0，
+    // 会把宿主布局压塌（用量下拉的选项行就被挤成 14px、文字高度 0）。
+    return QSize(0, qMax(QLabel::minimumSizeHint().height(), fontMetrics().height()));
 }
 
 void ElidedLabel::resizeEvent(QResizeEvent *event)
@@ -489,10 +492,9 @@ AttachChip::AttachChip(const QVariantMap &item, QWidget *parent)
     }
 
     m_name = makeLabel(QStringLiteral("attachName"), name, this);
-    m_name->setMaximumWidth(140);
-    QFontMetrics fm(m_name->font());
-    m_name->setText(elidedText(name, fm, 140));
+    m_fullName = name;
     m_name->setToolTip(name);
+    updateNameElide();
     m_size = makeLabel(QStringLiteral("attachSize"),
                        uploading ? QStringLiteral("上传中…") : fileSizeLabel(m_bytes), this);
 
@@ -511,6 +513,23 @@ AttachChip::AttachChip(const QVariantMap &item, QWidget *parent)
     layout->addWidget(remove);
 
     setUploading(uploading);
+}
+
+void AttachChip::setCompact(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    updateNameElide();
+}
+
+void AttachChip::updateNameElide()
+{
+    if (!m_name)
+        return;
+    const int nameWidth = m_compact ? 64 : 140;
+    m_name->setMaximumWidth(nameWidth);
+    m_name->setText(elidedText(m_fullName, m_name->fontMetrics(), nameWidth));
 }
 
 void AttachChip::setUploading(bool uploading)

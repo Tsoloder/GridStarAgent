@@ -18,6 +18,7 @@
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScrollArea>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -184,25 +185,46 @@ ChoiceOverlay::ChoiceOverlay(QWidget *parent) : QFrame(parent)
     hl->addWidget(m_close, 0);
     layout->addWidget(m_head);
 
-    m_question = makeLabel(QStringLiteral("choiceQuestion"), QString(), this);
+    // 正文（问题/参数/选项）单独放进可滚动区：webui 的卡片会一路长到顶出容器，
+    // 窗口矮、内容长时上半张卡会被裁掉（连标题和关闭按钮都看不到）。
+    // 这里让标题行与底部作答区固定，中间的正文放不下就滚动。
+    m_scroll = new QScrollArea(this);
+    m_scroll->setObjectName(QStringLiteral("choiceScroll"));
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scroll->setFocusPolicy(Qt::NoFocus);
+    // 卡片比宿主矮时由正文自己滚动：竖直方向允许一直缩到 0，让标题行和底部作答区不被压掉
+    m_scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Ignored);
+    m_scroll->setMinimumHeight(0);
+    m_scroll->viewport()->setAutoFillBackground(false);
+    m_body = new QWidget(m_scroll);
+    m_body->setObjectName(QStringLiteral("choiceBody"));
+    auto *bodyLayout = new QVBoxLayout(m_body);
+    bodyLayout->setContentsMargins(0, 0, 0, 0);
+    bodyLayout->setSpacing(0);
+    m_scroll->setWidget(m_body);
+    layout->addWidget(m_scroll);
+
+    m_question = makeLabel(QStringLiteral("choiceQuestion"), QString(), m_body);
     m_question->setWordWrap(true);
     m_question->setTextInteractionFlags(Qt::TextSelectableByMouse);
     m_question->setContentsMargins(11, 0, 11, 9);
-    layout->addWidget(m_question);
+    bodyLayout->addWidget(m_question);
 
-    m_params = new QWidget(this);
+    m_params = new QWidget(m_body);
     setClass(m_params, QStringLiteral("params"));
     m_paramsLayout = new QVBoxLayout(m_params);
     m_paramsLayout->setContentsMargins(11, 0, 11, 9);
     m_paramsLayout->setSpacing(0);
-    layout->addWidget(m_params);
+    bodyLayout->addWidget(m_params);
 
-    m_list = new QWidget(this);
+    m_list = new QWidget(m_body);
     setClass(m_list, QStringLiteral("choiceList"));
     m_listLayout = new QVBoxLayout(m_list);
     m_listLayout->setContentsMargins(6, 0, 6, 6);
     m_listLayout->setSpacing(0);
-    layout->addWidget(m_list);
+    bodyLayout->addWidget(m_list);
 
     m_foot = new QWidget(this);
     auto *fl = new QVBoxLayout(m_foot);
@@ -333,14 +355,18 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
             mono.setPixelSize(scaledPx(11));
             area->setFont(mono);
             entry.area = area;
-            m_paramsLayout->addWidget(paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
-                                               area, m_params));
+            QWidget *row = paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
+                                    area, m_params);
+            row->ensurePolished(); // QSS 的边距/字号要先落地，量出的行高才是最终值
+            m_paramsLayout->addWidget(row);
         } else {
             auto *input = new QLineEdit(valueForInput(spec.value), m_params);
             setClass(input, QStringLiteral("paramInput"));
             entry.input = input;
-            m_paramsLayout->addWidget(paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
-                                               input, m_params));
+            QWidget *row = paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
+                                    input, m_params);
+            row->ensurePolished();
+            m_paramsLayout->addWidget(row);
         }
         m_paramEntries.append(entry);
     }
@@ -411,6 +437,7 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
         il->addWidget(dot, 0);
         il->addWidget(text, 1);
         entry.item = widget;
+        widget->ensurePolished();
         // .choice-item 在 webui 里也是 tabindex="0"
         widget->setFocusPolicy(Qt::TabFocus);
         widget->installEventFilter(this);
@@ -445,6 +472,7 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
         il->addWidget(dot, 0);
         il->addWidget(name, 1);
         entry.item = widget;
+        widget->ensurePolished();
         widget->setFocusPolicy(Qt::TabFocus);
         widget->installEventFilter(this);
         m_listLayout->addWidget(widget);
@@ -475,6 +503,8 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
     m_foot->setVisible(!m_isApproval);
 
     m_collapsed = false;
+    // 上一张卡如果处于折叠态，选项区会被隐藏；新卡必须恢复成展开态。
+    m_list->setVisible(true);
     m_caret->setText(QString::fromUtf8("⌄"));
     m_selected = -1;
     m_submitted = false;
@@ -486,6 +516,69 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
         emit openStateChanged(true);
     }
     fadeIn();
+}
+
+// 宿主（Composer）只知道卡片当前几何，量高前必须先把内容按目标宽度重排一次：
+// 隐藏态、旧宽度下量出来的 sizeHint 都偏小，窄窗口上底部作答区会被卡片底边裁掉。
+int ChoiceOverlay::heightForCardWidth(int width)
+{
+    const int w = qMax(0, width);
+    // 样式表的 padding/border 要 polish 之后才生效
+    ensurePolished();
+    if (m_head)
+        m_head->ensurePolished();
+    if (m_scroll)
+        m_scroll->ensurePolished();
+    if (m_foot)
+        m_foot->ensurePolished();
+
+    resize(w, height());
+    if (QLayout *cardLayout = layout())
+        cardLayout->activate();
+    syncBodyHeight();
+    return sizeHint().height();
+}
+
+// 正文（问题/参数/选项）在滚动区里：先按当前宽度标定它的自然高度，
+// 然后把这个高度设为最小高度——卡片放得下就长满，放不下就出滚动条。
+void ChoiceOverlay::syncBodyHeight()
+{
+    if (!m_scroll || !m_body)
+        return;
+    QLayout *bodyLayout = m_body->layout();
+    if (!bodyLayout)
+        return;
+
+    bodyLayout->activate();
+    const int bodyWidth = m_scroll->viewport()->width();
+    int natural = bodyLayout->sizeHint().height();
+    // 换行文本的高度只有按宽度重算才准；宽度还没定稿时先退回 sizeHint
+    if (bodyWidth > 0 && bodyLayout->hasHeightForWidth())
+        natural = bodyLayout->heightForWidth(bodyWidth);
+
+    m_body->setMinimumHeight(natural);
+    if (natural != m_bodyNatural) {
+        m_bodyNatural = natural;
+        updateGeometry();
+    }
+}
+
+// 卡片高度 = 标题行 + 正文自然高（折叠时为 0）+ 底部作答区；
+// 三个子块由 layout() 排布，所以不叠加间距/边距。
+QSize ChoiceOverlay::sizeHint() const
+{
+    int height = 0;
+    if (m_head && m_head->isVisible())
+        height += m_head->sizeHint().height();
+    if (m_scroll && m_scroll->isVisible())
+        height += m_collapsed ? 0 : m_bodyNatural;
+    if (m_foot && m_foot->isVisible())
+        height += m_foot->sizeHint().height();
+
+    QLayout *cardLayout = layout();
+    const int hintedWidth = width() > 0 ? width()
+                                        : (cardLayout ? cardLayout->sizeHint().width() : 0);
+    return QSize(hintedWidth, height);
 }
 
 void ChoiceOverlay::rebuild()
@@ -533,6 +626,10 @@ void ChoiceOverlay::toggleCollapsed()
     m_params->setVisible(!m_collapsed && !m_paramEntries.isEmpty());
     m_list->setVisible(!m_collapsed);
     m_foot->setVisible(!m_collapsed && !m_isApproval);
+    // 卡片由 Composer 绝对定位，隐藏子控件不会自动改变它的几何尺寸；
+    // 主动上报 sizeChanged，让宿主按新的 sizeHint 重新贴到输入框上方。
+    updateGeometry();
+    emit sizeChanged();
 }
 
 void ChoiceOverlay::paintSelection(int index)

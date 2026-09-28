@@ -4,6 +4,9 @@
 // 流式对话（思考 → 正文 → 工具调用 → 结果 → token 统计）、审批卡、结构化卡片、
 // 工作流卡、失败重试与设置中心，并支持 `--shot <file>` 离屏截图与 webui 对照。
 //
+// 默认使用内置假后端；传 `--live --api http://127.0.0.1:1231` 可连接真实
+// agent.app，对健康检查、会话、模型、MCP、SSE 对话与审批做端到端验证。
+//
 // 输入框里可用的演示指令：
 //   /history 载入示例历史   /clear 清空        /fail 制造失败气泡
 //   /approve 审批卡         /workflow 工作流卡  /options 选项卡
@@ -14,15 +17,28 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QEvent>
-#include <QMouseEvent>
+#include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QInputDialog>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonParseError>
+#include <QLineEdit>
+#include <QMouseEvent>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QPixmap>
 #include <QStringList>
 #include <QTimer>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QVariant>
 #include <QtMath>
 
+#include <functional>
 #include <initializer_list>
 #include <utility>
 
@@ -441,7 +457,8 @@ QVariantList workflowSteps()
 class DemoHost
 {
 public:
-    explicit DemoHost(ChartWidget *chart) : m_chart(chart) {}
+    explicit DemoHost(ChartWidget *chart, bool live = false,
+                      const QString &apiBase = QStringLiteral("http://127.0.0.1:1231"));
 
     void populate();
     void loadHistory();
@@ -450,14 +467,47 @@ public:
     // 初始数据推完之后再接信号：否则 populate 的 setter 会触发下面这些处理器里
     // 的 showToast，启动即弹一条提示压住阶段计划面板，干扰离屏对照图
     void wire();
+    // live 模式启动后异步拉取服务状态与首屏数据；fake 模式不调用。
+    void bootstrap();
 
 private:
+    using JsonCallback = std::function<void(const QJsonObject &, int)>;
+
     void startTurn(const QString &message, const QString &display,
                    const QVariantList &attachments);
     bool runCommand(const QString &text, const QVariantList &attachments);
     void streamChunk(int index);
     void runWorkflow(const QVariantList &steps);
     void attachFiles(const QStringList &paths);
+    void uploadFiles(const QStringList &paths);
+
+    // ---- 真实后台（agent.app）适配层 ----
+    QString apiUrl(const QString &path) const;
+    QString encodedId(const QString &id) const;
+    void requestJson(const QString &method, const QString &path, const QJsonObject &payload,
+                     const JsonCallback &callback);
+    void processSseFrame(const QByteArray &frame, const QString &message, const QString &display,
+                         const QVariantList &attachments);
+    void failLiveTurn(const QString &error, const QString &message, const QString &display,
+                      const QVariantList &attachments, bool retryable = true);
+    void startLiveTurn(const QString &message, const QString &display,
+                       const QVariantList &attachments);
+    void checkConnection(bool notify = false);
+    void loadModels();
+    void loadSkills();
+    void loadMcp(bool refresh);
+    void loadConfig();
+    void refreshSessions(bool loadFirst);
+    void loadSession(const QString &id);
+    void createSession();
+    void loadTrajectoryRemote();
+    void saveConfig(const QVariantMap &config, const QVariant &revision);
+    void testProvider(const QString &providerId);
+    void readProviderModels(const QString &providerId);
+    void requestUsageStats(const QString &requestId, const QString &start, const QString &end,
+                           const QString &provider, const QString &model);
+    void resolveLiveApproval(const QString &callId, bool approved, const QVariantMap &args);
+    void renameSession(const QString &id);
 
     ChartWidget *m_chart;
     QStringList m_chunks;
@@ -466,7 +516,37 @@ private:
     bool m_recording = false;
     bool m_stopped = false;
     bool m_workflowActive = false;
+
+    bool m_live = false;
+    QString m_apiBase;
+    QNetworkAccessManager *m_network = nullptr;
+    QString m_sessionId;
+    QNetworkReply *m_chatReply = nullptr;
+    QByteArray m_sseBuffer;
+    bool m_streamDone = false;
+    bool m_streamFailed = false;
+    QVariantMap m_config;
+    QVariant m_configRevision;
+    QVariantList m_liveModels;
+    QVariantList m_liveSkills;
+    QVariantList m_liveMcpTools;
+    bool m_healthReachable = false;
+    bool m_configReady = false;
+    bool m_runtimeReady = false;
+    bool m_mcpConnected = false;
+    bool m_bootstrapStarted = false;
 };
+
+DemoHost::DemoHost(ChartWidget *chart, bool live, const QString &apiBase)
+    : m_chart(chart), m_live(live), m_apiBase(apiBase.trimmed())
+{
+    while (m_apiBase.endsWith(QLatin1Char('/')))
+        m_apiBase.chop(1);
+    if (m_apiBase.isEmpty())
+        m_apiBase = QStringLiteral("http://127.0.0.1:1231");
+    if (m_live)
+        m_network = new QNetworkAccessManager(m_chart);
+}
 
 void DemoHost::populate()
 {
@@ -491,6 +571,599 @@ void DemoHost::loadHistory()
     m_chart->setCurrentSessionTitle(QStringLiteral("10kV 城南线故障研判与转供电方案"));
 }
 
+QString DemoHost::apiUrl(const QString &path) const
+{
+    return m_apiBase + (path.startsWith(QLatin1Char('/')) ? path
+                                                          : QStringLiteral("/") + path);
+}
+
+QString DemoHost::encodedId(const QString &id) const
+{
+    return QString::fromLatin1(QUrl::toPercentEncoding(id));
+}
+
+void DemoHost::requestJson(const QString &method, const QString &path,
+                           const QJsonObject &payload, const JsonCallback &callback)
+{
+    if (!m_network) {
+        if (callback)
+            callback(QJsonObject{ { QStringLiteral("error"), QStringLiteral("网络未初始化") } }, 0);
+        return;
+    }
+
+    QNetworkRequest request(QUrl(apiUrl(path)));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Accept", "application/json");
+    const QByteArray body = QJsonDocument(payload).toJson(QJsonDocument::Compact);
+
+    QNetworkReply *reply = nullptr;
+    if (method == QLatin1String("GET"))
+        reply = m_network->get(request);
+    else if (method == QLatin1String("POST"))
+        reply = m_network->post(request, body);
+    else if (method == QLatin1String("PUT"))
+        reply = m_network->sendCustomRequest(request, "PUT", body);
+    else if (method == QLatin1String("DELETE"))
+        reply = m_network->deleteResource(request);
+    else
+        reply = m_network->sendCustomRequest(request, method.toUtf8(), body);
+
+    QObject::connect(reply, &QNetworkReply::finished, m_chart, [reply, callback] {
+        const int status =
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray raw = reply->readAll();
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(raw, &parseError);
+        QJsonObject object;
+        if (document.isObject()) {
+            object = document.object();
+        } else {
+            object.insert(QStringLiteral("error"),
+                          parseError.error == QJsonParseError::NoError
+                              ? QString::fromUtf8(raw).trimmed()
+                              : QStringLiteral("响应不是 JSON：%1").arg(parseError.errorString()));
+        }
+        if (status == 0 && !object.contains(QStringLiteral("error")))
+            object.insert(QStringLiteral("error"), reply->errorString());
+        reply->deleteLater();
+        if (callback)
+            callback(object, status);
+    });
+}
+
+void DemoHost::bootstrap()
+{
+    if (!m_live || m_bootstrapStarted)
+        return;
+    m_bootstrapStarted = true;
+    m_chart->setConnectionState(QStringLiteral("checking"), QStringLiteral("连接后台…"));
+    m_chart->setConfigLoaded(false);
+    checkConnection(false);
+    loadConfig();
+    loadModels();
+    loadSkills();
+    refreshSessions(true);
+}
+
+void DemoHost::checkConnection(bool notify)
+{
+    if (!m_live)
+        return;
+    m_chart->setConnectionState(QStringLiteral("checking"),
+                                notify ? QStringLiteral("检测中") : QStringLiteral("连接后台…"));
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/health"), QJsonObject(),
+        [this, notify](const QJsonObject &health, int status) {
+            if (status < 200 || status >= 300) {
+                m_healthReachable = false;
+                m_configReady = false;
+                m_runtimeReady = false;
+                m_mcpConnected = false;
+                const QString error = health.value(QStringLiteral("error")).toString();
+                const QString label =
+                    status == 0 ? QStringLiteral("服务不可用")
+                                : QStringLiteral("服务异常 · HTTP %1").arg(status);
+                m_chart->setConnectionState(QStringLiteral("offline"), label);
+                m_chart->setConfigLoaded(false);
+                m_chart->setMcpTools(QVariantList(), false, false,
+                                     error.isEmpty()
+                                         ? QStringLiteral("后台不可达")
+                                         : error);
+                if (notify)
+                    m_chart->showToast(
+                        error.isEmpty() ? QStringLiteral("无法连接后台：%1").arg(m_apiBase)
+                                        : QStringLiteral("连接失败：%1").arg(error));
+                qWarning() << "[demo:live] health failed" << status << error;
+                return;
+            }
+
+            m_healthReachable = true;
+            m_configReady = health.value(QStringLiteral("config_loaded")).toBool(false);
+            m_runtimeReady = health.value(QStringLiteral("runtime_ready")).toBool(false);
+            requestJson(
+                QStringLiteral("GET"), QStringLiteral("/mcp/tools"), QJsonObject(),
+                [this, notify](const QJsonObject &mcp, int mcpStatus) {
+                    m_mcpConnected = (mcpStatus >= 200 && mcpStatus < 300)
+                                     && mcp.value(QStringLiteral("connected")).toBool(false);
+                    const QString mcpError =
+                        mcp.value(QStringLiteral("error")).toString();
+                    const QVariantList tools =
+                        mcp.value(QStringLiteral("tools")).toArray().toVariantList();
+                    m_liveMcpTools = tools;
+                    m_chart->setMcpTools(tools, m_mcpConnected, false, mcpError);
+
+                    if (!m_configReady || !m_runtimeReady) {
+                        m_chart->setConnectionState(
+                            QStringLiteral("checking"),
+                            m_configReady ? QStringLiteral("模型运行时就绪中")
+                                          : QStringLiteral("服务未就绪"));
+                    } else if (!m_mcpConnected) {
+                        m_chart->setConnectionState(QStringLiteral("checking"),
+                                                    QStringLiteral("MCP 未连接"));
+                    } else {
+                        m_chart->setConnectionState(QStringLiteral("online"),
+                                                    QStringLiteral("Agent 已连接"));
+                    }
+
+                    if (notify) {
+                        if (!m_configReady)
+                            m_chart->showToast(QStringLiteral("后台已响应，但尚未加载配置"));
+                        else if (!m_runtimeReady)
+                            m_chart->showToast(QStringLiteral("后台已响应，但模型运行时未就绪"));
+                        else if (!m_mcpConnected)
+                            m_chart->showToast(QStringLiteral("后台已响应，但 MCP 未连接"));
+                        else
+                            m_chart->showToast(QStringLiteral("Agent 后台连接正常"));
+                    }
+                    qInfo() << "[demo:live] health ok; config=" << m_configReady
+                            << "runtime=" << m_runtimeReady << "mcp=" << m_mcpConnected;
+                });
+        });
+}
+
+void DemoHost::loadModels()
+{
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/config/models"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                qWarning() << "[demo:live] models failed" << status
+                           << object.value(QStringLiteral("error")).toString();
+                return;
+            }
+            m_liveModels = object.value(QStringLiteral("models")).toArray().toVariantList();
+            m_chart->setModels(m_liveModels);
+            const QString defaultModel =
+                object.value(QStringLiteral("default_model")).toString();
+            const QString current = m_chart->currentModel();
+            bool currentAvailable = false;
+            for (const QVariant &item : m_liveModels) {
+                if (item.toMap().value(QStringLiteral("key")).toString() == current) {
+                    currentAvailable = true;
+                    break;
+                }
+            }
+            if (!defaultModel.isEmpty() && (!currentAvailable || current.isEmpty()))
+                m_chart->setCurrentModel(defaultModel);
+            if (!m_liveModels.isEmpty())
+                m_chart->setConfigLoaded(true);
+        });
+}
+
+void DemoHost::loadSkills()
+{
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/skills"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                const QString error = object.value(QStringLiteral("error")).toString();
+                m_chart->setSettingsSkills(QVariantList(), false, error);
+                return;
+            }
+            m_liveSkills = object.value(QStringLiteral("skills")).toArray().toVariantList();
+            m_chart->setSkills(m_liveSkills);
+            m_chart->setSettingsSkills(m_liveSkills, false, QString());
+            qInfo() << "[demo:live] skills loaded:" << m_liveSkills.size();
+        });
+}
+
+void DemoHost::loadMcp(bool refresh)
+{
+    const QString path = refresh ? QStringLiteral("/mcp/tools?refresh=1")
+                                 : QStringLiteral("/mcp/tools");
+    m_chart->setMcpTools(m_liveMcpTools, m_mcpConnected, true, QString());
+    requestJson(QStringLiteral("GET"), path, QJsonObject(),
+                [this](const QJsonObject &object, int status) {
+                    const bool connected = (status >= 200 && status < 300)
+                                           && object.value(QStringLiteral("connected")).toBool(false);
+                    const QString error = object.value(QStringLiteral("error")).toString();
+                    m_liveMcpTools =
+                        object.value(QStringLiteral("tools")).toArray().toVariantList();
+                    m_mcpConnected = connected;
+                    m_chart->setMcpTools(m_liveMcpTools, connected, false, error);
+                    if (m_healthReachable && m_configReady && m_runtimeReady) {
+                        m_chart->setConnectionState(
+                            connected ? QStringLiteral("online")
+                                      : QStringLiteral("checking"),
+                            connected ? QStringLiteral("Agent 已连接")
+                                      : QStringLiteral("MCP 未连接"));
+                    }
+                });
+}
+
+void DemoHost::loadConfig()
+{
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/config"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                qWarning() << "[demo:live] config failed" << status
+                           << object.value(QStringLiteral("error")).toString();
+                return;
+            }
+            const QJsonValue configValue = object.value(QStringLiteral("config"));
+            if (!configValue.isObject()) {
+                m_config.clear();
+                m_configRevision = QVariant();
+                m_chart->setConfigLoaded(false);
+                m_chart->setConfigWarning(QStringLiteral("后台尚未配置模型，请先在设置中心保存配置"));
+                return;
+            }
+            m_config = configValue.toObject().toVariantMap();
+            m_configRevision = object.value(QStringLiteral("revision")).toVariant();
+            m_chart->setSettingsDraft(m_config, m_configRevision);
+            m_chart->setConfigLoaded(true);
+            qInfo() << "[demo:live] config loaded, revision =" << m_configRevision
+                    << "providers =" << m_config.value(QStringLiteral("providers")).toList().size();
+        });
+}
+
+void DemoHost::refreshSessions(bool loadFirst)
+{
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/sessions"), QJsonObject(),
+        [this, loadFirst](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                qWarning() << "[demo:live] sessions failed" << status
+                           << object.value(QStringLiteral("error")).toString();
+                return;
+            }
+            const QVariantList sessions =
+                object.value(QStringLiteral("sessions")).toArray().toVariantList();
+            m_chart->setSessions(sessions);
+            if (!loadFirst)
+                return;
+            if (sessions.isEmpty()) {
+                createSession();
+                return;
+            }
+            QString wanted = m_sessionId;
+            bool found = false;
+            for (const QVariant &item : sessions) {
+                if (item.toMap().value(QStringLiteral("id")).toString() == wanted) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                wanted = sessions.first().toMap().value(QStringLiteral("id")).toString();
+            if (!wanted.isEmpty())
+                loadSession(wanted);
+        });
+}
+
+void DemoHost::createSession()
+{
+    QJsonObject body;
+    body.insert(QStringLiteral("title"), QStringLiteral("新对话"));
+    body.insert(QStringLiteral("model_id"), m_chart->currentModel());
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/sessions"), body,
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    QStringLiteral("新建会话失败：%1")
+                        .arg(object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            m_sessionId = object.value(QStringLiteral("id")).toString();
+            m_chart->clearMessages();
+            m_chart->setCurrentSessionTitle(
+                object.value(QStringLiteral("title")).toString(QStringLiteral("新对话")));
+            m_chart->setPhasePlan(QVariant());
+            m_chart->setTrajectoryEvents(QVariantList());
+            m_chart->focusInput();
+            refreshSessions(false);
+            qInfo() << "[demo:live] session created" << m_sessionId;
+        });
+}
+
+void DemoHost::loadSession(const QString &id)
+{
+    if (id.isEmpty())
+        return;
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/sessions/") + encodedId(id), QJsonObject(),
+        [this, id](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    QStringLiteral("载入会话失败：%1")
+                        .arg(object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            const QJsonObject meta = object.value(QStringLiteral("meta")).toObject();
+            m_sessionId = meta.value(QStringLiteral("id")).toString(id);
+            m_chart->setCurrentSessionTitle(
+                meta.value(QStringLiteral("title")).toString(QStringLiteral("新对话")));
+            const QString modelId = meta.value(QStringLiteral("model_id")).toString();
+            if (!modelId.isEmpty())
+                m_chart->setCurrentModel(modelId);
+            m_chart->setHistory(object.value(QStringLiteral("messages")).toArray().toVariantList());
+            const QJsonValue plan = object.value(QStringLiteral("plan"));
+            m_chart->setPhasePlan(plan.isNull() || plan.isUndefined() ? QVariant()
+                                                                      : plan.toVariant());
+            loadTrajectoryRemote();
+            qInfo() << "[demo:live] session loaded" << m_sessionId
+                    << "messages ="
+                    << object.value(QStringLiteral("messages")).toArray().size();
+        });
+}
+
+void DemoHost::loadTrajectoryRemote()
+{
+    if (m_sessionId.isEmpty()) {
+        m_chart->setTrajectoryEvents(QVariantList());
+        return;
+    }
+    requestJson(
+        QStringLiteral("GET"),
+        QStringLiteral("/sessions/") + encodedId(m_sessionId)
+            + QStringLiteral("/trajectory"),
+        QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                qWarning() << "[demo:live] trajectory failed" << status;
+                return;
+            }
+            m_chart->setTrajectoryEvents(
+                object.value(QStringLiteral("events")).toArray().toVariantList());
+        });
+}
+
+void DemoHost::saveConfig(const QVariantMap &config, const QVariant &revision)
+{
+    m_chart->setSettingsStatus(QStringLiteral("正在写入后台 config.json…"));
+    QJsonObject body;
+    body.insert(QStringLiteral("revision"), QJsonValue::fromVariant(revision));
+    body.insert(QStringLiteral("config"), QJsonObject::fromVariantMap(config));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/config"), body,
+        [this](const QJsonObject &object, int status) {
+            if (status == 409) {
+                m_chart->setSettingsStatus(
+                    QStringLiteral("保存冲突：配置已被其他客户端修改，请刷新后重试"));
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                m_chart->setSettingsStatus(
+                    QStringLiteral("保存失败：%1")
+                        .arg(object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            const QJsonValue saved = object.value(QStringLiteral("config"));
+            if (saved.isObject())
+                m_config = saved.toObject().toVariantMap();
+            m_configRevision = object.value(QStringLiteral("revision")).toVariant();
+            m_chart->setSettingsDraft(m_config, m_configRevision);
+            m_chart->settingsSaved();
+            m_chart->showToast(QStringLiteral("配置已保存到后台"));
+            loadModels();
+            checkConnection(false);
+        });
+}
+
+void DemoHost::testProvider(const QString &providerId)
+{
+    QVariantMap provider;
+    const QVariantList providers =
+        m_config.value(QStringLiteral("providers")).toList();
+    for (const QVariant &item : providers) {
+        if (item.toMap().value(QStringLiteral("id")).toString() == providerId) {
+            provider = item.toMap();
+            break;
+        }
+    }
+    if (provider.isEmpty()) {
+        m_chart->setSettingsStatus(
+            QStringLiteral("未找到 Provider：%1").arg(providerId));
+        return;
+    }
+    m_chart->setProviderBusy(true, false);
+    m_chart->setSettingsStatus(QStringLiteral("正在测试 %1…").arg(providerId));
+    QJsonObject body;
+    body.insert(QStringLiteral("provider"), QJsonObject::fromVariantMap(provider));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/config/providers/test"), body,
+        [this, providerId](const QJsonObject &object, int status) {
+            m_chart->setProviderBusy(false, false);
+            if (status < 200 || status >= 300) {
+                m_chart->setSettingsStatus(
+                    QStringLiteral("%1 测试失败：%2")
+                        .arg(providerId,
+                             object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            m_chart->setSettingsStatus(QStringLiteral("%1 连通正常").arg(providerId));
+        });
+}
+
+void DemoHost::readProviderModels(const QString &providerId)
+{
+    QVariantMap provider;
+    const QVariantList providers =
+        m_config.value(QStringLiteral("providers")).toList();
+    for (const QVariant &item : providers) {
+        if (item.toMap().value(QStringLiteral("id")).toString() == providerId) {
+            provider = item.toMap();
+            break;
+        }
+    }
+    if (provider.isEmpty()) {
+        m_chart->setSettingsStatus(
+            QStringLiteral("未找到 Provider：%1").arg(providerId));
+        return;
+    }
+    m_chart->setProviderBusy(false, true);
+    m_chart->setSettingsStatus(QStringLiteral("正在读取 %1 模型列表…").arg(providerId));
+    QJsonObject body;
+    body.insert(QStringLiteral("provider"), QJsonObject::fromVariantMap(provider));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/config/providers/models"), body,
+        [this, providerId](const QJsonObject &object, int status) {
+            m_chart->setProviderBusy(false, false);
+            if (status < 200 || status >= 300) {
+                m_chart->setSettingsStatus(
+                    QStringLiteral("%1 模型读取失败：%2")
+                        .arg(providerId,
+                             object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            const QVariantList models =
+                object.value(QStringLiteral("models")).toArray().toVariantList();
+            m_chart->setDiscoveredModels(providerId, models);
+            m_chart->setSettingsStatus(
+                QStringLiteral("读取到 %1 个模型").arg(models.size()));
+        });
+}
+
+void DemoHost::requestUsageStats(const QString &requestId, const QString &start,
+                                 const QString &end, const QString &provider,
+                                 const QString &model)
+{
+    QUrlQuery query;
+    if (!start.isEmpty())
+        query.addQueryItem(QStringLiteral("start"), start);
+    if (!end.isEmpty())
+        query.addQueryItem(QStringLiteral("end"), end);
+    if (!provider.isEmpty())
+        query.addQueryItem(QStringLiteral("provider"), provider);
+    if (!model.isEmpty())
+        query.addQueryItem(QStringLiteral("model"), model);
+    const QString path =
+        query.isEmpty()
+            ? QStringLiteral("/usage/stats")
+            : QStringLiteral("/usage/stats?") + query.query(QUrl::FullyEncoded);
+    requestJson(
+        QStringLiteral("GET"), path, QJsonObject(),
+        [this, requestId](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setUsageLoadFailed(
+                    requestId, object.value(QStringLiteral("error")).toString(
+                                   QStringLiteral("用量统计读取失败")));
+                return;
+            }
+            m_chart->setUsageStats(requestId, object.toVariantMap());
+        });
+}
+
+void DemoHost::resolveLiveApproval(const QString &callId, bool approved,
+                                   const QVariantMap &args)
+{
+    if (m_sessionId.isEmpty()) {
+        m_chart->reEnableApproval(callId);
+        m_chart->showToast(QStringLiteral("当前没有可提交审批的会话"));
+        return;
+    }
+    QJsonObject body;
+    body.insert(QStringLiteral("approved"), approved);
+    body.insert(QStringLiteral("args"), QJsonObject::fromVariantMap(args));
+    const QString path =
+        QStringLiteral("/sessions/") + encodedId(m_sessionId)
+        + QStringLiteral("/tool-approvals/") + encodedId(callId);
+    requestJson(
+        QStringLiteral("POST"), path, body,
+        [this, callId, approved](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->reEnableApproval(callId);
+                m_chart->showToast(
+                    QStringLiteral("审批提交失败：%1")
+                        .arg(object.value(QStringLiteral("error")).toString()));
+                return;
+            }
+            m_chart->resolveApproval(callId, approved);
+            m_chart->showToast(approved ? QStringLiteral("已批准，后台继续执行")
+                                        : QStringLiteral("已拒绝该操作"));
+            refreshSessions(false);
+        });
+}
+
+void DemoHost::renameSession(const QString &id)
+{
+    QString initial = m_chart->currentSessionTitle();
+    if (id != m_sessionId || initial.isEmpty()) {
+        requestJson(
+            QStringLiteral("GET"), QStringLiteral("/sessions/") + encodedId(id),
+            QJsonObject(),
+            [this, id](const QJsonObject &object, int status) {
+                QString title;
+                if (status >= 200 && status < 300)
+                    title = object.value(QStringLiteral("meta"))
+                                .toObject()
+                                .value(QStringLiteral("title"))
+                                .toString();
+                bool ok = false;
+                const QString next =
+                    QInputDialog::getText(m_chart, QStringLiteral("重命名会话"),
+                                          QStringLiteral("新标题"), QLineEdit::Normal,
+                                          title, &ok)
+                        .trimmed();
+                if (!ok || next.isEmpty())
+                    return;
+                QJsonObject body;
+                body.insert(QStringLiteral("title"), next);
+                requestJson(
+                    QStringLiteral("PUT"),
+                    QStringLiteral("/sessions/") + encodedId(id)
+                        + QStringLiteral("/rename"),
+                    body,
+                    [this, id, next](const QJsonObject &, int renameStatus) {
+                        if (renameStatus >= 200 && renameStatus < 300) {
+                            if (id == m_sessionId)
+                                m_chart->setCurrentSessionTitle(next);
+                            refreshSessions(false);
+                            m_chart->showToast(QStringLiteral("会话已重命名"));
+                        } else {
+                            m_chart->showToast(QStringLiteral("重命名失败"));
+                        }
+                    });
+            });
+        return;
+    }
+
+    bool ok = false;
+    const QString next =
+        QInputDialog::getText(m_chart, QStringLiteral("重命名会话"),
+                              QStringLiteral("新标题"), QLineEdit::Normal, initial, &ok)
+            .trimmed();
+    if (!ok || next.isEmpty())
+        return;
+    QJsonObject body;
+    body.insert(QStringLiteral("title"), next);
+    requestJson(
+        QStringLiteral("PUT"),
+        QStringLiteral("/sessions/") + encodedId(id) + QStringLiteral("/rename"), body,
+        [this, id, next](const QJsonObject &, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(QStringLiteral("重命名失败"));
+                return;
+            }
+            if (id == m_sessionId)
+                m_chart->setCurrentSessionTitle(next);
+            refreshSessions(false);
+            m_chart->showToast(QStringLiteral("会话已重命名"));
+        });
+}
+
 void DemoHost::wire()
 {
     ChartWidget *c = m_chart;
@@ -502,7 +1175,9 @@ void DemoHost::wire()
                          // 工具参数确认按 webui 口径以 <structured_interaction> 消息回传（真实后端
                          // 识别该标记并回填参数）；demo 没有后端，这里就地给一条回执，
                          // 免得把标记当成普通提问走一遍假流式
-                         if (message.startsWith(QStringLiteral("<structured_interaction>"))) {
+                         if (!m_live
+                             && message.startsWith(
+                                 QStringLiteral("<structured_interaction>"))) {
                              m_chart->appendUserMessage(display.isEmpty()
                                                             ? QStringLiteral("已确认参数")
                                                             : display);
@@ -510,15 +1185,37 @@ void DemoHost::wire()
                                  QStringLiteral("已按确认后的参数下发指令（演示）。"));
                              return;
                          }
-                         startTurn(message, display, attachments);
+                         if (m_live)
+                             startLiveTurn(message, display, attachments);
+                         else
+                             startTurn(message, display, attachments);
                      });
     QObject::connect(c, &ChartWidget::retryRequested, c,
                      [this](const QString &message, const QString &display,
                             const QVariantList &attachments) {
-                         startTurn(message, display, attachments);
+                         if (m_live)
+                             startLiveTurn(message, display, attachments);
+                         else
+                             startTurn(message, display, attachments);
                      });
     QObject::connect(c, &ChartWidget::stopRequested, c, [this] {
         m_stopped = true;
+        if (m_live) {
+            if (!m_sessionId.isEmpty()) {
+                requestJson(QStringLiteral("POST"),
+                            QStringLiteral("/sessions/") + encodedId(m_sessionId)
+                                + QStringLiteral("/cancel"),
+                            QJsonObject(), JsonCallback());
+            }
+            if (m_chatReply)
+                m_chatReply->abort();
+            m_chart->markCurrentStopped();
+            m_chart->finishAssistant();
+            m_chart->setBusy(false);
+            m_chart->showToast(QStringLiteral("已请求停止后台任务"));
+            refreshSessions(false);
+            return;
+        }
         if (m_workflowActive) {
             m_workflowActive = false;
             m_chart->appendWorkflowEvent(
@@ -543,6 +1240,10 @@ void DemoHost::wire()
                                         : QStringLiteral("Skill：%1").arg(id));
     });
     QObject::connect(c, &ChartWidget::connectionCheckRequested, c, [this] {
+        if (m_live) {
+            checkConnection(true);
+            return;
+        }
         m_chart->setConnectionState(QStringLiteral("checking"), QStringLiteral("检测中"));
         QTimer::singleShot(700, m_chart, [this] {
             m_chart->setConnectionState(QStringLiteral("online"), QStringLiteral("服务在线"));
@@ -551,33 +1252,96 @@ void DemoHost::wire()
     });
 
     QObject::connect(c, &ChartWidget::newSessionRequested, c, [this] {
+        if (m_live) {
+            createSession();
+            return;
+        }
         m_chart->clearMessages();
         m_chart->setCurrentSessionTitle(QStringLiteral("新对话"));
         m_chart->focusInput();
         m_chart->showToast(QStringLiteral("已新建会话"));
     });
     QObject::connect(c, &ChartWidget::sessionSelected, c, [this](const QString &id) {
-        loadHistory();
-        m_chart->showToast(QStringLiteral("已载入会话 %1").arg(id));
+        if (m_live) {
+            loadSession(id);
+        } else {
+            loadHistory();
+            m_chart->showToast(QStringLiteral("已载入会话 %1").arg(id));
+        }
     });
     QObject::connect(c, &ChartWidget::sessionRenamed, c, [this](const QString &id) {
-        m_chart->showToast(QStringLiteral("重命名会话 %1（宿主实现）").arg(id));
+        if (m_live)
+            renameSession(id);
+        else
+            m_chart->showToast(QStringLiteral("重命名会话 %1（宿主实现）").arg(id));
     });
     QObject::connect(c, &ChartWidget::sessionCleared, c, [this](const QString &id) {
+        if (m_live) {
+            requestJson(
+                QStringLiteral("POST"),
+                QStringLiteral("/sessions/") + encodedId(id) + QStringLiteral("/clear"),
+                QJsonObject(),
+                [this, id](const QJsonObject &object, int status) {
+                    if (status < 200 || status >= 300) {
+                        m_chart->showToast(
+                            QStringLiteral("清空失败：%1")
+                                .arg(object.value(QStringLiteral("error")).toString()));
+                        return;
+                    }
+                    if (id == m_sessionId) {
+                        m_chart->clearMessages();
+                        m_chart->setPhasePlan(QVariant());
+                    }
+                    m_chart->showToast(QStringLiteral("已清空会话"));
+                    refreshSessions(false);
+                });
+            return;
+        }
         m_chart->clearMessages();
         m_chart->showToast(QStringLiteral("已清空会话 %1").arg(id));
     });
     QObject::connect(c, &ChartWidget::sessionDeleted, c, [this](const QString &id) {
+        if (m_live) {
+            requestJson(
+                QStringLiteral("DELETE"),
+                QStringLiteral("/sessions/") + encodedId(id), QJsonObject(),
+                [this, id](const QJsonObject &object, int status) {
+                    if (status < 200 || status >= 300) {
+                        m_chart->showToast(
+                            QStringLiteral("删除失败：%1")
+                                .arg(object.value(QStringLiteral("error")).toString()));
+                        return;
+                    }
+                    if (id == m_sessionId)
+                        m_sessionId.clear();
+                    m_chart->showToast(QStringLiteral("已删除会话"));
+                    refreshSessions(true);
+                });
+            return;
+        }
         m_chart->showToast(QStringLiteral("已删除会话 %1").arg(id));
+    });
+    QObject::connect(c, &ChartWidget::trajectoryReloadRequested, c, [this] {
+        if (m_live)
+            loadTrajectoryRemote();
+        else
+            loadTrajectory();
     });
 
     QObject::connect(c, &ChartWidget::optionChosen, c,
                      [this](const QString &value, const QString &label) {
-                         startTurn(value, label, QVariantList());
+                         if (m_live)
+                             startLiveTurn(value, label, QVariantList());
+                         else
+                             startTurn(value, label, QVariantList());
                      });
     QObject::connect(c, &ChartWidget::approvalDecided, c,
                      [this](const QString &callId, bool approved, const QVariantMap &args) {
                          qDebug() << "[demo] approval" << callId << approved << args;
+                         if (m_live) {
+                             resolveLiveApproval(callId, approved, args);
+                             return;
+                         }
                          // 真实宿主在这里 POST 审批结果，成功后才改卡片状态
                          QTimer::singleShot(400, m_chart, [this, callId, approved] {
                              m_chart->resolveApproval(callId, approved);
@@ -593,6 +1357,10 @@ void DemoHost::wire()
 
     QObject::connect(c, &ChartWidget::settingsSaveRequested, c,
                      [this](const QVariantMap &config, const QVariant &revision) {
+                         if (m_live) {
+                             saveConfig(config, revision);
+                             return;
+                         }
                          qDebug() << "[demo] save config, revision =" << revision
                                   << "providers =" << config.value("providers").toList().size();
                          m_chart->setSettingsStatus(QStringLiteral("正在写入 config.json…"));
@@ -607,6 +1375,10 @@ void DemoHost::wire()
                          });
                      });
     QObject::connect(c, &ChartWidget::testProviderRequested, c, [this](const QString &providerId) {
+        if (m_live) {
+            testProvider(providerId);
+            return;
+        }
         m_chart->setProviderBusy(true, false);
         m_chart->setSettingsStatus(QStringLiteral("正在测试 %1…").arg(providerId));
         QTimer::singleShot(900, m_chart, [this, providerId] {
@@ -615,6 +1387,10 @@ void DemoHost::wire()
         });
     });
     QObject::connect(c, &ChartWidget::readModelsRequested, c, [this](const QString &providerId) {
+        if (m_live) {
+            readProviderModels(providerId);
+            return;
+        }
         m_chart->setProviderBusy(false, true);
         m_chart->setSettingsStatus(QStringLiteral("正在读取 %1 模型列表…").arg(providerId));
         QTimer::singleShot(900, m_chart, [this, providerId] {
@@ -624,6 +1400,11 @@ void DemoHost::wire()
         });
     });
     QObject::connect(c, &ChartWidget::refreshSkillsRequested, c, [this] {
+        if (m_live) {
+            m_chart->setSettingsSkills(m_liveSkills, true, QString());
+            loadSkills();
+            return;
+        }
         m_chart->setSettingsSkills(QVariantList(), true, QString());
         QTimer::singleShot(600, m_chart, [this] {
             m_chart->setSettingsSkills(demoSettingsSkills(), false, QString());
@@ -631,6 +1412,10 @@ void DemoHost::wire()
         });
     });
     QObject::connect(c, &ChartWidget::refreshMcpRequested, c, [this] {
+        if (m_live) {
+            loadMcp(true);
+            return;
+        }
         m_chart->setMcpTools(QVariantList(), false, true, QString());
         QTimer::singleShot(600, m_chart, [this] {
             m_chart->setMcpTools(demoMcpTools(), true, false, QString());
@@ -641,6 +1426,10 @@ void DemoHost::wire()
     QObject::connect(c, &ChartWidget::usageStatsRequested, c,
                      [this](const QString &requestId, const QString &start, const QString &end,
                             const QString &provider, const QString &model) {
+                         if (m_live) {
+                             requestUsageStats(requestId, start, end, provider, model);
+                             return;
+                         }
                          QTimer::singleShot(150, m_chart,
                                             [this, requestId, start, end, provider, model] {
                              m_chart->setUsageStats(requestId,
@@ -676,6 +1465,10 @@ void DemoHost::attachFiles(const QStringList &paths)
 {
     if (paths.isEmpty())
         return;
+    if (m_live) {
+        uploadFiles(paths);
+        return;
+    }
     QVariantList pending;
     QVariantList done;
     for (const QString &path : paths) {
@@ -711,6 +1504,97 @@ void DemoHost::attachFiles(const QStringList &paths)
     });
 }
 
+void DemoHost::uploadFiles(const QStringList &paths)
+{
+    if (!m_network || paths.isEmpty())
+        return;
+
+    QVariantList merged = m_chart->attachments();
+    QVariantList localItems;
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (!info.isFile())
+            continue;
+        QVariantMap item;
+        item.insert(QStringLiteral("id"),
+                    QStringLiteral("upload-%1").arg(++m_attachSeq));
+        item.insert(QStringLiteral("name"), info.fileName());
+        item.insert(QStringLiteral("path"), info.absoluteFilePath());
+        item.insert(QStringLiteral("size"), info.size());
+        item.insert(QStringLiteral("ext"), info.suffix().toLower());
+        item.insert(QStringLiteral("uploading"), true);
+        localItems.append(item);
+        merged.append(item);
+    }
+    if (localItems.isEmpty())
+        return;
+    m_chart->clearAttachments();
+    m_chart->addAttachments(merged);
+
+    for (const QVariant &entry : localItems) {
+        const QVariantMap item = entry.toMap();
+        const QString id = item.value(QStringLiteral("id")).toString();
+        const QString path = item.value(QStringLiteral("path")).toString();
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            QVariantMap failed = item;
+            failed.insert(QStringLiteral("uploading"), false);
+            failed.insert(QStringLiteral("error"), QStringLiteral("无法读取文件"));
+            QVariantList current = m_chart->attachments();
+            for (int i = 0; i < current.size(); ++i) {
+                QVariantMap existing = current.at(i).toMap();
+                if (existing.value(QStringLiteral("id")).toString() == id) {
+                    current[i] = failed;
+                    break;
+                }
+            }
+            m_chart->clearAttachments();
+            m_chart->addAttachments(current);
+            continue;
+        }
+
+        QUrl url(apiUrl(QStringLiteral("/upload")));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("name"),
+                           item.value(QStringLiteral("name")).toString());
+        url.setQuery(query);
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::ContentTypeHeader,
+                          QStringLiteral("application/octet-stream"));
+        QNetworkReply *reply = m_network->post(request, file.readAll());
+        QObject::connect(reply, &QNetworkReply::finished, m_chart, [this, reply, item, id] {
+            const int status =
+                reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const QByteArray raw = reply->readAll();
+            const QJsonObject object = QJsonDocument::fromJson(raw).object();
+            QVariantMap settled = item;
+            settled.insert(QStringLiteral("uploading"), false);
+            if (reply->error() == QNetworkReply::NoError && status >= 200 && status < 300) {
+                const QVariantMap uploaded = object.toVariantMap();
+                for (auto it = uploaded.constBegin(); it != uploaded.constEnd(); ++it)
+                    settled.insert(it.key(), it.value());
+                settled.insert(QStringLiteral("id"), id);
+            } else {
+                const QString error = object.value(QStringLiteral("error")).toString(
+                    reply->errorString());
+                settled.insert(QStringLiteral("error"), error);
+                m_chart->showToast(QStringLiteral("附件上传失败：%1").arg(error));
+            }
+            QVariantList current = m_chart->attachments();
+            for (int i = 0; i < current.size(); ++i) {
+                QVariantMap existing = current.at(i).toMap();
+                if (existing.value(QStringLiteral("id")).toString() == id) {
+                    current[i] = settled;
+                    break;
+                }
+            }
+            m_chart->clearAttachments();
+            m_chart->addAttachments(current);
+            reply->deleteLater();
+        });
+    }
+}
+
 void DemoHost::startTurn(const QString &message, const QString &display,
                          const QVariantList &attachments)
 {
@@ -730,6 +1614,264 @@ void DemoHost::startTurn(const QString &message, const QString &display,
         QStringLiteral("跳闸电流 1.82kA 超过速断定值，先隔离故障段，再校核转供后的主变负载率。"));
     m_chunks = chunkText(answerText(), 9);
     streamChunk(0);
+}
+
+void DemoHost::startLiveTurn(const QString &message, const QString &display,
+                             const QVariantList &attachments)
+{
+    if (!m_live || !m_network)
+        return;
+    if (m_chart->isBusy()) {
+        m_chart->showToast(QStringLiteral("当前还有请求在处理中"));
+        return;
+    }
+
+    const QString text = message.trimmed();
+    if (runCommand(text, attachments))
+        return;
+
+    const QString shown = display.isEmpty() ? message : display;
+    if (text.isEmpty() && attachments.isEmpty())
+        return;
+
+    if (m_sessionId.isEmpty()) {
+        QJsonObject body;
+        body.insert(QStringLiteral("title"), QStringLiteral("新对话"));
+        body.insert(QStringLiteral("model_id"), m_chart->currentModel());
+        requestJson(
+            QStringLiteral("POST"), QStringLiteral("/sessions"), body,
+            [this, message, display, attachments](const QJsonObject &object, int status) {
+                if (status < 200 || status >= 300) {
+                    m_chart->showToast(
+                        QStringLiteral("创建会话失败，消息未发送：%1")
+                            .arg(object.value(QStringLiteral("error")).toString()));
+                    return;
+                }
+                m_sessionId = object.value(QStringLiteral("id")).toString();
+                m_chart->setCurrentSessionTitle(
+                    object.value(QStringLiteral("title")).toString(QStringLiteral("新对话")));
+                refreshSessions(false);
+                startLiveTurn(message, display, attachments);
+            });
+        return;
+    }
+
+    m_stopped = false;
+    m_streamDone = false;
+    m_streamFailed = false;
+    m_chart->appendUserMessage(shown, attachments);
+    m_chart->clearAttachments();
+    m_chart->setBusy(true);
+    m_chart->startLiveTiming();
+
+    QJsonObject body;
+    body.insert(QStringLiteral("session_id"), m_sessionId);
+    body.insert(QStringLiteral("message"), message);
+    body.insert(QStringLiteral("display_content"),
+                shown == message ? QString() : shown);
+    body.insert(QStringLiteral("interaction_mode"), m_chart->mode());
+    body.insert(QStringLiteral("model_id"), m_chart->currentModel());
+    const QString skill = m_chart->currentSkill();
+    if (!skill.isEmpty()) {
+        QJsonObject selected;
+        selected.insert(QStringLiteral("id"), skill);
+        selected.insert(QStringLiteral("params"), QJsonObject());
+        body.insert(QStringLiteral("selected_skills"), QJsonArray{ selected });
+    } else {
+        body.insert(QStringLiteral("selected_skills"), QJsonArray());
+    }
+    body.insert(QStringLiteral("attachments"), QJsonArray::fromVariantList(attachments));
+
+    QNetworkRequest request(QUrl(apiUrl(QStringLiteral("/chat/stream"))));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    request.setRawHeader("Accept", "text/event-stream");
+    QNetworkReply *reply =
+        m_network->post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    m_chatReply = reply;
+    m_sseBuffer.clear();
+
+    QObject::connect(reply, &QNetworkReply::readyRead, m_chart,
+                     [this, reply, message, display, attachments] {
+                         m_sseBuffer += reply->readAll();
+                         m_sseBuffer.replace("\r\n", "\n");
+                         int boundary;
+                         while ((boundary = m_sseBuffer.indexOf("\n\n")) >= 0) {
+                             const QByteArray frame = m_sseBuffer.left(boundary);
+                             m_sseBuffer.remove(0, boundary + 2);
+                             processSseFrame(frame, message, display, attachments);
+                         }
+                     });
+
+    QObject::connect(
+        reply, &QNetworkReply::finished, m_chart,
+        [this, reply, message, display, attachments] {
+            m_sseBuffer += reply->readAll();
+            m_sseBuffer.replace("\r\n", "\n");
+            int boundary;
+            while ((boundary = m_sseBuffer.indexOf("\n\n")) >= 0) {
+                const QByteArray frame = m_sseBuffer.left(boundary);
+                m_sseBuffer.remove(0, boundary + 2);
+                processSseFrame(frame, message, display, attachments);
+            }
+            const QByteArray tail = m_sseBuffer.trimmed();
+            m_sseBuffer.clear();
+            if (!tail.isEmpty())
+                processSseFrame(tail, message, display, attachments);
+
+            if (!m_streamDone && !m_streamFailed) {
+                if (m_stopped) {
+                    m_chart->markCurrentStopped();
+                    m_chart->finishAssistant();
+                    m_chart->setBusy(false);
+                    refreshSessions(false);
+                } else {
+                    const int status =
+                        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                    const QJsonObject errorObject =
+                        QJsonDocument::fromJson(tail).object();
+                    QString error =
+                        errorObject.value(QStringLiteral("error")).toString();
+                    if (error.isEmpty())
+                        error = reply->errorString();
+                    if (error.isEmpty())
+                        error = QStringLiteral("流式连接已结束（HTTP %1）").arg(status);
+                    failLiveTurn(error, message, display, attachments, status != 400
+                                                                       && status != 404);
+                }
+            }
+            if (m_chatReply == reply)
+                m_chatReply = nullptr;
+            reply->deleteLater();
+        });
+}
+
+void DemoHost::processSseFrame(const QByteArray &frame, const QString &message,
+                               const QString &display, const QVariantList &attachments)
+{
+    if (frame.trimmed().isEmpty())
+        return;
+    QString type = QStringLiteral("message");
+    QList<QByteArray> dataLines;
+    const QList<QByteArray> lines = frame.split('\n');
+    for (const QByteArray &rawLine : lines) {
+        const QByteArray line = rawLine.trimmed();
+        if (line.startsWith("event:"))
+            type = QString::fromUtf8(line.mid(6)).trimmed();
+        else if (line.startsWith("data:"))
+            dataLines.append(line.mid(5).trimmed());
+    }
+    if (dataLines.isEmpty())
+        return;
+    QByteArray payload;
+    for (int i = 0; i < dataLines.size(); ++i) {
+        if (i > 0)
+            payload.append('\n');
+        payload.append(dataLines.at(i));
+    }
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &parseError);
+    if (!document.isObject()) {
+        qWarning() << "[demo:live] invalid SSE payload" << type << parseError.errorString();
+        return;
+    }
+    const QVariantMap event = document.object().toVariantMap();
+
+    if (type == QLatin1String("text_chunk")) {
+        m_chart->appendAssistantText(
+            event.value(QStringLiteral("delta")).toString());
+    } else if (type == QLatin1String("reasoning_chunk")) {
+        m_chart->appendReasoning(
+            event.value(QStringLiteral("delta")).toString());
+    } else if (type == QLatin1String("plan_updated")) {
+        m_chart->setPhasePlan(event.value(QStringLiteral("plan")));
+    } else if (type == QLatin1String("tool_call")) {
+        const QString name = event.value(QStringLiteral("name")).toString();
+        if (name != QLatin1String("ask_user_question")) {
+            m_chart->appendToolCall(
+                event.value(QStringLiteral("id")).toString(), name,
+                event.value(QStringLiteral("args")));
+        }
+    } else if (type == QLatin1String("tool_result")) {
+        const QString name = event.value(QStringLiteral("name")).toString();
+        if (name != QLatin1String("ask_user_question")) {
+            m_chart->appendToolResult(
+                event.value(QStringLiteral("call_id")).toString(), name,
+                event.value(QStringLiteral("result")).toString());
+        }
+    } else if (type == QLatin1String("options_offered")) {
+        m_chart->showChoice(event);
+    } else if (type == QLatin1String("tool_approval_required")) {
+        m_chart->appendApproval(event);
+    } else if (type == QLatin1String("notice")) {
+        QString notice = event.value(QStringLiteral("message")).toString();
+        if (notice.isEmpty())
+            notice = QStringLiteral("附件处理提示");
+        m_chart->showToast(notice);
+    } else if (type == QLatin1String("token_usage")) {
+        m_chart->setTokenUsage(
+            event.value(QStringLiteral("tokens")).toLongLong(),
+            event.value(QStringLiteral("tokens_input")).toLongLong(),
+            event.value(QStringLiteral("tokens_output")).toLongLong(),
+            event.value(QStringLiteral("tokens_estimated")).toBool());
+    } else if (type == QLatin1String("workflow_started")
+               || type == QLatin1String("workflow_step")
+               || type == QLatin1String("workflow_done")) {
+        QVariantMap workflow = event;
+        workflow.insert(QStringLiteral("type"), type);
+        m_chart->appendWorkflowEvent(workflow);
+    } else if (type == QLatin1String("error")) {
+        QString error = event.value(QStringLiteral("message")).toString();
+        if (error.isEmpty())
+            error = QStringLiteral("后台返回错误");
+        const bool retryable =
+            event.contains(QStringLiteral("retryable"))
+                ? event.value(QStringLiteral("retryable")).toBool()
+                : true;
+        failLiveTurn(error, message, display, attachments,
+                     retryable);
+    } else if (type == QLatin1String("done")) {
+        if (m_streamDone || m_streamFailed)
+            return;
+        m_streamDone = true;
+        m_chart->finishAssistant();
+
+        QVariantMap usage;
+        usage.insert(QStringLiteral("total"), event.value(QStringLiteral("tokens")));
+        usage.insert(QStringLiteral("input"), event.value(QStringLiteral("tokens_input")));
+        usage.insert(QStringLiteral("output"), event.value(QStringLiteral("tokens_output")));
+        usage.insert(QStringLiteral("estimated"),
+                     event.value(QStringLiteral("tokens_estimated")));
+        usage.insert(QStringLiteral("cache_read"),
+                     event.value(QStringLiteral("cache_read_tokens")));
+        usage.insert(QStringLiteral("reasoning"),
+                     event.value(QStringLiteral("reasoning_tokens")));
+        usage.insert(QStringLiteral("model"), event.value(QStringLiteral("model")));
+        m_chart->setTokenUsageDetail(usage);
+
+        QVariantMap timing;
+        timing.insert(QStringLiteral("elapsed"), event.value(QStringLiteral("elapsed_ms")));
+        timing.insert(QStringLiteral("think"), event.value(QStringLiteral("think_ms")));
+        timing.insert(QStringLiteral("ttft"), event.value(QStringLiteral("ttft_ms")));
+        timing.insert(QStringLiteral("tps"), event.value(QStringLiteral("tps")));
+        m_chart->setTurnTiming(timing);
+        m_chart->setBusy(false);
+        refreshSessions(false);
+    }
+}
+
+void DemoHost::failLiveTurn(const QString &error, const QString &message,
+                            const QString &display, const QVariantList &attachments,
+                            bool retryable)
+{
+    if (m_streamDone || m_streamFailed)
+        return;
+    m_streamFailed = true;
+    m_chart->finishAssistant();
+    m_chart->setBusy(false);
+    m_chart->appendFailure(error, retryable, message, display, attachments);
+    if (m_chatReply)
+        m_chatReply->abort();
+    refreshSessions(false);
 }
 
 void DemoHost::streamChunk(int index)
@@ -794,11 +1936,35 @@ bool DemoHost::runCommand(const QString &text, const QVariantList &attachments)
     const QString rest = space < 0 ? QString() : text.mid(space + 1).trimmed();
 
     if (name == QLatin1String("/history")) {
-        loadHistory();
+        if (m_live) {
+            if (!m_sessionId.isEmpty())
+                loadSession(m_sessionId);
+        } else {
+            loadHistory();
+        }
         return true;
     }
     if (name == QLatin1String("/clear")) {
-        m_chart->clearMessages();
+        if (m_live && !m_sessionId.isEmpty()) {
+            requestJson(
+                QStringLiteral("POST"),
+                QStringLiteral("/sessions/") + encodedId(m_sessionId)
+                    + QStringLiteral("/clear"),
+                QJsonObject(),
+                [this](const QJsonObject &object, int status) {
+                    if (status < 200 || status >= 300) {
+                        m_chart->showToast(
+                            QStringLiteral("清空失败：%1")
+                                .arg(object.value(QStringLiteral("error")).toString()));
+                        return;
+                    }
+                    m_chart->clearMessages();
+                    m_chart->setPhasePlan(QVariant());
+                    refreshSessions(false);
+                });
+        } else {
+            m_chart->clearMessages();
+        }
         return true;
     }
     if (name == QLatin1String("/toast")) {
@@ -807,6 +1973,18 @@ bool DemoHost::runCommand(const QString &text, const QVariantList &attachments)
     }
     if (name == QLatin1String("/settings")) {
         m_chart->openSettings(rest);
+        return true;
+    }
+
+    if (m_live) {
+        if (name == QLatin1String("/fail") || name == QLatin1String("/approve")
+            || name == QLatin1String("/workflow") || name == QLatin1String("/options")
+            || name == QLatin1String("/params")) {
+            m_chart->showToast(
+                QStringLiteral("live 模式不执行假数据指令 %1").arg(name));
+        } else {
+            m_chart->showToast(QStringLiteral("未知指令：%1").arg(name));
+        }
         return true;
     }
 
@@ -938,6 +2116,8 @@ int main(int argc, char *argv[])
 {
     QString shotPath;
     bool emptyShot = false;
+    bool live = false;
+    QString apiBase = QStringLiteral("http://127.0.0.1:1231");
     QString theme;
     QString tab;
     QStringList rest;
@@ -945,6 +2125,10 @@ int main(int argc, char *argv[])
         const QString arg = QString::fromLocal8Bit(argv[i]);
         if (arg == QLatin1String("--shot") && i + 1 < argc) {
             shotPath = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--live")) {
+            live = true;
+        } else if (arg == QLatin1String("--api") && i + 1 < argc) {
+            apiBase = QString::fromLocal8Bit(argv[++i]);
         } else if (arg == QLatin1String("--theme") && i + 1 < argc) {
             theme = QString::fromLocal8Bit(argv[++i]);
         } else if (arg == QLatin1String("--tab") && i + 1 < argc) {
@@ -955,8 +2139,8 @@ int main(int argc, char *argv[])
             rest << arg;
         }
     }
-    // 截图模式用 offscreen 平台插件，避免弹窗口
-    if (!shotPath.isEmpty())
+    // 截图模式默认用 offscreen 平台插件；外部显式指定平台时沿用（Windows 平台才能渲染文字）
+    if (!shotPath.isEmpty() && qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
         qputenv("QT_QPA_PLATFORM", "offscreen");
 
     QApplication app(argc, argv);
@@ -969,16 +2153,24 @@ int main(int argc, char *argv[])
         chart->setTheme(theme); // dark / silver / blue
 
     // 宿主对象与界面同生命周期，进程退出即释放
-    auto *host = new DemoHost(chart);
-    host->populate();
-    if (!emptyShot)
-        host->loadHistory();
+    auto *host = new DemoHost(chart, live, apiBase);
+    if (live) {
+        chart->setConnectionState(QStringLiteral("checking"), QStringLiteral("连接后台…"));
+        chart->setConfigLoaded(false);
+        chart->setMode(QStringLiteral("auto"));
+        chart->setVoiceEnabled(true);
+    } else {
+        host->populate();
+        if (!emptyShot)
+            host->loadHistory();
+    }
     // 初始数据推完之后才接信号：否则 populate 的 setter（如 setMode）会触发处理器里的
     // showToast，启动即弹一条提示压住阶段计划面板，干扰离屏对照图。
     // 必须早于下面的 Tab 块：openSettings("usage") 会同步发 usageStatsRequested。
     host->wire();
     if (tab == QLatin1String("traj")) {
-        host->loadTrajectory();
+        if (!live)
+            host->loadTrajectory();
         chart->setViewTab(QStringLiteral("traj"));
     } else if (tab == QLatin1String("usage")) {
         // 打开设置中心的「用量」页（与 webui 的第四个 Tab 对照）
@@ -1022,10 +2214,26 @@ int main(int argc, char *argv[])
                 QApplication::sendEvent(range, &release);
             }
         });
+    } else if (tab == QLatin1String("usage-list")) {
+        // 用量页 + 下拉：核对 .usage-listbox 是否相对 .usage-filter 容器（含标签）左对齐
+        chart->openSettings(QStringLiteral("usage"));
+        QTimer::singleShot(500, chart, [chart] {
+            if (QWidget *select = chart->findChild<QWidget *>(QStringLiteral("usageModel"))) {
+                const QPoint center(select->width() / 2, select->height() / 2);
+                QMouseEvent press(QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(select, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, center, Qt::LeftButton, Qt::NoButton,
+                                    Qt::NoModifier);
+                QApplication::sendEvent(select, &release);
+            }
+        });
     }
 
     chart->show();
     chart->focusInput();
+    if (live)
+        QTimer::singleShot(0, chart, [host] { host->bootstrap(); });
 
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(700, &app, [chart, shotPath, tab, theme] {
@@ -1033,7 +2241,8 @@ int main(int argc, char *argv[])
                 chart->setTheme(theme); // 显示之后再套一次，确保离屏截图用的是目标皮肤
             // 用量页在设置对话框里，截图目标跟着切换
             QWidget *target = chart;
-            if (tab == QLatin1String("usage") || tab == QLatin1String("usage-cal")) {
+            if (tab == QLatin1String("usage") || tab == QLatin1String("usage-cal")
+                || tab == QLatin1String("usage-list")) {
                 if (QWidget *dialog =
                         chart->findChild<QWidget *>(QStringLiteral("settingsDialog"))) {
                     // 面板比对话框高，截全图时先拉高，把三图与明细表一起拍进来
@@ -1050,6 +2259,12 @@ int main(int argc, char *argv[])
                 // 日期浮层是独立控件，单独抓它自己
                 if (QWidget *popup =
                         chart->findChild<QWidget *>(QStringLiteral("usageRangePopup")))
+                    target = popup;
+            }
+            if (tab == QLatin1String("usage-list")) {
+                // 用量下拉是独立 Qt::Popup 窗口，单独抓它自己
+                if (QWidget *popup =
+                        chart->findChild<QWidget *>(QStringLiteral("usageListPopup")))
                     target = popup;
             }
             if (tab == QLatin1String("theme")) {
