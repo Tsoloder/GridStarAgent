@@ -72,12 +72,25 @@ def _run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
 
 
 def collect_source_files() -> list[Path]:
-    """收集需要归档的源码文件：git 跟踪文件 + 未被忽略的未跟踪文件。"""
-    res = _run(["git", "ls-files", "--cached", "--others", "--exclude-standard"])
+    """收集需要归档的源码文件：git 跟踪文件 + 未被忽略的未跟踪文件。
+
+    用 ``-z`` 取 NUL 分隔的原始路径：git 默认会把非 ASCII 路径做 C 引用
+    （``"_qt_webui_diff/report/Qt\\344\\270\\216..."``），直接拼路径会让这些文件在
+    ``is_file()`` 处被静默丢弃——本仓库有中文命名的文档。
+    """
+    res = _run(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+               encoding="utf-8")
     if res.returncode != 0:
         raise SystemExit(f"git ls-files 失败: {res.stderr.strip()}")
-    files = [ROOT / line.strip() for line in res.stdout.splitlines() if line.strip()]
-    return [f for f in files if f.is_file()]
+    files = [ROOT / line for line in res.stdout.split("\0") if line]
+    present = [f for f in files if f.is_file()]
+    if len(present) != len(files):
+        # 已跟踪但在磁盘上不存在（例如已暂存删除）时给出提示，避免再次静默丢文件
+        gone = [f for f in files if not f.is_file()]
+        print(f"== 警告: {len(gone)} 个清单文件在磁盘上不存在，已跳过 ==")
+        for f in gone[:10]:
+            print("   " + f.relative_to(ROOT).as_posix())
+    return present
 
 
 def copy_sources(stage: Path) -> int:
