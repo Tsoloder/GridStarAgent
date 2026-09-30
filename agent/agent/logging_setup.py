@@ -1,23 +1,24 @@
 import logging
 import os
 import sys
-import tempfile
 import weakref
 from pathlib import Path
 
-from paths import DATA_DIR, LOG_DIR
+from paths import DATA_DIR, LOG_DIR, startup_notices
 
 LOG_PATH = LOG_DIR / "agent.log"
-# 数据目录不可写时的备选落点：仅当用户自己设了 CLINELIKECHAT_DATA_DIR，
-# 而该目录又写不进去时才启用，避免日志和会话历史被拆到两个数据根下。
-FALLBACK_LOG_PATH = Path(tempfile.gettempdir()) / "ClineLikeChat" / "logs" / "agent.log"
+# 数据目录不可写时只降级到控制台，不换目录落盘：日志与会话历史必须同源，
+# 拆到两个数据根下会让「日志里有的会话，磁盘上找不到」变成新的排查陷阱。
+# 目录不可写本身由 data_dir_guard 当场修权限或提权重启处理。
 
 FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
 
-def _has_own_data_dir() -> bool:
-    """用户是否显式指定了数据目录（决定要不要启用 TEMP 备选点）。"""
-    return bool(os.environ.get("CLINELIKECHAT_DATA_DIR", "").strip())
+def _pinned_by_parent() -> bool:
+    """数据目录是否由提权重启的父进程钉住（见 paths 的 PIN 说明）。"""
+    from data_dir_guard import PIN_ENV
+
+    return bool(os.environ.get(PIN_ENV, "").strip())
 
 
 def _already_configured() -> bool:
@@ -40,14 +41,6 @@ def _already_configured() -> bool:
     return False
 
 
-def _candidate_log_paths():
-    """按优先级返回候选日志文件。显式指定数据目录时允许回落到 TEMP。"""
-    candidates = [LOG_PATH]
-    if _has_own_data_dir():
-        candidates.append(FALLBACK_LOG_PATH)
-    return candidates
-
-
 def _write_user_notice(message: str) -> None:
     try:
         sys.stderr.write(message + "\n")
@@ -59,36 +52,35 @@ def _write_user_notice(message: str) -> None:
 def setup_logging():
     """配置日志。
 
-    落盘失败不能让进程起不来：内网机器上 %APPDATA% 可能是只读的、被组策略
-    重定向的，或者上一次是以别的账号运行而留下的、当前账号写不进去的目录。
-    早期实现直接把 FileHandler 的异常抛出去，import app 阶段就整个崩掉，
-    报错落在 logging 内部，看到的人很难判断真正原因。
+    落盘失败不能让进程起不来：早期实现直接把 FileHandler 的异常抛出去，import
+    app 阶段就整个崩掉，报错落在 logging 内部，看到的人很难判断真正原因。
+    权限本身由 paths / data_dir_guard 负责修，这里只保证「修不成也要有日志出口」。
     """
     if _already_configured():
         return
 
     handlers = []
-    for candidate in _candidate_log_paths():
-        try:
-            candidate.parent.mkdir(parents=True, exist_ok=True)
-            handler = logging.FileHandler(str(candidate), encoding="utf-8")
-        except OSError as exc:
-            _write_user_notice("[logging] 无法写入日志文件 %s: %s" % (candidate, exc))
-            continue
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(str(LOG_PATH), encoding="utf-8")
+    except OSError as exc:
+        _write_user_notice("[logging] 无法写入日志文件 %s: %s" % (LOG_PATH, exc))
+    else:
         handlers.append(handler)
-        break
 
     if handlers:
         # 文件日志成功时同时挂一个 stderr handler：内网多为一台机器上人手一个
         # 控制台窗口，只看文件会漏掉当场就能看见的信息。
         handlers.append(logging.StreamHandler())
     else:
-        _write_user_notice(
-            "[logging] 日志文件不可写，仅输出到控制台。"
-            "可设置 CLINELIKECHAT_DATA_DIR 指向可写目录，例如 D:\\GridStarData"
-        )
+        _write_user_notice("[logging] 日志只输出到控制台，数据目录: %s" % DATA_DIR)
+
     logging.basicConfig(level=logging.INFO, format=FORMAT, handlers=handlers)
+
+    logger = logging.getLogger(__name__)
     if handlers and isinstance(handlers[0], logging.FileHandler):
-        logging.getLogger(__name__).warning(
-            "日志落盘位置: %s (数据目录 %s)", handlers[0].baseFilename, DATA_DIR
-        )
+        logger.warning("日志落盘位置: %s (数据目录 %s)", handlers[0].baseFilename, DATA_DIR)
+    if _pinned_by_parent():
+        logger.warning("数据目录由提权重启传入并钉住: %s", DATA_DIR)
+    for notice in startup_notices():
+        logger.warning("%s", notice)

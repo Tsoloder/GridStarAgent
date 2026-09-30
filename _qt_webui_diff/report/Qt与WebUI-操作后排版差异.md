@@ -104,9 +104,11 @@
 
 ```powershell
 # 三个沙箱后端（数据隔离，不动用户数据）
-$env:CLINELIKECHAT_DATA_DIR='...\_qt_webui_diff\sandbox\data'      ; python app.py --port 1232   # 16 条，含已作答询问
-$env:CLINELIKECHAT_DATA_DIR='...\_qt_webui_diff\sandbox\data-ask'  ; python app.py --port 1233   # 截断到停在未作答询问
-$env:CLINELIKECHAT_DATA_DIR='...\_qt_webui_diff\sandbox\data-noask'; python app.py --port 1234   # 无询问
+# GRIDSTAR_DATA_DIR_PINNED 是提权重启时钉住数据目录用的内部变量，
+# 数据目录本身固定为 %USERPROFILE%\AppData\Roaming\.gridstar，不对使用者开放自定义。
+$env:GRIDSTAR_DATA_DIR_PINNED='...\_qt_webui_diff\sandbox\data'      ; python app.py --port 1232   # 16 条，含已作答询问
+$env:GRIDSTAR_DATA_DIR_PINNED='...\_qt_webui_diff\sandbox\data-ask'  ; python app.py --port 1233   # 截断到停在未作答询问
+$env:GRIDSTAR_DATA_DIR_PINNED='...\_qt_webui_diff\sandbox\data-noask'; python app.py --port 1234   # 无询问
 
 # Qt 侧
 probe2.exe --live --api http://127.0.0.1:1232 --dump dumps\base.tsv            # 全部具名子控件几何
@@ -192,9 +194,9 @@ python _qt_webui_diff\webui_ask_probe.py http://127.0.0.1:1233/ui/ _qt_webui_dif
 # 构建（库 + demo + 测试）
 QtChartWidget\build.bat
 
-# 沙箱后端（数据隔离）
-$env:CLINELIKECHAT_DATA_DIR='...\_qt_webui_diff\sandbox\data'     ; python app.py --port 1232  # 16 条，含已作答询问
-$env:CLINELIKECHAT_DATA_DIR='...\_qt_webui_diff\sandbox\data-ask' ; python app.py --port 1233  # 末轮停在未作答询问
+# 沙箱后端（数据隔离；GRIDSTAR_DATA_DIR_PINNED 为提权钉目录用的内部变量）
+$env:GRIDSTAR_DATA_DIR_PINNED='...\_qt_webui_diff\sandbox\data'     ; python app.py --port 1232  # 16 条，含已作答询问
+$env:GRIDSTAR_DATA_DIR_PINNED='...\_qt_webui_diff\sandbox\data-ask' ; python app.py --port 1233  # 末轮停在未作答询问
 
 # 字体族 / 几何 / 子窗口（探针支持 --fonts、--dump、--open session|settings|usage|usagecal|rail|choice|toast）
 $env:QT_QPA_PLATFORM='windows'; $env:QT_QPA_FONTDIR='C:\Windows\Fonts'

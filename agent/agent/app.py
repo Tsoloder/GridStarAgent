@@ -53,9 +53,10 @@ from llm_client.registry import ProviderRegistry, default_adapter_registry
 from llm_client.runtime import ModelCatalog as RuntimeCatalog, ModelRuntime
 from llm_client.types import ModelConfig as RuntimeModelConfig
 from llm_client.types import ProviderConfig as RuntimeProviderConfig
+from data_dir_guard import guard_data_dir
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
-from paths import UPLOADS_DIR
+from paths import DATA_DIR, UPLOADS_DIR, ensure_subdirs
 from session import (
     InvalidSessionId,
     clear_session,
@@ -73,8 +74,41 @@ from skill_runtime import SkillError, SkillRegistry, tool_is_allowed
 from usage_stats import collect_usage
 from workflow_runner import run_workflow
 
+
+def _ensure_data_dir(argv=None) -> Optional[dict]:
+    """数据目录守卫：实测可写性，不可写就地修权限，修不动才提权重启。
+
+    放在 setup_logging 之前：日志文件也在数据目录里，先修好目录才谈得上落盘。
+    需要提权重启时本进程结束，由提权实例继续（目标目录已钉给它，不会跑到提权
+    账号的用户目录下）。
+    """
+    result = guard_data_dir(DATA_DIR, argv)
+    for step in result.get("repair_steps", []):
+        sys.stderr.write("[data-dir] %s\n" % step)
+    if result.get("message"):
+        sys.stderr.write("[data-dir] %s\n" % result["message"])
+    # 子目录在 import 阶段建过一次，那时权限可能还没修好，这里补建
+    missing = ensure_subdirs()
+    if missing:
+        for item in missing:
+            sys.stderr.write("[data-dir] 子目录仍不可用: %s\n" % item)
+        result["error"] = result.get("error") or ("子目录不可用: %s" % "; ".join(missing))
+        result["writable"] = False
+    sys.stderr.flush()
+    if result.get("needs_relaunch"):
+        raise SystemExit(0)
+    return result
+
+
+_data_dir_state = _ensure_data_dir()
+
 setup_logging()
 logger = logging.getLogger(__name__)
+if _data_dir_state.get("repair_attempted"):
+    if _data_dir_state.get("writable"):
+        logger.warning("数据目录权限已自动修复: %s", DATA_DIR)
+    else:
+        logger.error("数据目录仍不可写: %s (%s)", DATA_DIR, _data_dir_state.get("error", ""))
 
 current_config: Optional[ApiConfig] = load_config()
 ctx_mgr = ContextManager()
@@ -293,12 +327,7 @@ class NoStoreStaticFiles(StaticFiles):
 
 
 app.mount("/ui", NoStoreStaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
-try:
-    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
-except RuntimeError as exc:
-    # StaticFiles 在目录不存在时直接抛 RuntimeError，会把整个应用挡在启动之外。
-    # 数据目录不可写时 uploads 建不出来，宁可少一个静态挂载也要让服务起得来。
-    logger.error("uploads 静态目录挂载失败，附件下载不可用: %s", exc)
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR), check_dir=False), name="uploads")
 
 
 @app.post("/upload")
@@ -323,6 +352,8 @@ async def upload_file(request: Request, name: str = ""):
     )
     target = UPLOADS_DIR / stored_name
     try:
+        # 目录可能因为启动时权限不可写而没建出来，这里补建再写
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     except OSError as exc:
         logger.error("upload write failed: %s", exc)
@@ -348,6 +379,11 @@ async def health():
         "catalog_generation": snapshot.generation if snapshot is not None else 0,
         "catalog_models": len(snapshot.models) if snapshot is not None else 0,
         "catalog_errors": dict(snapshot.errors) if snapshot is not None else {},
+        # 数据目录状态：起始不可写时前端与运维能一眼看到修没修好
+        "data_dir": _data_dir_state.get("directory", str(DATA_DIR)),
+        "data_dir_writable": bool(_data_dir_state.get("writable")),
+        "data_dir_repair_attempted": bool(_data_dir_state.get("repair_attempted")),
+        "data_dir_error": _data_dir_state.get("error", ""),
     }
 
 

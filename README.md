@@ -148,21 +148,41 @@ python app.py --host 127.0.0.1 --port 1231
 
 ## 数据目录
 
-会话、配置、日志、上传文件统一放在用户数据目录，可用环境变量 `CLINELIKECHAT_DATA_DIR` 覆盖：
+会话、配置、日志、上传文件统一放在当前用户数据目录下的 `.gridstar`，位置固定，不提供自定义开关：
 
-| 平台 | 默认位置 |
+| 平台 | 位置 |
 | --- | --- |
-| Windows | `%APPDATA%\ClineLikeChat` |
-| Linux / macOS | `~/.local/share/ClineLikeChat` |
+| Windows | `%USERPROFILE%\AppData\Roaming\.gridstar`（即 `%APPDATA%\.gridstar`） |
+| Linux / macOS | `~/.local/share/.gridstar` |
 
 ```text
-ClineLikeChat/
+.gridstar/
 ├── config.json               模型与 Provider 配置
 ├── tool_parameter_memory.json 工具参数默认值的确认记忆
 ├── sessions/<uuid>/          messages.jsonl、trajectory.jsonl、meta
 ├── skills/                   运行期可写技能目录
 ├── uploads/                  附件原文件
 └── logs/                     运行日志
+```
+
+旧版本使用 `ClineLikeChat` 目录名，首次启动时若新目录不存在会自动改名为 `.gridstar`，已有配置与会话随之保留；两边同时存在时只用新目录并记一条警告，不做合并。
+
+### 目录写不进去时
+
+以另一个账号运行过、或目录属主是别的账号（SYSTEM、早先的服务账号）时，当前账号可能没有写权限。启动流程按顺序处理，不换目录写：
+
+1. 当场实测可写性（建一个临时文件再删掉，不看 ACL 猜）；
+2. 不可写就在当前进程内修：必要时启用 `SeTakeOwnership`/`SeRestore` 令牌特权，先 `icacls` 授权给当前账号，不行再 `takeown` 接管属主后重试。目录属主通常就是当前账号，这一步多半直接成功，不重启进程、不弹 UAC；
+3. 当场修不动且当前进程未提权，用 UAC 提权重启一次，并把数据目录钉给新进程。**提权后 `%APPDATA%` 会指向提权账号的用户目录，钉住目标目录才能让数据仍然落在这个位置**；
+4. 修不动又无法提权时明确失败并打印人工命令，不会静默换目录。
+
+`GET /health` 返回 `data_dir` / `data_dir_writable` / `data_dir_repair_attempted` / `data_dir_error`，可直接判断权限状态。
+
+内网机器上先跑自检：
+
+```cmd
+python check_data_dir.py            :: 只看状态
+python check_data_dir.py --repair   :: 顺手执行一次修权限
 ```
 
 ---
