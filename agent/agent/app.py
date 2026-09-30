@@ -97,6 +97,7 @@ def _runtime_provider_config(provider) -> RuntimeProviderConfig:
         api_key=provider.api_key,
         api_key_env=provider.api_key_env,
         headers=dict(provider.headers),
+        ssl_verify=provider.ssl_verify,
         enabled=provider.enabled,
     )
 
@@ -284,7 +285,12 @@ class NoStoreStaticFiles(StaticFiles):
 
 
 app.mount("/ui", NoStoreStaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+try:
+    app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+except RuntimeError as exc:
+    # StaticFiles 在目录不存在时直接抛 RuntimeError，会把整个应用挡在启动之外。
+    # 数据目录不可写时 uploads 建不出来，宁可少一个静态挂载也要让服务起得来。
+    logger.error("uploads 静态目录挂载失败，附件下载不可用: %s", exc)
 
 
 @app.post("/upload")
