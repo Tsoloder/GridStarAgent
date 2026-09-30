@@ -1113,9 +1113,30 @@ function extractPhase(value) {
 }
 // 计划是否已跑完：所有阶段都进入终态。计划窗口只服务执行过程，跑完即收起
 const PHASE_DONE_STATUS = ["done", "succeeded", "completed", "skipped"];
+const PHASE_RUN_STATUS = ["active", "running", "in_progress"];
+const PHASE_FAIL_STATUS = ["failed", "error", "cancelled"];
 function planComplete(plan) {
   const phases = plan && plan.phases;
   return Boolean(phases && phases.length) && phases.every(item => PHASE_DONE_STATUS.includes(item && item.status));
+}
+// 标题后的统计串：已完成 / 进行中 / 待处理 / 失败 / 跳过，只列非零项
+function phaseStats(phases) {
+  const counts = {ok: 0, run: 0, wait: 0, fail: 0, skip: 0};
+  phases.forEach(item => {
+    const st = (item && item.status) || "pending";
+    if (st === "skipped") counts.skip++;
+    else if (PHASE_DONE_STATUS.includes(st)) counts.ok++;
+    else if (PHASE_RUN_STATUS.includes(st)) counts.run++;
+    else if (PHASE_FAIL_STATUS.includes(st)) counts.fail++;
+    else counts.wait++;
+  });
+  const segs = [];
+  if (counts.ok) segs.push(`<b class="st-ok">${counts.ok} 已完成</b>`);
+  if (counts.run) segs.push(`<b class="st-run">${counts.run} 进行中</b>`);
+  if (counts.wait) segs.push(`<b class="st-wait">${counts.wait} 待处理</b>`);
+  if (counts.fail) segs.push(`<b class="st-fail">${counts.fail} 失败</b>`);
+  if (counts.skip) segs.push(`<b class="st-skip">${counts.skip} 跳过</b>`);
+  return segs.join(" · ") || "0 已完成";
 }
 function renderPhase(value) {
   const phase = extractPhase(value) || value;
@@ -1125,7 +1146,7 @@ function renderPhase(value) {
   const completed = phase.phases.filter(item => PHASE_DONE_STATUS.includes(item.status)).length;
   const expanded = el.phasePanel.classList.contains("expanded");
   const pct = phase.phases.length ? Math.round(completed / phase.phases.length * 100) : 0;
-  el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
+  el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${phaseStats(phase.phases)}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
   const head = $(".phase-head", el.phasePanel);
   head.addEventListener("keydown", event => {
     if (event.key !== "Enter" && event.key !== " ") return;
