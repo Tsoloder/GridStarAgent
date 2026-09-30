@@ -7,3 +7,4 @@ pypdf>=4,<7
 openpyxl>=3.1
 requests>=2.31
 pywin32>=306; platform_system == "Windows"
+pip-system-certs>=4.0; platform_system == "Windows"

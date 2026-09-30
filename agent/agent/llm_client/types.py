@@ -1,6 +1,12 @@
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal, Optional, Union
 
+# ssl_verify 支持三种值：
+#   True  — 使用系统默认 CA 证书验证（默认行为）
+#   False — 完全跳过 SSL 证书验证（仅内网测试用）
+#   str   — 自定义 CA 证书文件路径（内网自签名证书推荐）
+SSLVerify = Union[bool, str]
+
 
 @dataclass(frozen=True)
 class ModelCapabilities:
@@ -21,7 +27,7 @@ class ProviderConfig:
     headers: dict[str, str] = field(default_factory=dict)
     timeout: float = 120.0
     connect_timeout: float = 30.0
-    ssl_verify: bool = True
+    ssl_verify: SSLVerify = True
     enabled: bool = True
 
 

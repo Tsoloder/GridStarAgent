@@ -10,6 +10,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# 在 Windows 上让 Python 使用系统证书存储，这样用户在系统中安装的内网 CA
+# 证书会被 httpx/requests/urllib 自动信任。非 Windows 或未安装时静默跳过。
+if sys.platform == "win32":
+    try:
+        import pip_system_certs  # noqa: F401
+    except ImportError:
+        pass
+
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
