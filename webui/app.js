@@ -73,6 +73,15 @@ function showToast(message) {
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.toast.classList.add("hidden"), 5000);
 }
+// 会话存储异常只提示一次：每次刷新都弹同一句话会盖住别的重要提示
+const warnedStorageIssues = new Set();
+function warnStorageIssues(issues) {
+  (issues || []).forEach(issue => {
+    if (!issue || warnedStorageIssues.has(issue)) return;
+    warnedStorageIssues.add(issue);
+    showToast("会话存储异常：" + issue);
+  });
+}
 // 气泡时间：HH:MM:SS；无效/空值返回空串（老会话没有 ts 时不显示）
 function formatClock(value) {
   if (!value) return "";
@@ -1516,6 +1525,7 @@ function renderSessions() {
 }
 async function refreshSessions(selectId = null) {
   const data = await request("/sessions"); state.sessions = data.sessions || []; renderSessions();
+  warnStorageIssues(data.storage_issues);
   if (selectId) await loadSession(selectId);
 }
 async function createSession() {
@@ -2478,7 +2488,7 @@ async function bootstrap() {
     state.skills = skills.value.skills || [];
     if (el.skill.value && !selectedSkill()) selectSkill("");
   }
-  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
+  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); warnStorageIssues(sessions.value.storage_issues); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
   const failures = results.filter(item => item.status === "rejected"); if (failures.length) showToast(failures[0].reason.message);
   el.warning.classList.toggle("hidden",state.configLoaded); updateSendState();
   checkVoiceHealth();

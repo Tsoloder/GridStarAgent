@@ -293,8 +293,26 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=74" in index
+    assert "app.js?v=75" in index
     assert "style.css?v=58" in index
+
+
+def test_webui_storage_issue_surfacing_contract():
+    """会话存储读不出来时界面必须说出来，不能和「没有会话」长得一样。"""
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    # 后端把异常随列表一起返回
+    assert '"storage_issues": issues' in backend
+    assert "from session import (" in backend
+    assert "storage_issues," in backend
+    # 前端有独立提示函数，且两条取列表的路径都调用它
+    assert "function warnStorageIssues(issues)" in script
+    assert "warnStorageIssues(data.storage_issues)" in script
+    assert "warnStorageIssues(sessions.value.storage_issues)" in script
+    # 同一句话只提示一次，避免每次刷新都盖掉别的提示
+    assert "const warnedStorageIssues = new Set()" in script
+    assert "warnedStorageIssues.has(issue)" in script
 
 
 def test_webui_voice_input_contract():
@@ -309,7 +327,7 @@ def test_webui_voice_input_contract():
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
     assert "style.css?v=58" in index
-    assert "app.js?v=74" in index
+    assert "app.js?v=75" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

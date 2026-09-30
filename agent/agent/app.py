@@ -67,6 +67,7 @@ from session import (
     locked_session,
     save_session,
     set_archived,
+    storage_issues,
     update_index,
     validate_session_id,
 )
@@ -384,6 +385,8 @@ async def health():
         "data_dir_writable": bool(_data_dir_state.get("writable")),
         "data_dir_repair_attempted": bool(_data_dir_state.get("repair_attempted")),
         "data_dir_error": _data_dir_state.get("error", ""),
+        # 会话存储异常：读不出来时不能和「没有会话」混为一谈
+        "storage_issues": storage_issues(),
     }
 
 
@@ -948,7 +951,10 @@ async def get_sessions(query: str = "", archived: bool = False):
             and not bg.done_event.is_set()
         )
         item["waiting"] = any(key.startswith(sid + ":") for key in _pending_approvals)
-    return {"sessions": sessions}
+    # 空列表有两种含义：确实没有会话，或者会话存储读不出来。后者必须说出来，
+    # 否则界面上和「历史被清空」长得一模一样。
+    issues = storage_issues()
+    return {"sessions": sessions, "storage_issues": issues}
 
 
 @app.post("/sessions")
