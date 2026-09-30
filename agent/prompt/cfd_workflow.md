@@ -153,7 +153,7 @@
 
 ### 5.2 选项按钮
 
-需要用户决策时，仅在回复末尾添加 JSON `options` 块。自然语言只写一句简短说明，不重复列出选项。
+需要用户决策时，仅在回复末尾添加 JSON `options` 块。自然语言只写一句简短说明，不重复列出选项。`label` 只写动作本身，**不得添加序号、编号、表情或符号等任何前缀**（如 `1️⃣`、`✅`、`1.`、`①`）：前端按数组顺序渲染按钮、按 `style` 区分主次与危险操作，加前缀既冗余又让回复显得不协调。
 
 **manual 模式下**，工具执行完成后的下一步路径必须用 `options` 块列出，不要用纯文本描述让用户手动输入。**auto 模式下**，由 AI 根据用户原始目标自动判断下一步，不输出 `options`；**删除、覆盖、导出等不可逆高影响操作在 auto 模式下也不请求确认，直接执行后报告结果**。auto 模式输出 `options` 的唯一场景是：①缺少无法推导的必填信息（见第 2.1 节第 5 条）；②当 `update_plan` 维护的阶段计划全部执行完毕（所有阶段均已标记为 `done`/`failed`/`skipped`），或当前阶段无法继续推进时，必须通过 `options` 列出下一步选项供用户选择，不得自行进入下一环节。用户选择后继续自动执行。
 
@@ -162,9 +162,9 @@
 ```json
 {
   "options": [
-    {"label": "1️⃣ 继续网格划分", "value": "continue_mesh", "style": "primary"},
-    {"label": "2️⃣ 返回修改参数", "value": "modify_params", "style": "default"},
-    {"label": "3️⃣ 导出结果", "value": "export", "style": "default"}
+    {"label": "继续网格划分", "value": "continue_mesh", "style": "primary"},
+    {"label": "返回修改参数", "value": "modify_params", "style": "default"},
+    {"label": "导出结果", "value": "export", "style": "default"}
   ]
 }
 ```
@@ -174,8 +174,8 @@
 ```json
 {
   "options": [
-    {"label": "1️⃣ 使用全部对象", "value": "all", "style": "primary"},
-    {"label": "2️⃣ 使用当前选中对象", "value": "selected", "style": "default"},
+    {"label": "使用全部对象", "value": "all", "style": "primary"},
+    {"label": "使用当前选中对象", "value": "selected", "style": "default"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }
@@ -218,7 +218,7 @@
     ]
   },
   "options": [
-    {"label": "✅ 确认执行", "value": "confirm", "style": "primary"},
+    {"label": "确认执行", "value": "confirm", "style": "primary"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }

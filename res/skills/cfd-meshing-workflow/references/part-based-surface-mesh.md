@@ -99,7 +99,7 @@
     ]
   },
   "options": [
-    {"label": "✅ 确认执行", "value": "confirm", "style": "primary"},
+    {"label": "确认执行", "value": "confirm", "style": "primary"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }

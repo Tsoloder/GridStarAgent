@@ -29,7 +29,7 @@
     ]
   },
   "options": [
-    {"label": "✅ 确认执行", "value": "confirm", "style": "primary"},
+    {"label": "确认执行", "value": "confirm", "style": "primary"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }
@@ -94,9 +94,9 @@
 ```json
 {
   "options": [
-    {"label": "1️⃣ 按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
-    {"label": "2️⃣ 导出分割结果", "value": "export_result", "style": "default"},
-    {"label": "3️⃣ 查看分组详情", "value": "view_details", "style": "default"}
+    {"label": "按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
+    {"label": "导出分割结果", "value": "export_result", "style": "default"},
+    {"label": "查看分组详情", "value": "view_details", "style": "default"}
   ]
 }
 ```
