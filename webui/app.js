@@ -89,19 +89,24 @@ function formatDuration(ms) {
   const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
   return m + "m" + (s < 10 ? "0" : "") + s + "s";
 }
-// 剪贴板：优先 async API，失败回退 execCommand（兼容旧内核/非安全上下文）
-function copyText(text) {
+// 剪贴板：优先 async API；被拒绝（失焦/iframe 权限限制/权限拒绝）时回退 execCommand，
+// 两条路都失败才报错，避免新 API 存在但不可用时直接提示失败
+async function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) { /* 落入 execCommand 回退 */ }
   }
   const area = document.createElement("textarea");
   area.value = text;
   area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
   document.body.append(area);
   area.select();
-  try { document.execCommand("copy"); } catch (_) {}
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
   area.remove();
-  return Promise.resolve();
+  if (!ok) throw new Error("clipboard unavailable");
 }
 function showDialog({title, message = "", input, confirmText = "确定", cancelText = "取消", danger = false}) {
   return new Promise(resolve => {
