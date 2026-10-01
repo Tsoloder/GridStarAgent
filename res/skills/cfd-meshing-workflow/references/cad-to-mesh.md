@@ -19,8 +19,8 @@
 4. 手动模式使用基础 `tool_params` 协议确认参数；自动模式使用已知值或默认值直接执行。
 5. 等待工具返回；只有明确成功后才进入下一阶段。
 6. 导入成功后，标记 `import` 阶段为 `completed`、下一阶段为 `active`，并提供当前可用路径：水密性处理、自动部件分割（水密性处理后的必经路径）、水密性后自动部件分割、直接提取边界线。阶段计划的输出方式遵循 cfd_workflow.md 第 5.1 节的模式规则。进入自动部件分割时，读取 `references/part-segmentation.md`。
-7. 手动模式使用 `options` 等待用户选择路径；用户尚未选择时，不得直接调用 `UGSur` 或其他表面网格生成工具。
-8. 自动模式根据用户原始目标选择最完整的匹配路径；目标不明确时仍使用 `options` 询问，不得擅自扩大处理范围。
+7. 手动模式调用 `ask_user_question` 等待用户选择路径（工具不可用时退回 `options`）；用户尚未选择时，不得直接调用 `UGSur` 或其他表面网格生成工具。
+8. 自动模式根据用户原始目标选择最完整的匹配路径；目标不明确时仍使用 `options` 询问（auto 模式不得调用 `ask_user_question` 停下等待），不得擅自扩大处理范围。
 9. 只有路径已经明确且完成相应前置处理后，才能进入表面网格生成阶段。
 
 ## 2. 水密性处理路径
@@ -139,7 +139,7 @@
 3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)` 创建体网格块。
    - `chooseParam` 的外场形状值：0=球形，1=立方体，2=圆柱，3=弓形。
    - `meshType`=0 表示给定尺寸时，`meshSizeOrDimension` 传缩放后的值；=1 表示期望点数时不受此规则影响。
-4. 体网格块成功后，manual 模式使用 `options` 询问是否生成空间网格；auto 模式根据用户原始目标判断。
+4. 体网格块成功后，manual 模式调用 `ask_user_question` 询问是否生成空间网格（工具不可用时退回 `options`）；auto 模式根据用户原始目标判断。
 
 ### 7.4 空间网格生成
 

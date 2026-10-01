@@ -418,6 +418,44 @@ def _last_recorded_system_prompt(session: Session) -> str:
     return ""
 
 
+# 寒暄、致谢、收尾类用户消息：这类轮次没有决策点，强制结构化只会让模型在
+# 推理里反复权衡"格式要求是否适用"，白烧一次完整前缀输入。
+# 只做短句精确匹配，且刻意不收"好的/收到/OK"这类应答词：它们既可能是收尾，
+# 也可能是用户对某个提问的放行确认，一旦误判成寒暄，格式重试的纠偏就失效。
+_CONVERSATIONAL_MAX_CHARS = 12
+_CONVERSATIONAL_MESSAGES = frozenset({
+    "你好", "您好", "你好呀", "您好呀", "在吗", "在么", "在不在",
+    "hi", "hello", "hey",
+    "谢谢", "多谢", "感谢", "谢谢了", "thanks", "thankyou", "thx",
+    "再见", "拜拜", "bye", "goodbye",
+    "下次再说", "回头再说", "以后再说", "晚点再说", "先这样", "就这样", "先这样吧", "先到这",
+    "不用了", "暂时不用", "没有了", "没事了", "辛苦了",
+})
+
+
+def _is_conversational_message(text) -> bool:
+    """用户消息是否为纯寒暄 / 致谢 / 收尾（去除空白与句末标点后精确匹配）。"""
+    value = "".join(str(text or "").split()).strip("。.!！?？~～,，、;；")
+    if not value or len(value) > _CONVERSATIONAL_MAX_CHARS:
+        return False
+    return value.lower() in _CONVERSATIONAL_MESSAGES
+
+
+def _plan_in_flight(ledger) -> bool:
+    """台账里是否还有未收尾阶段（pending / in_progress）。
+
+    有计划在跑就说明工作未结束，此时任何回复都该继续给结构化出口。
+    """
+    plan = getattr(ledger, "plan", None) if ledger is not None else None
+    phases = plan.get("phases") if isinstance(plan, dict) else None
+    if not isinstance(phases, list):
+        return False
+    return any(
+        isinstance(item, dict) and str(item.get("status") or "pending") in ("pending", "in_progress")
+        for item in phases
+    )
+
+
 _STRUCTURED_INTERACTION_RE = re.compile(
     r"<structured_interaction>(.*?)</structured_interaction>", re.S | re.I
 )
@@ -596,11 +634,11 @@ async def run_agent_loop(
         )
     _fmt_parts = [
         "<output_format_reminder>\n",
-        "重要：需要用户确认或选择时，必须给出结构化结果（优先调用 ask_user_question 工具，"
-        "或用 ```json 代码块包裹），禁止用 Markdown 表格或列表替代。\n",
-        "- 需要用户拍板下一步时，优先调用 ask_user_question 工具：它会结束本轮并展示选择卡片，"
+        "重要：需要用户确认或选择时，必须给出结构化结果，禁止用 Markdown 表格或列表替代。\n",
+        "- 需要用户拍板下一步时，必须调用 ask_user_question 工具：它会结束本轮并展示选择卡片，"
         "每个选项都要给一句 description，调用时不要再同时调用其他工具。\n",
-        "- 未使用该工具时，仍要在回复末尾用 options JSON 块列出下一步选择作为兜底。\n",
+        "- 只有两种情况改用正文 ```json 代码块：①tool_params 参数确认（必须与 options 同块）；"
+        "②ask_user_question 调用失败或被拒绝，此时用 options 块兜底。\n",
     ]
     if interaction_mode != "auto":
         if is_param_cancelled:
@@ -647,6 +685,8 @@ async def run_agent_loop(
     _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
+    # 本次用户消息内是否真的执行过工具：决定末尾那轮纯文本回复能不能免于格式重试
+    _turn_tool_executed = False
     # 已启用的工具分组：本次用户消息内跨请求累积；换消息后重置，
     # 由"直呼自动解锁"兜底，避免模型重复启用。
     enabled_tool_groups = set()
@@ -1081,6 +1121,7 @@ async def run_agent_loop(
                 continue
 
         if tool_calls:
+            _turn_tool_executed = True
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
 
@@ -1168,7 +1209,13 @@ async def run_agent_loop(
                                 "tps": _tps,
                             }
                             return
-                    if tc["name"] == UPDATE_PLAN_TOOL_NAME:
+                    # 注意这里是 elif：询问工具在失败分支（参数非法 / auto 模式计划未收尾）
+                    # 只设置 result 就往下走，若用独立的 if 会继续落进下面的 MCP 执行分支，
+                    # 把本该交给模型的错误文案覆盖成一次不存在的 MCP 调用结果。
+                    # 注意这里是 elif：询问工具在失败分支（参数非法 / auto 模式计划未收尾）
+                    # 只设置 result 就往下走，若用独立的 if 会继续落进下面的 MCP 执行分支，
+                    # 把本该交给模型的错误文案覆盖成一次不存在的 MCP 调用结果。
+                    elif tc["name"] == UPDATE_PLAN_TOOL_NAME:
                         # 内置计划工具：不走 MCP、不走审批。写台账 + 发结构化事件
                         if ledger is None:
                             result = "update_plan 不可用：任务台账未初始化"
@@ -1323,9 +1370,25 @@ async def run_agent_loop(
             # 检查回复是否包含结构化 JSON 块
             _structured_keywords = ('"options"', '"tool_params"', '"toolparams"', '"workflow"')
             has_structured = any(keyword in text_acc for keyword in _structured_keywords)
-            if not has_structured and format_retry < MAX_FORMAT_RETRIES:
+            # 寒暄/致谢/收尾轮次没有决策点，强制结构化会制造"格式契约 vs 自然对话"
+            # 的指令冲突：实测模型为此在推理里来回权衡上千字符，最后仍不产出结构，
+            # 还多花一整轮前缀输入与一次往返延迟。这类轮次直接收尾。
+            # 判定必须窄：用户消息本身是短句寒暄、且本轮无任何在途工作时才豁免。
+            # display_content 非空 = 用户点的是选项卡片，其值可能恰好是"好的"这类
+            # 白名单词，但那是一次决策答复，必须继续给结构化出口。
+            _format_retry_exempt = (
+                not is_structured_message
+                and not is_structured_continuation
+                and not display_content
+                and not _turn_tool_executed
+                and not _plan_in_flight(ledger)
+                and _is_conversational_message(user_message)
+            )
+            if not has_structured and format_retry < MAX_FORMAT_RETRIES and not _format_retry_exempt:
                 # LLM 未输出结构化 JSON，注入格式提醒让其补充 options
                 format_retry += 1
+                logger.info("[format] 格式重试 #%d session=%s mode=%s",
+                            format_retry, session.id, interaction_mode)
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 if interaction_mode == "auto":
                     _reminder_types = "options、workflow（阶段计划请改用 update_plan 工具）"
@@ -1349,6 +1412,13 @@ async def run_agent_loop(
                     "</format_reminder>" % (_reminder_types, _reminder_example)
                 )
                 continue
+            if not has_structured:
+                # 重试过一轮仍不产出、或本轮命中豁免：都要留痕，否则线上无法
+                # 判断契约失败率，也看不出豁免究竟省了多少次请求。
+                logger.info(
+                    "[format] 无结构化结果直接收尾 session=%s exempt=%s retries=%d",
+                    session.id, _format_retry_exempt, format_retry,
+                )
             if interaction_mode == "auto" and _auto_plan_waits_for_choice(text_acc, ledger):
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 _pending_reminders.append(
