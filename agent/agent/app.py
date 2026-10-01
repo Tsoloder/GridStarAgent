@@ -62,6 +62,7 @@ from session import (
     clear_session,
     create_session,
     delete_session,
+    export_session_markdown,
     list_sessions,
     load_session,
     locked_session,
@@ -1193,6 +1194,28 @@ async def archive_session(session_id: str, body: dict = None):
     if not changed:
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
+
+
+@app.post("/sessions/{session_id}/export")
+async def export_session(session_id: str):
+    """把会话历史导出为 Markdown。
+
+    与模型侧的 export_session_markdown 工具共用同一实现，供输入框的
+    「/ 导出对话」指令直接触发，不必为此跑一整轮对话。
+    """
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    s = load_session(session_id)
+    if s is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        path = export_session_markdown(s)
+    except OSError as exc:
+        logger.warning("session export failed: %s", exc)
+        return JSONResponse({"error": "导出失败：%s" % exc}, status_code=500)
+    return {"path": path}
 
 
 @app.post("/sessions/{session_id}/tool-approvals/{call_id}")

@@ -616,6 +616,55 @@ def test_new_message_while_task_still_stopping_reports_busy(monkeypatch):
     assert frames[0][1]["retryable"] is True
 
 
+def test_export_session_route_writes_markdown(monkeypatch, tmp_path):
+    """输入框的「/ 导出对话」走后端导出接口：真实写出 Markdown 文件。
+
+    与模型侧的 export_session_markdown 工具共用同一实现，不必为此跑一整轮对话。
+    """
+    import uuid
+    from types import SimpleNamespace
+
+    import session as session_mod
+
+    session_id = str(uuid.uuid4())
+    monkeypatch.setattr(session_mod, "EXPORT_DIR", tmp_path)
+    monkeypatch.setattr(server, "load_session", lambda sid: SimpleNamespace(
+        id=sid, title="导出用会话",
+        created_at="2026-10-01T10:00:00", updated_at="2026-10-01T10:05:00",
+        messages=[{"role": "user", "content": "导出这句话", "ts": "2026-10-01T10:00:01"}],
+    ))
+
+    client = TestClient(server.app)
+    response = client.post("/sessions/%s/export" % session_id, json={})
+    assert response.status_code == 200
+    path = response.json()["path"]
+    assert path.startswith("exports/") and path.endswith(".md")
+    written = tmp_path / path.split("/", 1)[1]
+    assert written.is_file()
+    text = written.read_text(encoding="utf-8")
+    assert "导出这句话" in text and session_id in text
+
+
+def test_export_session_route_reports_missing_and_invalid_sessions(monkeypatch):
+    """会话不存在回 404、id 非法回 400，都不落到导出实现里。"""
+    import uuid
+
+    monkeypatch.setattr(server, "load_session", lambda sid: None)
+    monkeypatch.setattr(server, "export_session_markdown",
+                        lambda session: (_ for _ in ()).throw(AssertionError("不该导出")))
+
+    client = TestClient(server.app)
+    assert client.post("/sessions/%s/export" % uuid.uuid4(), json={}).status_code == 404
+
+    # 非法 id 用 app 模块里那个异常类型触发：有测试会 reload session 模块，
+    # 重载后新造的异常类与 app 导入的不是同一个，直接发非法字符串会绕开 except。
+    def reject(_sid):
+        raise server.InvalidSessionId("invalid session id")
+
+    monkeypatch.setattr(server, "validate_session_id", reject)
+    assert client.post("/sessions/not-a-uuid/export", json={}).status_code == 400
+
+
 def test_get_sessions_marks_active_background(monkeypatch):
     """会话列表注入 active/waiting 字段：刷新页面后前端仍能在列表里标出「进行中/待确认」。"""
     import uuid
