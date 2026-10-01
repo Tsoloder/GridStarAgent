@@ -645,3 +645,167 @@ def test_webui_phase_panel_visibility_contract():
     # 本轮结束时的收起同样走同一函数
     assert "if (visible && planComplete(state.phasePlan)) hidePhasePanel();" in script
 
+
+def test_webui_mode_dropdown_contract():
+    """交互模式由分段按钮改为下拉：每项一行标题 + 一行小字说明，选中项打勾。
+
+    值仍以 state.mode 发往 /chat/stream 的 interaction_mode，契约不变。
+    """
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 结构：触发器 + 列表，复用模型下拉的控件族；分段按钮与旧样式不得残留
+    assert 'class="model-control mode-control"' in index
+    assert 'id="mode-trigger"' in index and 'id="mode-label"' in index and 'id="mode-listbox"' in index
+    assert "data-mode" not in index
+    assert "mode-switch" not in index and "mode-switch" not in stylesheet
+
+    # 选项：标题 + 一行说明 + 打勾，且仅选中项可见
+    assert '{value:"manual", title:"手动", hint:' in script
+    assert '{value:"auto", title:"自动", hint:' in script
+    assert 'class="mode-option-text"><strong>' in script
+    assert 'class="mode-check" aria-hidden="true">✓' in script
+    assert ".mode-option[aria-selected=\"true\"] .mode-check{visibility:visible}" in stylesheet
+    assert ".mode-option-text small{" in stylesheet and "display:block" in stylesheet
+    assert ".mode-listbox{" in stylesheet
+
+    # 行为：选择写回 state.mode，发送时作为 interaction_mode；三个下拉互斥
+    assert "function selectMode(value)" in script
+    assert 'option.setAttribute("aria-selected", String(state.mode === item.value));' in script
+    assert "interaction_mode:state.mode" in script
+    assert "el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();" in script
+    assert "function openModeList() { closeModelList(); closeSlashMenu();" in script
+    assert 'if (state.modeListOpen && !inside(".mode-control")) closeModeList();' in script
+    assert "closeModelList(); closeSlashMenu(); closeModeList(); closeSessions();" in script
+
+
+def test_webui_composer_dropdowns_are_hover_driven():
+    """输入框的下拉统一为悬停展开、点击开合，且触发按钮不再带箭头。
+
+    技能已改为输入框里的 "/" 面板，不再有第三个下拉（见斜杠面板用例）。
+    """
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 触发按钮内不得再有箭头；其它下拉（主题、会话、用量）保持原样
+    for trigger in ('id="mode-trigger"', 'id="model-trigger"'):
+        start = index.index(trigger)
+        assert "chevron" not in index[start:index.index("</button>", start)]
+    assert 'id="theme-trigger"' in index
+    theme = index[index.index('id="theme-trigger"'):]
+    assert "chevron" in theme[:theme.index("</button>")]
+
+    # 悬停绑定：进入即展开、移开延迟收起
+    assert "function bindHoverDropdown(root, open, close)" in script
+    assert 'root.addEventListener("mouseenter", () => { cancel(); open(); });' in script
+    assert "}, HOVER_CLOSE_DELAY);" in script
+    assert 'bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);' in script
+    assert 'bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);' in script
+    assert "bindHoverDropdown(el.skillTrigger" not in script
+
+    # 点击仍是开合切换
+    assert ("el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList();"
+            in script)
+    assert "el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();" in script
+
+    # 互斥收在各自的 open 里：悬停扫过一排控件时不会同时开着两个面板
+    assert "function openModelList() { closeModeList(); closeSlashMenu();" in script
+    assert "function openModeList() { closeModelList(); closeSlashMenu();" in script
+
+
+def test_webui_dropdown_check_sits_at_right():
+    """下拉的选中勾排在文字右侧。
+
+    模型列表原先把勾放在最前，配 18px 定宽首列；改成尾部列后，
+    勾由 justify-self 贴右，行的左边距不再被占位列撑开。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 模型列表：文字在前，勾在后
+    assert ('<strong>${escapeHtml(modelName(item))}</strong>'
+            '<small>${escapeHtml(item.model_id || item.id || key)}</small>'
+            '<span class="model-check">') in script
+    assert 'option.innerHTML = `<span class="model-check">' not in script
+
+    # 模式下拉本来就是文字在前
+    assert '<span class="mode-option-text"><strong>' in script
+
+    # 输入框下拉的定宽首列已取消，勾挪到最后一列并等宽占位（避免选中/未选中行抖动）；
+    # 桌面端模型 id 是可见的第三列，网格必须保留三列，否则勾会换行
+    assert "grid-template-columns:18px minmax(0,1fr) auto;grid-gap:7px" not in stylesheet
+    assert "grid-template-columns:minmax(0,1fr) auto auto" in stylesheet
+    assert ".model-candidates button{width:100%;display:grid;grid-template-columns:18px" in stylesheet
+    assert ".model-check{min-width:12px;justify-self:end;color:var(--cyan)}" in stylesheet
+
+
+def test_webui_skill_slash_menu_contract():
+    """技能选择从下拉按钮改成输入框的 "/" 面板。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 旧的技能下拉已移除，保留隐藏输入作为取值容器，并新增面板与已选标签
+    assert "skill-trigger" not in index and "skill-listbox" not in index
+    assert 'id="skill-select" type="hidden"' in index
+    assert 'id="slash-menu"' in index and 'id="skill-chip"' in index
+    assert 'id="slash-menu" class="slash-menu hidden"' in index
+    assert "skill-control" not in stylesheet and "skill-control" not in script
+    # 输入框提示语提示可用 "/" 选技能
+    assert "输入 / 选择技能" in index
+
+    # 触发与过滤：只在输入以 "/" 开头时展开，输入内容作为过滤词
+    assert "function slashQuery()" in script and "if (!text.startsWith(\"/\")) return null;" in script
+    assert "function syncSlashMenu()" in script
+    assert "if (slashQuery() === null) { closeSlashMenu(); return; }" in script
+    assert "function slashMatch(text, query)" in script
+
+    # 指令分组：模型（切到可搜索的模型面板）与导出对话（直接调后端导出）；指令排在技能之前
+    assert '{id: "model", name: "模型", description: "选择本次会话使用的模型"}' in script
+    assert '{id: "export", name: "导出对话", description: "把当前会话导出为 Markdown 文件"}' in script
+    assert 'return [{label: "指令", items: commands}, {label: "技能", items: skills}];' in script
+    # 供应商发现来的模型不进选择范围：斜杠面板与模型下拉都只列配置里写过的，
+# 但"查名字"仍用全量目录，避免既有会话选中的发现模型显示成"未配置"
+    assert 'function configuredModels() { return visibleModels().filter(item => item.status !== "discovered"); }' in script
+    assert "const groups = new Map(); configuredModels().forEach(item =>" in script
+    assert "return [{label: \"模型\", items: configuredModels().map(item => ({" in script
+    assert '没有已配置的模型' in script
+    assert "state.models.filter(item => item.status === \"discovered\")" not in script
+    assert "function openSlashModelPicker()" in script
+    assert 'search.placeholder = "搜索模型...";' in script
+    # 行只在打开/切模式时建一次，按键只切可见性：避免打字过程中丢按键
+    assert "let slashRowCache = [];" in script
+    assert "function applySlashFilter()" in script
+    assert "if (state.slashOpen && slashRowCache.length) { applySlashFilter(); return; }" in script
+    assert "function visibleSlashRows()" in script
+    assert "function runSlashExport()" in script
+    assert "`/sessions/${encodeURIComponent(sessionId)}/export`" in script
+    assert 'state.slashMode = "model";' in script
+    assert 'state.slashMode = "root";' in script
+    # 模型面板选中后收起面板、清掉正文的 "/"，焦点回到输入框
+    assert "function finishSlashModelPick()" in script
+    assert 'if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }' in script
+
+    # 行为：键盘上下选择、Enter 确认、Escape 收起；选定后清掉 "/xx" 并写入隐藏输入
+    assert "function handleSlashKeys(event)" in script
+    assert 'if (event.key === "Escape") { event.preventDefault(); closeSlashMenu(); return true; }' in script
+    assert 'if (event.key === "Enter") {' in script
+    assert "function selectSkill(id)" in script
+    assert 'if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }' in script
+    assert "function renderSkillChip()" in script
+    assert 'el.skillChip.onclick = () => { selectSkill(""); el.input.focus(); };' in script
+
+    # 接线：输入事件同步面板、回车先给面板处理；点击外部与 Esc 都能收起
+    assert "el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };" in script
+    assert "el.input.onkeydown = event => { if (handleSlashKeys(event)) return;" in script
+    assert 'if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();' in script
+    # 点面板内的选项可能重建面板内容（如「模型」指令），被点的行已脱离 DOM，
+    # 因此"点在面板外"必须按事件派发时固定的 composedPath 判断
+    assert 'const path = typeof event.composedPath === "function" ? event.composedPath() : [];' in script
+    assert "const inside = selector => path.some(node => node.nodeType === 1 && node.matches && node.matches(selector));" in script
+    assert "closeModelList(); closeSlashMenu(); closeModeList(); closeSessions();" in script
+
+    # 取值链路不变：仍以 selected_skills 发给后端
+    assert "const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];" in script
+

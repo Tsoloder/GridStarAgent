@@ -18,7 +18,7 @@ const state = {
   // status: id → 徽标状态 running|done|stopped|error（done 常驻，该会话下次发消息时刷新）；
   // stashed: 切走会话时摘下暂存的消息 DOM，切回后原样挂回继续实时更新
   controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
-  modelListOpen: false, modelOptionIndex: -1, modelSearch: "",
+  modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
   attachments: [], uploading: 0,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
@@ -37,7 +37,7 @@ const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
-  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
+  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"),
   input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"), composer: $(".composer"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
@@ -159,21 +159,24 @@ function usageModelLabel(key) {
   return `${providerName} / ${modelId}`;
 }
 function visibleModels() { return state.models.filter(item => item.enabled !== false && item.provider_enabled !== false); }
+// 只列配置里写过的模型：供应商发现来的整份目录不进选择范围。
+// 查名字仍走 visibleModels()，否则既有会话选中的发现模型会显示成"未配置"。
+function configuredModels() { return visibleModels().filter(item => item.status !== "discovered"); }
 function renderModelList() {
   const selected = el.model.value; el.modelListbox.innerHTML = "";
-  const groups = new Map(); visibleModels().forEach(item => { if (!groups.has(item.provider)) groups.set(item.provider, []); groups.get(item.provider).push(item); });
+  const groups = new Map(); configuredModels().forEach(item => { if (!groups.has(item.provider)) groups.set(item.provider, []); groups.get(item.provider).push(item); });
   groups.forEach((items, provider) => {
     // 分组标题显示供应商名称，没有配置名称时回退到供应商 ID
     const label = items[0].provider_name || provider;
     const group = document.createElement("div"); group.className = "model-group"; group.setAttribute("role","group"); group.setAttribute("aria-label",label);
     group.innerHTML = `<div class="model-group-label">${escapeHtml(label)}</div>`;
-    items.forEach(item => { const key = modelKey(item), option = document.createElement("button"); option.type = "button"; option.className = `model-option${key === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(key === selected)); option.dataset.value = key; option.innerHTML = `<span class="model-check">${key === selected ? "✓" : ""}</span><strong>${escapeHtml(modelName(item))}</strong><small>${escapeHtml(item.model_id || item.id || key)}</small>`; option.onclick = () => selectModel(key); group.append(option); });
+    items.forEach(item => { const key = modelKey(item), option = document.createElement("button"); option.type = "button"; option.className = `model-option${key === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(key === selected)); option.dataset.value = key; option.innerHTML = `<strong>${escapeHtml(modelName(item))}</strong><small>${escapeHtml(item.model_id || item.id || key)}</small><span class="model-check">${key === selected ? "✓" : ""}</span>`; option.onclick = () => selectModel(key); group.append(option); });
     el.modelListbox.append(group);
   });
-  if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">未配置可用模型</div>';
+  if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">没有已配置的模型</div>';
 }
 function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); }
-function openModelList() { renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
+function openModelList() { closeModeList(); closeSlashMenu(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
 function closeModelList() { state.modelListOpen = false; state.modelSearch = ""; el.modelListbox.classList.add("hidden"); el.modelTrigger.setAttribute("aria-expanded","false"); }
 function focusModelOption() { const options = [...el.modelListbox.querySelectorAll(".model-option")]; options.forEach((item,index) => item.classList.toggle("focused",index === state.modelOptionIndex)); const active = options[state.modelOptionIndex]; if (active) active.scrollIntoView({block:"nearest"}); }
 function handleModelKeys(event) {
@@ -186,18 +189,265 @@ function handleModelKeys(event) {
   state.modelSearch = (state.modelSearch + event.key).toLowerCase(); clearTimeout(handleModelKeys.timer); handleModelKeys.timer = setTimeout(() => state.modelSearch = "",700); const index = options.findIndex(item => item.textContent.toLowerCase().includes(state.modelSearch)); if (index >= 0) { state.modelOptionIndex = index; focusModelOption(); }
 }
 function selectedSkill() { return state.skills.find(item => item.id === el.skill.value) || null; }
-function renderSkillList() {
-  const selected = el.skill.value; el.skillListbox.innerHTML = "";
-  [{ id: "", name: "无 Skill", description: "" }].concat(state.skills).forEach(item => {
-    const option = document.createElement("button"); option.type = "button"; option.className = `model-option${item.id === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(item.id === selected)); option.dataset.value = item.id;
-    if (item.description) option.title = item.description;
-    option.innerHTML = `<span class="model-check">${item.id === selected ? "✓" : ""}</span><strong>${escapeHtml(item.name || item.id)}</strong><small></small>`;
-    option.onclick = () => selectSkill(item.id); el.skillListbox.append(option);
+// 技能与指令由输入框的 "/" 唤起：敲 "/" 展开候选，输入内容作为过滤词，
+// 选中技能写回隐藏输入并清掉 "/xx"，当前技能以输入框左侧的小标签显示；
+// 指令类选项（模型、导出对话）选中后直接执行动作。
+const SLASH_COMMANDS = [
+  {id: "model", name: "模型", description: "选择本次会话使用的模型"},
+  {id: "export", name: "导出对话", description: "把当前会话导出为 Markdown 文件"},
+];
+// 面板里的行与它们的候选项一一对应，过滤时只切可见性
+let slashRowCache = [];
+function slashQuery() {
+  const text = el.input ? el.input.value : "";
+  if (!text.startsWith("/")) return null;
+  return text.slice(1).trim().toLowerCase();
+}
+function slashMatch(text, query) {
+  return !query || String(text || "").toLowerCase().includes(query);
+}
+// 模型选择模式的过滤词来自面板里的搜索框，与正文输入无关
+function modelPickQuery() {
+  return String(state.slashModelQuery || "").trim().toLowerCase();
+}
+function slashGroups() {
+  if (state.slashMode === "model") {
+    return [{label: "模型", items: configuredModels().map(item => ({
+      id: modelKey(item), name: modelName(item), code: item.model_id || item.id || modelKey(item),
+      description: item.provider_name || item.provider || "",
+      kind: "model",
+    }))}];
+  }
+  // 全部候选都建出来，过滤只靠 applySlashFilter 切可见性：
+  // 这样删字变宽时能重新出现，也不会每敲一个字重建 DOM。
+  const skills = [{id: "", name: "不启用技能", description: "默认：按消息内容自动匹配技能"}]
+    .concat(state.skills || [])
+    .map(item => ({id: item.id || "", name: item.name || item.id, code: item.id || "—",
+                   description: item.description || "", kind: "skill"}));
+  const commands = SLASH_COMMANDS.map(item => ({
+    id: item.id, name: item.name, code: item.id, description: item.description, kind: "command",
+  }));
+  // 指令在前：模型、导出这类动作比技能更常用
+  return [{label: "指令", items: commands}, {label: "技能", items: skills}];
+}
+function renderSlashMenu() {
+  // 行只在打开面板或切换模式时建一次，之后按键只切换可见性：
+  // 每敲一个字都重建 DOM（含 scrollIntoView）会让浏览器丢掉这次按键的插入动作。
+  let search = $("#slash-search", el.slashMenu);
+  if (state.slashMode === "model") {
+    if (!search) {
+      search = document.createElement("input");
+      search.id = "slash-search"; search.className = "slash-search"; search.type = "text";
+      search.placeholder = "搜索模型..."; search.autocomplete = "off";
+      search.oninput = () => { state.slashModelQuery = search.value; applySlashFilter(); };
+      search.onkeydown = handleSlashKeys;
+    }
+  } else if (search) {
+    search = null;
+  }
+  el.slashMenu.innerHTML = "";
+  if (search) el.slashMenu.append(search);
+  const list = document.createElement("div"); list.id = "slash-list";
+  el.slashMenu.append(list);
+  slashRowCache = [];
+  slashGroups().forEach(group => {
+    const box = document.createElement("div"); box.className = "slash-group";
+    const label = document.createElement("div"); label.className = "slash-group-label"; label.textContent = group.label;
+    box.append(label);
+    group.items.forEach(item => {
+      const row = document.createElement("button"); row.type = "button"; row.className = "slash-item"; row.setAttribute("role","option");
+      row.dataset.slashId = item.id; row.dataset.slashKind = item.kind;
+      const selected = item.kind === "skill" ? el.skill.value === item.id
+        : item.kind === "model" ? el.model.value === item.id : false;
+      row.setAttribute("aria-selected", String(selected));
+      if (item.description) row.title = item.description;
+      row.innerHTML = `<strong>${escapeHtml(item.name)}</strong><code>${escapeHtml(item.code)}</code><span class="slash-desc">${escapeHtml(item.description)}</span>`
+        + (item.kind === "model" ? `<span class="model-check">${selected ? "✓" : ""}</span>` : "");
+      row.onmouseenter = () => focusSlashItem(visibleSlashRows().indexOf(row));
+      row.onclick = () => runSlashItem(item);
+      box.append(row);
+      slashRowCache.push({row, item, label, box});
+    });
+    list.append(box);
+  });
+  applySlashFilter();
+}
+function visibleSlashRows() {
+  return [...el.slashMenu.querySelectorAll(".slash-item")].filter(row => !row.hidden);
+}
+function applySlashFilter() {
+  const query = state.slashMode === "model"
+    ? (modelPickQuery() || slashQuery() || "")
+    : (slashQuery() || "");
+  let shown = 0;
+  slashRowCache.forEach(entry => {
+    const hit = slashMatch(entry.item.name, query) || slashMatch(entry.item.code, query) || slashMatch(entry.item.id, query);
+    entry.row.hidden = !hit;
+    if (hit) shown += 1;
+  });
+  // 整组没命中就连标题一起藏；全空时给一句提示
+  const groups = new Map();
+  slashRowCache.forEach(entry => {
+    const state0 = groups.get(entry.box) || {hits: 0};
+    if (!entry.row.hidden) state0.hits += 1;
+    groups.set(entry.box, state0);
+  });
+  groups.forEach((state0, box) => { box.hidden = state0.hits === 0; });
+  let empty = $("#slash-empty", el.slashMenu);
+  if (!shown) {
+    if (!empty) {
+      empty = document.createElement("div"); empty.id = "slash-empty"; empty.className = "listbox-empty";
+      el.slashMenu.append(empty);
+    }
+    empty.textContent = state.slashMode === "model" ? "没有匹配的已配置模型" : "没有匹配的技能或指令";
+  } else if (empty) {
+    empty.remove();
+  }
+  const rows = visibleSlashRows();
+  const current = rows.findIndex(row => row.getAttribute("aria-selected") === "true");
+  focusSlashItem(current >= 0 ? current : 0);
+}
+function runSlashItem(item) {
+  if (item.kind === "skill") { selectSkill(item.id || ""); return; }
+  if (item.kind === "model") { selectModel(item.id); finishSlashModelPick(); return; }
+  if (item.id === "model") { openSlashModelPicker(); return; }
+  if (item.id === "export") { runSlashExport(); return; }
+}
+// 「模型」指令：面板切换成可搜索的模型列表，选中后回落为常规状态
+function openSlashModelPicker() {
+  state.slashMode = "model";
+  state.slashModelQuery = "";
+  renderSlashMenu();
+  const search = $("#slash-search", el.slashMenu);
+  if (search) search.focus();
+}
+function finishSlashModelPick() {
+  // 面板收起后正文里的 "/" 已经没有意义，一并清掉并还回焦点
+  if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }
+  closeSlashMenu();
+  updateSendState();
+  el.input.focus();
+}
+// 「导出对话」指令：直接调后端导出接口（与模型侧的导出工具同一实现）
+async function runSlashExport() {
+  const sessionId = currentId();
+  closeSlashMenu();
+  if (!sessionId) { showToast("当前没有可导出的会话"); return; }
+  try {
+    const data = await request(`/sessions/${encodeURIComponent(sessionId)}/export`, {method:"POST", body:"{}"});
+    showToast(`已导出：${data.path || "exports/"}`);
+  } catch (error) { showToast(`导出失败：${error.message}`); }
+}
+function focusSlashItem(index) {
+  const rows = [...el.slashMenu.querySelectorAll(".slash-item")];
+  state.slashIndex = index;
+  rows.forEach((row, position) => row.classList.toggle("focused", position === index));
+  if (rows[index]) rows[index].scrollIntoView({block:"nearest"});
+}
+function openSlashMenu() {
+  closeModeList(); closeModelList();
+  state.slashOpen = true;
+  el.slashMenu.classList.remove("hidden");
+}
+function closeSlashMenu() {
+  state.slashOpen = false;
+  // 收起时回到根面板：下次敲 "/" 应该看到技能与指令，而不是上次的模型列表
+  state.slashMode = "root";
+  state.slashModelQuery = "";
+  el.slashMenu.classList.add("hidden");
+  el.slashMenu.innerHTML = "";
+}
+// 输入框内容变化时同步面板：不以 "/" 开头就收起，否则刷新候选并保持展开
+function syncSlashMenu() {
+  if (slashQuery() === null) { closeSlashMenu(); return; }
+  // 面板已开着就只更新过滤结果，避免正文每敲一个字都重建面板 DOM
+  if (state.slashOpen && slashRowCache.length) { applySlashFilter(); return; }
+  renderSlashMenu();
+  openSlashMenu();
+}
+function handleSlashKeys(event) {
+  if (!state.slashOpen) return false;
+  // 过滤后行只是被隐藏，键盘必须在"可见行"里走动，否则回车会点到被筛掉的项
+  const rows = visibleSlashRows();
+  if (event.key === "Escape") { event.preventDefault(); closeSlashMenu(); return true; }
+  if (!rows.length) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    focusSlashItem((state.slashIndex + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length);
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    rows[Math.max(0, Math.min(state.slashIndex, rows.length - 1))].click();
+    return true;
+  }
+  return false;
+}
+function selectSkill(id) {
+  const fromMenu = state.slashOpen;
+  el.skill.value = id || "";
+  // "/xx" 只是唤起面板的输入，选定后清掉，避免混进消息正文
+  if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }
+  closeSlashMenu();
+  renderSkillChip();
+  updateSendState();
+  if (fromMenu) el.input.focus();
+}
+function renderSkillChip() {
+  const item = selectedSkill();
+  el.skillChip.classList.toggle("hidden", !item);
+  if (item) $("b", el.skillChip).textContent = item.name || item.id;
+}
+// 交互模式下拉：每项一行标题加一行说明（手动逐步确认 / 自动连续执行），选中项右侧打勾
+const MODE_OPTIONS = [
+  {value:"manual", title:"手动", hint:"每步操作先确认参数，由审批面板把关"},
+  {value:"auto", title:"自动", hint:"按默认参数连续执行，不逐步确认"},
+];
+function modeTitle(value) { const item = MODE_OPTIONS.find(entry => entry.value === value); return item ? item.title : "手动"; }
+function renderModeList() {
+  el.modeListbox.innerHTML = "";
+  MODE_OPTIONS.forEach(item => {
+    const option = document.createElement("button"); option.type = "button"; option.className = "model-option mode-option"; option.setAttribute("role","option");
+    option.dataset.mode = item.value; option.setAttribute("aria-selected", String(state.mode === item.value));
+    option.innerHTML = `<span class="mode-option-text"><strong>${item.title}</strong><small>${item.hint}</small></span><span class="mode-check" aria-hidden="true">✓</span>`;
+    option.onclick = () => selectMode(item.value);
+    el.modeListbox.append(option);
   });
 }
-function selectSkill(id) { el.skill.value = id || ""; const item = selectedSkill(); el.skillLabel.textContent = item ? (item.name || item.id) : "无 Skill"; closeSkillList(); }
-function openSkillList() { renderSkillList(); state.skillListOpen = true; el.skillListbox.classList.remove("hidden"); el.skillTrigger.setAttribute("aria-expanded","true"); }
-function closeSkillList() { state.skillListOpen = false; el.skillListbox.classList.add("hidden"); el.skillTrigger.setAttribute("aria-expanded","false"); }
+function selectMode(value) {
+  state.mode = MODE_OPTIONS.some(item => item.value === value) ? value : "manual";
+  el.modeLabel.textContent = modeTitle(state.mode);
+  closeModeList();
+  renderModeList();
+}
+function openModeList() { closeModelList(); closeSlashMenu(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
+function closeModeList() { state.modeListOpen = false; el.modeListbox.classList.add("hidden"); el.modeTrigger.setAttribute("aria-expanded","false"); }
+function handleModeKeys(event) {
+  if (!["ArrowDown","ArrowUp","Enter","Escape"].includes(event.key)) return;
+  event.preventDefault();
+  if (!state.modeListOpen) { if (event.key !== "Escape") openModeList(); return; }
+  if (event.key === "Escape") { closeModeList(); return; }
+  const options = [...el.modeListbox.querySelectorAll(".mode-option")];
+  if (event.key === "Enter") { const target = el.modeListbox.querySelector(".mode-option.focused") || el.modeListbox.querySelector('[aria-selected="true"]'); if (target) target.click(); return; }
+  const current = options.findIndex(item => item.classList.contains("focused"));
+  const next = options[(current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length];
+  options.forEach(item => item.classList.toggle("focused", item === next));
+  if (next) next.focus();
+}
+// 输入框三个下拉共用的悬停逻辑：指针进入即展开，移开延迟收起。
+// 列表是控件的子节点，指针移到面板上不算离开，这点延迟只用来跨过触发按钮与
+// 面板之间的空隙；点击仍是开合切换，悬停已展开时点击即收起。
+const HOVER_CLOSE_DELAY = 150;
+function bindHoverDropdown(root, open, close) {
+  if (!root) return;
+  let timer = null;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  root.addEventListener("mouseenter", () => { cancel(); open(); });
+  root.addEventListener("mouseleave", () => {
+    cancel();
+    timer = setTimeout(() => { timer = null; close(); }, HOVER_CLOSE_DELAY);
+  });
+}
 function setConnection(status, label) {
   el.connection.className = `connection ${status}`;
   $("b", el.connection).textContent = label;
@@ -2506,7 +2756,15 @@ async function bootstrap() {
 }
 el.newSession.onclick = createSession;
 el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList(); el.modelTrigger.onkeydown = handleModelKeys;
-el.skillTrigger.onclick = () => state.skillListOpen ? closeSkillList() : openSkillList();
+// 清除技能后把焦点还回输入框，用户可以接着敲 "/" 或正文
+el.skillChip.onclick = () => { selectSkill(""); el.input.focus(); };
+el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();
+el.modeTrigger.onkeydown = handleModeKeys;
+bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);
+bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
+bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
+selectMode(state.mode);
+renderSkillChip();
 el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSettings(); el.cancelSettings.onclick = () => closeSettings(); el.saveSettings.onclick = saveSettings; el.addProvider.onclick = addProvider;
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
 if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
@@ -2524,8 +2782,8 @@ el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ?
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
 el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
-el.input.oninput = () => { autoGrowInput(); updateSendState(); };
-el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
+el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };
+el.input.onkeydown = event => { if (handleSlashKeys(event)) return; if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
 // 浮层高度会随卡片折叠/换提问而变，计划窗口得跟着重新贴合（变大顶开、变小落回）
@@ -2567,9 +2825,18 @@ document.addEventListener("drop", event => {
   event.preventDefault(); dragDepth = 0; showDropOverlay(false);
   if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
 });
-document.querySelectorAll("[data-mode]").forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active",item === button)); });
-document.addEventListener("click", event => { if (state.modelListOpen && !event.target.closest(".model-control:not(.skill-control)")) closeModelList(); if (state.skillListOpen && !event.target.closest(".skill-control")) closeSkillList(); if (!el.sessionPanel.classList.contains("hidden") && !event.target.closest("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions(); });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSkillList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+// 点击落在哪个容器内，用事件派发时固定的 composedPath 判断：
+// 选项点击可能重建面板内容（如「模型」指令切到模型列表），此时被点的行已脱离 DOM，
+// 再用 event.target.closest 会判成"点在面板外"，把刚打开的面板当场关掉。
+document.addEventListener("click", event => {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const inside = selector => path.some(node => node.nodeType === 1 && node.matches && node.matches(selector));
+  if (state.modelListOpen && !inside(".model-control:not(.mode-control)")) closeModelList();
+  if (state.modeListOpen && !inside(".mode-control")) closeModeList();
+  if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();
+  if (!el.sessionPanel.classList.contains("hidden") && !inside("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions();
+});
+document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
 
 // --- 语音转文字（voice_asr）：点击录音 → 浏览器端编码 16kHz WAV → POST /asr → 回填输入框 ---
 const voice = {
