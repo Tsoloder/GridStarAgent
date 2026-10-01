@@ -607,3 +607,41 @@ def test_webui_clears_stream_state_and_avoids_duplicate_streams():
     reconnect = reconnect[:reconnect.index("async function maybeReconnect")]
     assert guard in reconnect
 
+
+def test_webui_phase_panel_visibility_contract():
+    """计划窗口只有一条可见性规则：有未收尾阶段才显示，全部收尾即收起。
+
+    回归守卫：切会话时若只给面板加 hidden，上一条会话的旧 DOM 与旧
+    state.phasePlan 会留在页面里，之后切回对话页签时会按"看起来还有计划"
+    重新亮出来，表现为切换对话后仍显示上一个流程面板。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 收起必须同时清 DOM 与状态，否则残留会被后续判断当成"还有计划"
+    hide = script[script.index("function hidePhasePanel()"):]
+    hide = hide[:hide.index("function renderPhase(")]
+    assert 'el.phasePanel.classList.add("hidden");' in hide
+    assert 'el.phasePanel.innerHTML = "";' in hide
+    assert "state.phasePlan = null;" in hide
+
+    # 完成即收起的规则收在渲染口，实时更新/切会话/回放历史都绕不过去
+    render = script[script.index("function renderPhase("):]
+    render = render[:render.index("// 过程区挂在卡底")]
+    assert "if (planComplete(phase)) { hidePhasePanel(); return; }" in render
+
+    # 切会话走同一个收起函数
+    load = script[script.index("async function loadSession("):]
+    load = load[:load.index("function renderSessions(")]
+    assert 'el.messages.innerHTML = ""; hidePhasePanel();' in load
+    assert 'el.phasePanel.classList.add("hidden")' not in load
+
+    # 回对话页签按状态判断，不再按残留 DOM 判断
+    tab = script[script.index("function switchViewTab("):]
+    tab = tab[:tab.index("// 时间轴命中检测")]
+    assert ('if (state.phasePlan && !planComplete(state.phasePlan)) '
+            'el.phasePanel.classList.remove("hidden");') in tab
+    assert "el.phasePanel.innerHTML.trim()" not in tab
+
+    # 本轮结束时的收起同样走同一函数
+    assert "if (visible && planComplete(state.phasePlan)) hidePhasePanel();" in script
+

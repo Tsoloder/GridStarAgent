@@ -872,7 +872,7 @@ function finishAssistant(message, deferred = false) {
   // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
   if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
   // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起，下一条 plan_updated 会自动再出现
-  if (visible && planComplete(state.phasePlan)) el.phasePanel.classList.add("hidden");
+  if (visible && planComplete(state.phasePlan)) hidePhasePanel();
   scrollMessages();
 }
 function appendReasoning(message, delta) {
@@ -1152,9 +1152,20 @@ function phaseStats(phases) {
   if (counts.skip) segs.push(`<b class="st-skip">${counts.skip} 跳过</b>`);
   return segs.join(" · ") || "0 已完成";
 }
+// 收起计划窗口：连 DOM 与 state 一起清掉。
+// 只加 hidden 会留下上一条会话的旧 DOM 与旧 state.phasePlan，切会话后再
+// 切回对话页签时会被"看起来还有计划"的判断重新亮出来。
+function hidePhasePanel() {
+  el.phasePanel.classList.add("hidden");
+  el.phasePanel.innerHTML = "";
+  state.phasePlan = null;
+}
 function renderPhase(value) {
   const phase = extractPhase(value) || value;
   if (!phase || !Array.isArray(phase.phases)) return;
+  // 计划窗口只服务执行过程：全部阶段进入终态就收起，下一条 plan_updated 会再次出现。
+  // 规则放在这里而不是各调用点，避免"实时渲染收起、切会话/回放历史又亮起"的不一致。
+  if (planComplete(phase)) { hidePhasePanel(); return; }
   state.phasePlan = phase;
   el.phasePanel.classList.remove("hidden");
   const completed = phase.phases.filter(item => PHASE_DONE_STATUS.includes(item.status)).length;
@@ -1490,7 +1501,7 @@ async function loadSession(id) {
     state.session = await request(`/sessions/${encodeURIComponent(id)}`);
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
-    el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay();
+    el.messages.innerHTML = ""; hidePhasePanel(); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
     if (!restoreView(id)) {
       if (!state.session.messages.length) showWelcome();
@@ -3155,7 +3166,7 @@ function switchViewTab(tab) {
   el.messages.classList.toggle("hidden", traj);
   el.composer.classList.toggle("hidden", traj);
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
-  else { if (el.phasePanel.innerHTML.trim() && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
+  else { if (state.phasePlan && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
   syncTurnRail();
 }
 // 时间轴命中检测：优先取包含该点的最窄跨度，否则取投影上最近的跨度（deepseek-harness 式点击定位）
