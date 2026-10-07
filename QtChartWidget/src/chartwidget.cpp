@@ -1959,6 +1959,9 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
         // 父级会被误判为“面板外”，先关闭、松开又重开，表现为无法再次点击收起。
         if (target && isSelfOrChildOf(target, m_sessionTrigger))
             return true;
+        // 斜杠面板不是 Qt::Popup，点面板外得自己收（webui 的 document 点击处理）
+        if (target && m_composer && m_composer->slashOpen())
+            m_composer->dismissSlashForClick(target);
         if (m_sessionPanel->isOpen() && target
             && !isSelfOrChildOf(target, m_sessionTrigger)
             && !isSelfOrChildOf(target, m_sessionPanel)

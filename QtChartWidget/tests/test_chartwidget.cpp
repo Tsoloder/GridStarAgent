@@ -386,6 +386,7 @@ private slots:
     void zoomSteps();
     void modeModelSkillSignals();
     void dropdownHoverOpens();
+    void slashMenuClosesOnOutsideClick();
     void inputSendRoundTrip();
     void attachmentChipPreview();
     void skillChipSizedToName();
@@ -623,6 +624,30 @@ void TestChartWidget::dropdownHoverOpens()
     if (QWidget *popup = visiblePopup(QStringLiteral("model")))
         popup->hide();
     QTest::qWait(10);
+}
+
+// 斜杠面板：点面板外收起（webui 的 document 点击处理）；点输入框与面板内不算外面。
+// 面板是普通子控件（不是 Qt::Popup），不会自己失焦收起，靠 ChartWidget 的全局过滤。
+void TestChartWidget::slashMenuClosesOnOutsideClick()
+{
+    QWidget *input = m_chart->findChild<QWidget *>(QStringLiteral("messageInput"));
+    QVERIFY(input);
+    m_chart->setInputText(QStringLiteral("/"));
+    QTest::qWait(20);
+    QWidget *slash = m_chart->findChild<QWidget *>(QStringLiteral("slashMenu"));
+    QVERIFY(slash && slash->isVisible());
+
+    // 点输入框：面板留着（还能接着敲过滤词）
+    clickWidget(input);
+    QTest::qWait(10);
+    QVERIFY(slash->isVisible());
+
+    // 点消息区 → 面板外 → 收起
+    QWidget *messages = m_chart->findChild<QWidget *>(QStringLiteral("messages"));
+    QVERIFY(messages);
+    clickWidget(messages);
+    QTest::qWait(10);
+    QVERIFY(!slash->isVisible());
 }
 
 void TestChartWidget::inputSendRoundTrip()

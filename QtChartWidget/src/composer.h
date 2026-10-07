@@ -70,6 +70,9 @@ public:
     void reEnableApproval(const QString &callId);
     // 主题缩放变了：芯片的文字宽度是实测出来的，得按新字号重算
     void refreshZoom();
+    // 斜杠面板是否展开；点面板外收起（由 ChartWidget 的全局事件过滤在按下时调用）
+    bool slashOpen() const { return m_slashOpen; }
+    void dismissSlashForClick(QObject *target);
 
 signals:
     void sendMessage(const QString &text, const QString &display, const QVariantList &attachments);

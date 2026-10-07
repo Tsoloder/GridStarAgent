@@ -36,6 +36,9 @@
   只在光标位于控件上时打开的下拉才归悬停逻辑管，程序化 / 键盘打开的不受影响
 - 下拉触发器聚焦时 **Enter / Space / 方向键** 也能展开（webui 触发器是原生 button，
   `handleModelKeys` / `handleModeKeys` 又允许方向键展开）；会话栏触发器同样吃 Enter / Space
+- 斜杠面板不是 `Qt::Popup`，点面板外要自己收（webui 的 document 点击处理）：
+  `ChartWidget` 的全局事件过滤在按下时调 `Composer::dismissSlashForClick`，面板内、输入区
+  与上溯到 Composer 祖先的冒泡事件都不算点外面
 - **计划面板**：运行指示器统一为旋转开口环（`spinRing` 0.7s，替换原呼吸点）；步骤状态改为
   轻量圆点语言（待处理灰点 / 已完成绿点 / 失败红点 / 跳过虚线点）；标题后的分数徽标换成
   统计串（`N 已完成 · N 进行中 · N 待处理 · N 失败 · N 跳过`，只列非零项、按状态着色，

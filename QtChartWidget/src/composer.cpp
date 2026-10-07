@@ -676,6 +676,31 @@ void Composer::closeSlashMenu()
     m_slashOpen = false;
 }
 
+// webui：state.slashOpen && !inside("#slash-menu") && event.target !== el.input → 收起。
+// 斜杠面板是普通子控件（不是 Qt::Popup），点面板外不会自动收，得靠全局过滤这条。
+void Composer::dismissSlashForClick(QObject *target)
+{
+    if (!m_slashOpen)
+        return;
+    QWidget *widget = qobject_cast<QWidget *>(target);
+    if (!widget || widget->window() != window())
+        return; // 别的窗口的点击不算「点面板外」
+    const auto isSelfOrChild = [](QWidget *w, QWidget *root) {
+        for (QWidget *cur = w; cur; cur = cur->parentWidget()) {
+            if (cur == root)
+                return true;
+        }
+        return false;
+    };
+    // 面板内、输入区（Composer 子树）都算里面；上溯到 Composer 的祖先也算——
+    // 真实/合成按下 QTextEdit 时事件可能被它忽略而逐层冒泡到顶，
+    // 认到外壳甚至 appShell 都不能算「点了外面」。
+    if (isSelfOrChild(widget, m_slash) || isSelfOrChild(widget, this)
+        || isSelfOrChild(this, widget))
+        return;
+    closeSlashMenu();
+}
+
 void Composer::runSlashItem(const QString &kind, const QString &id)
 {
     if (kind == QLatin1String("skill")) {
