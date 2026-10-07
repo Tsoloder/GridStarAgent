@@ -6,6 +6,7 @@
 #include "popups.h"
 #include "theme.h"
 
+#include <QCursor>
 #include <QEvent>
 #include <QFocusEvent>
 #include <QHBoxLayout>
@@ -132,6 +133,15 @@ Composer::Composer(QWidget *parent)
     buildControl(QString::fromUtf8("模型"), &m_modelTrigger, &m_modelControl);
     m_modeTrigger->setText(QString::fromUtf8("手动"));
 
+    // webui bindHoverDropdown：模型 / 模式两个控件都是「悬停展开、点击开合」
+    for (QWidget *hoverTarget : { static_cast<QWidget *>(m_modeControl),
+                                  static_cast<QWidget *>(m_modeTrigger),
+                                  static_cast<QWidget *>(m_modelControl),
+                                  static_cast<QWidget *>(m_modelTrigger) }) {
+        hoverTarget->setAttribute(Qt::WA_Hover, true);
+        hoverTarget->installEventFilter(this);
+    }
+
     // webui：Skill 触发器与下拉整块删除，改成输入框左侧的小标签（#skill-chip）
     m_skillChip = new QPushButton(m_leftControls);
     m_skillChip->setObjectName(QStringLiteral("skillChip"));
@@ -237,7 +247,13 @@ Composer::Composer(QWidget *parent)
         clearAttachments();
         emit sendMessage(content, content, attachments);
     });
-    connect(m_modelTrigger, &ComboTrigger::clicked, this, &Composer::openModelList);
+    connect(m_modelTrigger, &ComboTrigger::clicked, this, [this] {
+        // webui：悬停已展开时点击即收起，否则展开
+        if (m_modelList && m_modelList->isVisible())
+            closeModelList();
+        else
+            openModelList();
+    });
     m_modelTrigger->setObjectName(QStringLiteral("modelTrigger"));
     m_modeTrigger->setObjectName(QStringLiteral("modeTrigger"));
     connect(m_modeTrigger, &ComboTrigger::clicked, this, [this] {
@@ -261,6 +277,11 @@ Composer::Composer(QWidget *parent)
     connect(m_slash, &SlashPanel::itemChosen, this, &Composer::runSlashItem);
     m_modelList->installEventFilter(this);
     m_modeList->installEventFilter(this);
+    // 悬停开合的游标轮询：只在浮层由悬停（光标在控件上）打开时启用，
+    // 每 tick 检查光标是否还留在 [控件 ∪ 浮层] 里（75ms × 2 = webui 的 150ms 延迟）
+    m_hoverPoll = new QTimer(this);
+    m_hoverPoll->setInterval(75);
+    connect(m_hoverPoll, &QTimer::timeout, this, &Composer::hoverPollTick);
     connect(m_input, &QTextEdit::textChanged, this, [this] {
         autoGrowInput();
         // 正文变化时同步斜杠面板：不以 "/" 开头就收起，否则刷新候选并保持展开
@@ -443,6 +464,10 @@ bool Composer::eventFilter(QObject *watched, QEvent *event)
         m_modelTrigger->setOpen(false);
     } else if (watched == m_modeList && event->type() == QEvent::Hide) {
         m_modeTrigger->setOpen(false);
+    } else if (watched == m_modeControl || watched == m_modeTrigger
+               || watched == m_modelControl || watched == m_modelTrigger) {
+        if (event->type() == QEvent::HoverEnter)
+            hoverEnterControl(watched == m_modeControl || watched == m_modeTrigger);
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -470,6 +495,9 @@ void Composer::openModeList()
     m_modeList->setModeOptions(m_mode);
     m_modeTrigger->setOpen(true);
     m_modeList->openAbove(m_modeControl ? m_modeControl : m_modeTrigger);
+    // 光标在控件上才计入悬停管辖：程序化/键盘打开的下拉不该被悬停逻辑收走
+    m_hoverManagedMode = cursorIn(m_modeControl) || cursorIn(m_modeTrigger);
+    updateHoverPoll();
 }
 
 void Composer::closeModeList()
@@ -477,11 +505,72 @@ void Composer::closeModeList()
     if (m_modeList)
         m_modeList->hide();
     m_modeTrigger->setOpen(false);
+    m_hoverManagedMode = false;
+    updateHoverPoll();
 }
 
 bool Composer::modeListOpen() const
 {
     return m_modeList && m_modeList->isVisible();
+}
+
+// webui bindHoverDropdown：指针进入 .model-control / .mode-control 即展开
+void Composer::hoverEnterControl(bool modeControl)
+{
+    if (modeControl) {
+        if (!modeListOpen())
+            openModeList();
+    } else if (!(m_modelList && m_modelList->isVisible())) {
+        openModelList();
+    }
+}
+
+bool Composer::cursorIn(QWidget *widget) const
+{
+    if (!widget || !widget->isVisible())
+        return false;
+    return widget->rect().contains(widget->mapFromGlobal(QCursor::pos()));
+}
+
+void Composer::updateHoverPoll()
+{
+    if (!m_hoverPoll)
+        return;
+    const bool managed = (m_modeList && m_modeList->isVisible() && m_hoverManagedMode)
+                         || (m_modelList && m_modelList->isVisible() && m_hoverManagedModel);
+    if (managed) {
+        if (!m_hoverPoll->isActive())
+            m_hoverPoll->start();
+    } else {
+        m_hoverPoll->stop();
+        m_hoverOutside = 0;
+    }
+}
+
+void Composer::hoverPollTick()
+{
+    const bool modeVisible = m_modeList && m_modeList->isVisible() && m_hoverManagedMode;
+    const bool modelVisible = m_modelList && m_modelList->isVisible() && m_hoverManagedModel;
+    if (!modeVisible && !modelVisible) {
+        m_hoverPoll->stop();
+        m_hoverOutside = 0;
+        return;
+    }
+    QWidget *control = modeVisible ? m_modeControl : m_modelControl;
+    QWidget *popup = modeVisible ? static_cast<QWidget *>(m_modeList)
+                                 : static_cast<QWidget *>(m_modelList);
+    // 触发器到浮层之间有 7px 缝隙，走过缝隙时也不该算离开（webui 用 150ms 延迟跨过它）
+    if (cursorIn(control) || cursorIn(popup)) {
+        m_hoverOutside = 0;
+        return;
+    }
+    if (++m_hoverOutside >= 2) {
+        m_hoverOutside = 0;
+        if (modeVisible)
+            closeModeList();
+        else
+            closeModelList();
+    }
 }
 
 // 名字宽度按字体实测（QSS 的 padding 不参与 sizeHint 计算，只能自己量）
@@ -709,6 +798,8 @@ void Composer::openModelList()
     m_modelTrigger->setOpen(true);
     // webui 下拉贴在外层 .model-control 左缘，而不是内部按钮
     m_modelList->openAbove(m_modelControl ? m_modelControl : m_modelTrigger);
+    m_hoverManagedModel = cursorIn(m_modelControl) || cursorIn(m_modelTrigger);
+    updateHoverPoll();
 }
 
 void Composer::closeModelList()
@@ -716,6 +807,8 @@ void Composer::closeModelList()
     if (m_modelList)
         m_modelList->hide();
     m_modelTrigger->setOpen(false);
+    m_hoverManagedModel = false;
+    updateHoverPoll();
 }
 
 void Composer::addAttachments(const QVariantList &items)

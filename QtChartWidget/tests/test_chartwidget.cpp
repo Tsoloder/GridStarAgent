@@ -14,6 +14,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFont>
 #include <QFrame>
@@ -384,6 +385,7 @@ private slots:
     void themeSwitchAndSignal();
     void zoomSteps();
     void modeModelSkillSignals();
+    void dropdownHoverOpens();
     void inputSendRoundTrip();
     void attachmentChipPreview();
     void skillChipSizedToName();
@@ -554,6 +556,53 @@ void TestChartWidget::modeModelSkillSignals()
                                                    QStringLiteral("CFD 网格") } } });
     m_chart->setCurrentSkill(QStringLiteral("cfd-meshing"));
     QCOMPARE(m_chart->currentSkill(), QStringLiteral("cfd-meshing"));
+}
+
+// webui bindHoverDropdown：模型 / 模式两个下拉是「悬停展开、点击开合」。
+// 合成 HoverEnter 驱动（真实指针悬停会由 Qt 从 WA_Hover 派生同一事件）。
+void TestChartWidget::dropdownHoverOpens()
+{
+    QWidget *modeTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modeTrigger"));
+    QWidget *modelTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modelTrigger"));
+    QVERIFY(modeTrigger && modelTrigger);
+    QWidget *modeControl = modeTrigger->parentWidget();
+    QWidget *modelControl = modelTrigger->parentWidget();
+    QVERIFY(modeControl && modelControl);
+
+    auto visiblePopup = [this](const QString &role) -> QWidget * {
+        for (QWidget *popup : m_chart->findChildren<QWidget *>(QStringLiteral("listbox"))) {
+            if (popup->property("role").toString() == role && popup->isVisible())
+                return popup;
+        }
+        return nullptr;
+    };
+    auto hover = [](QWidget *widget) {
+        QEvent event(QEvent::HoverEnter);
+        QApplication::sendEvent(widget, &event);
+    };
+
+    // 悬停模型控件 → 模型下拉展开，不用点
+    hover(modelControl);
+    QTest::qWait(10);
+    QVERIFY(visiblePopup(QStringLiteral("model")));
+
+    // 移到模式控件（子在父上，走触发器）：模式下拉展开、模型下拉让位
+    hover(modeTrigger);
+    QTest::qWait(10);
+    QVERIFY(visiblePopup(QStringLiteral("mode")));
+    QVERIFY(!visiblePopup(QStringLiteral("model")));
+
+    // 点击仍是开合切换：悬停已展开时点击即收起，再点又展开
+    clickWidget(modeTrigger);
+    QTest::qWait(10);
+    QVERIFY(!visiblePopup(QStringLiteral("mode")));
+    clickWidget(modeTrigger);
+    QTest::qWait(10);
+    QVERIFY(visiblePopup(QStringLiteral("mode")));
+
+    if (QWidget *popup = visiblePopup(QStringLiteral("mode")))
+        popup->hide();
+    QTest::qWait(10);
 }
 
 void TestChartWidget::inputSendRoundTrip()

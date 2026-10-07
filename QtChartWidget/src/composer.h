@@ -11,6 +11,7 @@ class QTextEdit;
 class QHideEvent;
 class QMoveEvent;
 class QShowEvent;
+class QTimer;
 QT_END_NAMESPACE
 
 namespace gs {
@@ -110,6 +111,12 @@ private:
     void openModeList();
     void closeModeList();
     bool modeListOpen() const;
+    // webui bindHoverDropdown：指针移入 .model-control / .mode-control 即展开，
+    // 移开 150ms 后收起（HOVER_CLOSE_DELAY）。焦点移到浮层上不算离开。
+    void hoverEnterControl(bool modeControl);
+    void updateHoverPoll();
+    void hoverPollTick();
+    bool cursorIn(QWidget *widget) const;
     void selectMode(const QString &value);
     void renderSkillChip();
     // 技能芯片的最小宽要按名字实测，QPushButton 不吃子控件的宽度
@@ -167,6 +174,12 @@ private:
     QLabel *m_busyLabel = nullptr;
     ChoiceOverlay *m_choice = nullptr;
     bool m_choiceOpen = false;
+    // 悬停开合：列表在光标下打开时才接管（键盘/程序化打开的不会被悬停逻辑收走），
+    // 光标离开控件与浮层合计 150ms 就收起
+    QTimer *m_hoverPoll = nullptr;
+    int m_hoverOutside = 0;
+    bool m_hoverManagedMode = false;
+    bool m_hoverManagedModel = false;
     // layoutChoiceOverlay() 量高时会改卡片几何 -> resizeEvent -> sizeChanged 回头调用本函数
     bool m_choiceLayingOut = false;
 };
