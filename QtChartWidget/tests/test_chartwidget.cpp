@@ -603,6 +603,26 @@ void TestChartWidget::dropdownHoverOpens()
     if (QWidget *popup = visiblePopup(QStringLiteral("mode")))
         popup->hide();
     QTest::qWait(10);
+
+    // 键盘：触发器聚焦时方向键 / Enter 也能开合（webui button + handleModelKeys）
+    modeTrigger->setFocus(Qt::TabFocusReason);
+    QTest::qWait(10);
+    QVERIFY(!visiblePopup(QStringLiteral("mode")));
+    QTest::keyClick(modeTrigger, Qt::Key_Down);
+    QTest::qWait(10);
+    QVERIFY(visiblePopup(QStringLiteral("mode")));
+    if (QWidget *popup = visiblePopup(QStringLiteral("mode")))
+        popup->hide();
+    QTest::qWait(10);
+
+    modelTrigger->setFocus(Qt::TabFocusReason);
+    QTest::qWait(10);
+    QTest::keyClick(modelTrigger, Qt::Key_Return);
+    QTest::qWait(10);
+    QVERIFY(visiblePopup(QStringLiteral("model")));
+    if (QWidget *popup = visiblePopup(QStringLiteral("model")))
+        popup->hide();
+    QTest::qWait(10);
 }
 
 void TestChartWidget::inputSendRoundTrip()

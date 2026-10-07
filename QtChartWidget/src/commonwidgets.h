@@ -122,6 +122,7 @@ signals:
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool event(QEvent *event) override;
 

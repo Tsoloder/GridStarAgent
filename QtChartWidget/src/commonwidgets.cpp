@@ -334,6 +334,21 @@ void ComboTrigger::mousePressEvent(QMouseEvent *event)
     QWidget::mousePressEvent(event);
 }
 
+void ComboTrigger::keyPressEvent(QKeyEvent *event)
+{
+    // webui：触发器是原生 button，Enter / Space 即激活（与点击等价）
+    switch (event->key()) {
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+    case Qt::Key_Space:
+        emit clicked();
+        return;
+    default:
+        break;
+    }
+    QWidget::keyPressEvent(event);
+}
+
 bool ComboTrigger::event(QEvent *event)
 {
     if (event->type() == QEvent::FontChange)

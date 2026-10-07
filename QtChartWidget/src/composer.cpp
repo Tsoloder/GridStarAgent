@@ -466,8 +466,23 @@ bool Composer::eventFilter(QObject *watched, QEvent *event)
         m_modeTrigger->setOpen(false);
     } else if (watched == m_modeControl || watched == m_modeTrigger
                || watched == m_modelControl || watched == m_modelTrigger) {
-        if (event->type() == QEvent::HoverEnter)
-            hoverEnterControl(watched == m_modeControl || watched == m_modeTrigger);
+        const bool modeControl = watched == m_modeControl || watched == m_modeTrigger;
+        if (event->type() == QEvent::HoverEnter) {
+            hoverEnterControl(modeControl);
+        } else if (event->type() == QEvent::KeyPress
+                   && (watched == m_modeTrigger || watched == m_modelTrigger)) {
+            const int key = static_cast<QKeyEvent *>(event)->key();
+            if (key == Qt::Key_Down || key == Qt::Key_Up) {
+                // webui handleModelKeys / handleModeKeys：闭着时方向键也能展开
+                if (modeControl) {
+                    if (!modeListOpen())
+                        openModeList();
+                } else if (!(m_modelList && m_modelList->isVisible())) {
+                    openModelList();
+                }
+                return true;
+            }
+        }
     }
     return QWidget::eventFilter(watched, event);
 }

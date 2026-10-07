@@ -258,6 +258,7 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
   `setMode` / `setBusy` / `setConfigLoaded` / `setConfigWarning` / `setInputText`。
   交互模式与模型都是**触发器 + 下拉**（`modeTrigger` / `modelTrigger`，外层 `.modelControl`
   框），指针移入即展开、移开 150ms 收起（webui `bindHoverDropdown`），点击仍是开合切换；
+  触发器聚焦时 Enter / Space / 方向键也能展开（webui 原生 button + `handleModelKeys`）；
   正文以 `/` 开头就弹出**斜杠面板**：根级三组（指令：模型 / 导出对话；技能：不启用技能
   + 各技能），选「模型」会换成带搜索框的可筛选模型列表。选中技能后走 `skillSelected`，
   输入框上方出现可清除的技能芯片（`skillChip`）；面板里的「导出对话」发 `sessionExportRequested`
@@ -528,7 +529,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 | 分组 | 用例 |
 | --- | --- |
 | 皮肤 / 缩放 | `themeSwitchAndSignal`（含未知皮肤回退、三套皮肤的 QSS 确实重设）、`appStyleSheetParsesFully`（整张样式表被 Qt 完整解析：无 `:not(` / `:!` 等不受支持的选择器，末尾追加的探针规则仍命中）、`zoomSteps`（档位步进与封顶） |
-| 输入区 | `modeModelSkillSignals`、`dropdownHoverOpens`（模型 / 模式下拉悬停展开、点击开合）、`inputSendRoundTrip`（发送态 / 信号 / 清空）、`attachmentChipPreview`（图片缩略图 / 扩展名 / 上传中文案）、`skillChipSizedToName`（芯片高 28、宽度按名字实测、清空技能后整块隐藏）、`inputAutoGrowOnResize`（宽度变了高度跟着重算） |
+| 输入区 | `modeModelSkillSignals`、`dropdownHoverOpens`（模型 / 模式下拉悬停展开、点击 / 键盘开合）、`inputSendRoundTrip`（发送态 / 信号 / 清空）、`attachmentChipPreview`（图片缩略图 / 扩展名 / 上传中文案）、`skillChipSizedToName`（芯片高 28、宽度按名字实测、清空技能后整块隐藏）、`inputAutoGrowOnResize`（宽度变了高度跟着重算） |
 | 历史渲染 | `historyMergesTurnWithUsageAndTiming`（一轮一张卡 + 用量/用时/时刻）、`historyToolResultBackfill`（结果回填、摘要、参数表）、`expandKeepsScrollPosition`（展开工具项后重判贴底，流式分片不抢滚动） |
 | 选择浮层 | `optionsOverlayChooseAndEsc`（点选项即确认 + Esc 收起）、`optionsOverlayFreeText`（「其他」自由作答、空文本拦截）、`toolParamsOverlaySubmit`（参数回填成结构化消息）、`approvalOverlayRoundTrip`（批准回执 + 宿主收卡） |
 | 卡片 | `workflowProposalRun`、`phasePlanCollapsesWhenComplete`（跑完收起 / 执行中不收起）、`phasePlanSurvivesViewTabSwitch`（切轨迹再切回仍恢复） |
