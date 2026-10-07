@@ -231,13 +231,18 @@ private:
     bool m_hovering = false;
 };
 
-// 呼吸圆点（.run-dot / 阶段项 active 指示）：运行态下透明度往复动画
+// 状态指示器：呼吸圆点（badgePulse 1.4s 透明度往复）或旋转圆环（spinRing 0.7s）
 class PulseDot : public QWidget
 {
     Q_OBJECT
 public:
+    enum Style { Pulse, Spin };
     explicit PulseDot(QWidget *parent = nullptr);
     void setColor(const QColor &color);
+    // Spin：不填色的开口圆环，围绕中心匀速旋转（.run-dot 的新形态）
+    void setStyle(Style style);
+    // 覆盖 Spin 环的几何：sizePx 是含描边的外径，borderPx 是描边宽度
+    void setRing(int sizePx, qreal borderPx);
     void setActive(bool active);
     bool isActive() const { return m_active; }
     QSize sizeHint() const override { return QSize(6, 6); }
@@ -247,7 +252,11 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    void advance();
     QColor m_color;
+    Style m_style = Pulse;
+    int m_ringSize = 8;      // Spin 环外径（含描边）
+    qreal m_ringBorder = 1.5; // 描边宽度
     bool m_active = false;
     qreal m_phase = 0.0;
     QTimer *m_timer = nullptr;

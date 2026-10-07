@@ -3,6 +3,51 @@
 版本号遵循语义化版本：**公开头 `include/chartwidget.h` 有破坏性改动时主版本号 +1**。
 版本字符串在 `src/chartwidget.cpp` 的 `qtchartwidget_version()`，改这里时同步改本文件。
 
+## 2.2.0
+
+对齐 `webui/` 自 `2.1.0` 之后的四个提交：`bf57771`（输入框控件改为下拉与斜杠面板）、
+`dfbb564`（计划面板指示器与统计串）、`ec0c76a`（计划面板只在有未收尾阶段时显示）、
+`adf220d`（内网 HTTPS SSL 证书验证配置）。公开头只做加法（新增信号 `sessionExportRequested`），
+故次版本号 +1。
+
+### 新增
+
+- 公开信号 `sessionExportRequested()`：斜杠面板里的「/ 导出对话」。宿主 `POST
+  /sessions/{id}/export`，成功提示 `已导出：<path>`、失败提示 `导出失败：<error>`
+- 斜杠面板（`#slash-menu`）：输入框正文以 `/` 开头即浮在输入框上方；根级两组 ——
+  指令（模型 / 导出对话）在前、技能（不启用技能 + 各技能）在后；选「模型」切成带搜索框的
+  可筛选模型列表。键盘在输入框事件过滤器里驱动（上下走候选、回车选中、Esc 收起），
+  面板自身不抢焦点；过滤后只在可见行之间移动
+- 技能芯片（`#skill-chip`）：选中技能后出现在输入框左侧，点击清除；没有技能时整块隐藏
+- 交互模式下拉（`.mode-control`）：每项一行标题 + 一行说明（手动逐步确认 / 自动连续执行），
+  选中项右侧打勾
+
+### 行为变化（签名不变，但宿主需要知道）
+
+- **交互模式**由分段按钮改为下拉（`.model-control.mode-control`）；`setMode` / `modeChanged` 不变
+- **技能选择**由第三个下拉改为 `/` 面板 + 芯片：原 skill 触发器与下拉删除，
+  `setSkills` / `setCurrentSkill` / `skillSelected` 签名不变
+- **模型下拉只列配置里写过的模型**（`configuredModels`）：供应商发现来的整份目录
+  （`status === "discovered"`）不进选择范围；按名字回显仍走 `visibleModels`，否则既有会话
+  选中的发现模型会显示成「未配置」。选中勾从最左移到最右（`modelKey` / `modelName` / `visibleModels` 不变）。
+  触发按钮不再带箭头，`.model-control` 内边距改为左右对称
+- **计划面板**：运行指示器统一为旋转开口环（`spinRing` 0.7s，替换原呼吸点）；步骤状态改为
+  轻量圆点语言（待处理灰点 / 已完成绿点 / 失败红点 / 跳过虚线点）；标题后的分数徽标换成
+  统计串（`N 已完成 · N 进行中 · N 待处理 · N 失败 · N 跳过`，只列非零项、按状态着色，
+  宽度不够从尾部丢段）。计划全终态就在渲染口收起，收起时连面板内容一起清
+  （`hidePhasePanel` / `clearPlan`），空轮收尾那条早退路径也要结算
+- **过程行运行指示器**（`.run-dot`）同步改为 8px 旋转开口环
+- **设置中心**提供商草稿新增 `ssl_verify`：默认（系统证书）/ 跳过验证 / 自定义 CA 证书路径
+  三档，自定义时右侧多出「CA 证书路径」输入行，切走时该行收起并记住上次路径
+- 输入框占位文案补上「，输入 / 选择技能」
+
+### 内部
+
+- `makeLabel` 顺带把首个类名写进 `objectName`（按名 `findChild` 命中）
+- 技能芯片最小宽按名字实测（`QPushButton` 不吃子控件最小宽），缩放变更由 `refreshZoom` 重算
+- demo 宿主：`GET /sessions` 的 `storage_issues` 改为弹一次 Toast（webui `warnStorageIssues`，
+  同一条只弹一次）
+
 ## 2.1.0
 
 对齐 `webui/` 自 `4d5e742` 之后的四个提交（轮次导航轨改为悬浮展开整轮列表、

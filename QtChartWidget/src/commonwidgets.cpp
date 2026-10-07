@@ -281,8 +281,9 @@ ComboTrigger::ComboTrigger(QWidget *parent) : QWidget(parent)
     m_chevron = new QLabel(this);
     setClass(m_chevron, QStringLiteral("comboText"));
     m_chevron->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    m_chevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"),
-                                    gs::palette().muted, scaledPx(10)));
+    // webui 撤掉了触发器里的箭头（.model-control 的 padding 也改成左右对称），
+    // 保留成员是为兼容 setOpen()/refreshZoom() 的调用点，但不再占位
+    m_chevron->setVisible(false);
 
     layout->addWidget(m_text, 1);
     layout->addWidget(m_chevron, 0);
@@ -299,9 +300,6 @@ void ComboTrigger::setRightAligned(bool right)
 void ComboTrigger::setOpen(bool open)
 {
     m_open = open;
-    m_chevron->setPixmap(iconPixmap(open ? QStringLiteral("chevron-up")
-                                         : QStringLiteral("chevron-down"),
-                                    gs::palette().muted, scaledPx(10)));
 }
 
 void ComboTrigger::setText(const QString &text)
@@ -312,7 +310,7 @@ void ComboTrigger::setText(const QString &text)
 
 void ComboTrigger::updateElided()
 {
-    const int available = qMax(10, width() - 10 - m_chevron->sizeHint().width() - 5);
+    const int available = qMax(10, width() - 10);
     QFont f = font();
     f.setPixelSize(scaledPx(10));
     m_text->setText(elidedText(m_full, QFontMetrics(f), available));
@@ -320,7 +318,6 @@ void ComboTrigger::updateElided()
 
 void ComboTrigger::refreshZoom()
 {
-    setOpen(m_open); // 按当前缩放重建 chevron（保持展开状态）
     updateElided();
 }
 
@@ -618,17 +615,33 @@ PulseDot::PulseDot(QWidget *parent) : QWidget(parent)
     setFixedSize(6, 6);
     m_timer = new QTimer(this);
     m_timer->setInterval(60);
-    connect(m_timer, &QTimer::timeout, this, [this] {
-        m_phase += 0.06;
-        if (m_phase > 1.0)
-            m_phase -= 1.0;
-        update();
-    });
+    connect(m_timer, &QTimer::timeout, this, &PulseDot::advance);
 }
 
 void PulseDot::setColor(const QColor &color)
 {
     m_color = color;
+    update();
+}
+
+void PulseDot::setStyle(Style style)
+{
+    if (m_style == style)
+        return;
+    m_style = style;
+    // .run-dot 是 8px 开口环，比 6px 的实心点大一档
+    setFixedSize(m_style == Spin ? m_ringSize : 6, m_style == Spin ? m_ringSize : 6);
+    updateGeometry();
+    update();
+}
+
+void PulseDot::setRing(int sizePx, qreal borderPx)
+{
+    m_ringSize = qMax(4, sizePx);
+    m_ringBorder = qMax(0.5, borderPx);
+    // 半径变了要重算窗口尺寸（也是让先 setStyle 后 setRing 的调用顺序生效）
+    setFixedSize(m_style == Spin ? m_ringSize : 6, m_style == Spin ? m_ringSize : 6);
+    updateGeometry();
     update();
 }
 
@@ -644,10 +657,37 @@ void PulseDot::setActive(bool active)
     update();
 }
 
+// 每 tick 推进的相位：脉冲走 1.4s 一轮，旋转环走 0.7s 一轮（CSS 两套 keyframes）
+void PulseDot::advance()
+{
+    m_phase += m_style == Spin ? 0.12 : 0.06;
+    if (m_phase > 1.0)
+        m_phase -= 1.0;
+    update();
+}
+
 void PulseDot::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
+    if (m_style == Spin) {
+        // CSS：正方形边长 = 外径 - 描边（border 计入 box 内），青色 1.5px 开口环，0.7s 线性旋转
+        const qreal side = qMin(width(), height());
+        // 1.5px 这种半像素描边不经过 scaledPx（那个只吃整数），直接按缩放系数放大
+        const qreal pen = qMax<qreal>(1.0, m_ringBorder * gs::zoomFactor());
+        QRectF box(0, 0, side - pen, side - pen);
+        box.moveCenter(QRectF(rect()).center());
+        p.translate(QRectF(rect()).center());
+        p.rotate(m_phase * 360.0);
+        p.translate(-QRectF(rect()).center());
+        QPen ring(m_color);
+        ring.setWidthF(pen);
+        // 缺的一边就是"开口"：border-top-color:transparent 等价 3/4 圈
+        p.setBrush(Qt::NoBrush);
+        p.setPen(ring);
+        p.drawArc(box, 90 * 16, 270 * 16);
+        return;
+    }
     p.setPen(Qt::NoPen);
     QColor color = m_color;
     if (m_active) {
@@ -921,6 +961,11 @@ QLabel *makeLabel(const QString &className, const QString &text, QWidget *parent
 {
     auto *label = new QLabel(text, parent);
     setClass(label, className);
+    // 顺带把首个类名落到 objectName：类名本身走 QSS 的 .class，objectName 只是让
+    // findChild<QLabel*>("attachName") 这类按名查找能命中（宿主与测试都在这么用）
+    const QString objectName = className.section(QLatin1Char(' '), 0, 0);
+    if (!objectName.isEmpty())
+        label->setObjectName(objectName);
     label->setAttribute(Qt::WA_StyledBackground, false);
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
     return label;

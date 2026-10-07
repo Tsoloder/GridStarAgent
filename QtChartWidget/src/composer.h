@@ -21,6 +21,7 @@ class ComboTrigger;
 class FlowLayout;
 class IconPushButton;
 class ListBoxPopup;
+class SlashPanel;
 
 // 底部输入区（footer.composer）：输入框 + 附件条 + 控件行 + 选择浮层。
 // 控件行用流式布局，窄屏自动换行、随内容增高。
@@ -66,6 +67,8 @@ public:
     QString approvalCallId() const;
     void setApprovalResolved(const QString &callId, bool approved);
     void reEnableApproval(const QString &callId);
+    // 主题缩放变了：芯片的文字宽度是实测出来的，得按新字号重算
+    void refreshZoom();
 
 signals:
     void sendMessage(const QString &text, const QString &display, const QVariantList &attachments);
@@ -77,6 +80,8 @@ signals:
     void attachRequested();
     void voiceRequested();
     void attachmentRemoved(const QString &id);
+    // 斜杠面板里的「导出对话」指令：宿主负责 POST /sessions/{id}/export
+    void exportRequested();
 
     void optionChosen(const QString &value, const QString &label);
     void approvalDecided(const QString &callId, bool approved, const QVariantMap &args);
@@ -101,7 +106,27 @@ private:
     void layoutChoiceOverlay();
     void autoGrowInput();
     void openModelList();
-    void openSkillList();
+    void closeModelList();
+    void openModeList();
+    void closeModeList();
+    bool modeListOpen() const;
+    void selectMode(const QString &value);
+    void renderSkillChip();
+    // 技能芯片的最小宽要按名字实测，QPushButton 不吃子控件的宽度
+    void updateSkillChipWidth();
+
+    // ---- 斜杠面板（输入框敲 "/" 唤起，浮在输入框上方） ----
+    void layoutSlashPanel();
+    void syncSlashMenu();
+    // 正文不以 "/" 开头时返回空串，否则返回去掉 "/" 的过滤词
+    QString slashQuery() const;
+    void openSlashRoot();
+    void openSlashModelPicker();
+    void closeSlashMenu();
+    void runSlashItem(const QString &kind, const QString &id);
+    void selectSkill(const QString &id);
+    void finishSlashPick();
+
     bool inputBusy() const { return m_busy; }
 
     QString m_mode = QStringLiteral("manual");
@@ -122,14 +147,19 @@ private:
     QTextEdit *m_input = nullptr;
     QWidget *m_controls = nullptr;
     QWidget *m_leftControls = nullptr;
-    QPushButton *m_manual = nullptr;
-    QPushButton *m_auto = nullptr;
+    // webui：模式由分段按钮改成下拉（.model-control.mode-control）
+    ComboTrigger *m_modeTrigger = nullptr;
+    QWidget *m_modeControl = nullptr;
+    ListBoxPopup *m_modeList = nullptr;
     ComboTrigger *m_modelTrigger = nullptr;
-    ComboTrigger *m_skillTrigger = nullptr;
     QWidget *m_modelControl = nullptr;
-    QWidget *m_skillControl = nullptr;
     ListBoxPopup *m_modelList = nullptr;
-    ListBoxPopup *m_skillList = nullptr;
+    // webui：技能改成输入框左侧的小标签（#skill-chip），触发器与下拉已删除
+    QPushButton *m_skillChip = nullptr;
+    QLabel *m_skillChipName = nullptr;
+    QLabel *m_skillChipClose = nullptr;
+    SlashPanel *m_slash = nullptr;
+    bool m_slashOpen = false;
     IconPushButton *m_attach = nullptr;
     IconPushButton *m_settings = nullptr;
     IconPushButton *m_voice = nullptr;

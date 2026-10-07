@@ -117,16 +117,29 @@ QWidget *fieldRow(const QString &caption, QWidget *input)
 }
 
 // .form-grid：宽屏每行两个字段，@media(max-width:640px) 时变单列
+// 条件字段（如自定义 CA 路径）藏起来时不占位，后面的字段顺势前移。
+// 判据是"已经在某个父级里、又被显式藏了"——刚 new 出来还没挂父级的字段
+// isHidden() 也是真，只认它会把整张表单都跳过去
+static bool formFieldHidden(QWidget *field)
+{
+    return field->parentWidget() && field->isHidden();
+}
+
 void placeFormFields(QGridLayout *grid, const QList<QWidget *> &fields, bool compact)
 {
-    for (int i = 0; i < fields.size(); ++i) {
-        QWidget *field = fields.at(i);
+    int slot = 0;
+    for (QWidget *field : fields) {
         if (grid->indexOf(field) >= 0)
             grid->removeWidget(field);
-        if (compact)
-            grid->addWidget(field, i, 0);
-        else
-            grid->addWidget(field, i / 2, i % 2);
+        if (formFieldHidden(field))
+            continue;
+        if (compact) {
+            grid->addWidget(field, slot, 0);
+            ++slot;
+        } else {
+            grid->addWidget(field, slot / 2, slot % 2);
+            ++slot;
+        }
     }
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, compact ? 0 : 1);
@@ -581,6 +594,15 @@ QWidget *SettingsDialog::buildProviderEditor()
                                QStringLiteral("openai-responses"));
     m_defaultApiCombo->addItem(QStringLiteral("Anthropic Messages"),
                                QStringLiteral("anthropic-messages"));
+    // app.js：SSL 证书验证三选一，「自定义」落到 provider.ssl_verify 的路径字符串上
+    m_sslCombo = settingsCombo();
+    m_sslCombo->addItem(QStringLiteral("默认（系统证书）"), QStringLiteral("on"));
+    m_sslCombo->addItem(QStringLiteral("跳过验证"), QStringLiteral("off"));
+    m_sslCombo->addItem(QStringLiteral("自定义 CA 证书路径"), QStringLiteral("custom"));
+    m_sslPathEdit = settingsInput(QString());
+    m_sslPathEdit->setPlaceholderText(QStringLiteral("/path/to/ca.pem"));
+    m_sslPathRow = fieldRow(QStringLiteral("CA 证书路径"), m_sslPathEdit);
+    m_sslPathRow->setVisible(false);
     m_providerFields = {
         fieldRow(QStringLiteral("供应商名称"), m_nameEdit),
         fieldRow(QStringLiteral("供应商 ID"), m_idEdit),
@@ -589,6 +611,8 @@ QWidget *SettingsDialog::buildProviderEditor()
         fieldRow(QStringLiteral("API Key 环境变量"), m_keyEnvEdit),
         fieldRow(QStringLiteral("API Key"), m_apiKeyEdit),
         fieldRow(QStringLiteral("默认 API 协议"), m_defaultApiCombo),
+        fieldRow(QStringLiteral("SSL 证书验证"), m_sslCombo),
+        m_sslPathRow,
     };
     placeFormFields(grid, m_providerFields, m_compact);
     sl->addLayout(grid);
@@ -699,6 +723,44 @@ QWidget *SettingsDialog::buildProviderEditor()
             return;
         QVariantMap provider = m_providers.at(index).toMap();
         provider.insert(QStringLiteral("default_api"), comboData(m_defaultApiCombo));
+        m_providers[index] = provider;
+        markDirty();
+    });
+    connect(m_sslCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
+        if (m_updating)
+            return;
+        const int index = providerIndex(m_activeProviderId);
+        if (index < 0)
+            return;
+        const QString mode = comboData(m_sslCombo);
+        QString path = m_sslPathEdit->text().trimmed();
+        if (mode == QLatin1String("custom")) {
+            // 切回「自定义」时还回上次填的路径
+            if (path.isEmpty())
+                path = m_sslPathMemory;
+            m_sslPathEdit->setText(path);
+            m_sslPathMemory = path;
+        }
+        QVariantMap provider = m_providers.at(index).toMap();
+        if (mode == QLatin1String("custom"))
+            provider.insert(QStringLiteral("ssl_verify"), path);
+        else
+            provider.insert(QStringLiteral("ssl_verify"), mode == QLatin1String("off") ? false : true);
+        m_providers[index] = provider;
+        renderProviderEditor(); // 路径框显隐与字段重排都在渲染里
+        markDirty();
+    });
+    connect(m_sslPathEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
+        if (m_updating)
+            return;
+        if (comboData(m_sslCombo) != QLatin1String("custom"))
+            return; // 非自定义档位下这个框是藏着的，不该改写 ssl_verify
+        m_sslPathMemory = text;
+        const int index = providerIndex(m_activeProviderId);
+        if (index < 0)
+            return;
+        QVariantMap provider = m_providers.at(index).toMap();
+        provider.insert(QStringLiteral("ssl_verify"), text);
         m_providers[index] = provider;
         markDirty();
     });
@@ -1122,6 +1184,29 @@ void SettingsDialog::renderProviderEditor()
     m_apiKeyEdit->setEnabled(keyEnv.trimmed().isEmpty());
     selectComboData(m_defaultApiCombo,
                     provider.value(QStringLiteral("default_api")).toString());
+    // app.js：false/"false" → 跳过验证；其余非布尔值当路径 → 自定义
+    const QVariant sslValue = provider.value(QStringLiteral("ssl_verify"));
+    const QString sslText = sslValue.toString();
+    QString sslMode = QStringLiteral("on");
+    if (sslValue.isValid()) {
+        if (sslValue.type() == QVariant::Bool)
+            sslMode = sslValue.toBool() ? QStringLiteral("on") : QStringLiteral("off");
+        else if (sslText == QLatin1String("false"))
+            sslMode = QStringLiteral("off");
+        else if (sslText != QLatin1String("true"))
+            sslMode = QStringLiteral("custom");
+    }
+    selectComboData(m_sslCombo, sslMode);
+    const bool sslCustom = sslMode == QLatin1String("custom");
+    if (sslCustom)
+        m_sslPathMemory = sslText;
+    m_sslPathEdit->setText(sslCustom ? sslText : QString());
+    // 显隐变了就得重排一次，否则藏起来的字段还在网格里占着位
+    if (m_sslPathRow->isHidden() == sslCustom) {
+        m_sslPathRow->setVisible(sslCustom);
+        if (m_providerGrid)
+            placeFormFields(m_providerGrid, m_providerFields, m_compact);
+    }
     m_modelsCount->setText(QString::number(models.size()));
     m_testButton->setText(m_testing ? QStringLiteral("测试中…") : QStringLiteral("测试连接"));
     m_readButton->setText(m_reading ? QStringLiteral("读取中…") : QStringLiteral("读取模型"));

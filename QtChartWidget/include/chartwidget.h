@@ -181,6 +181,8 @@ signals:
     void sessionRenamed(const QString &id);
     void sessionCleared(const QString &id);
     void sessionDeleted(const QString &id);
+    // 输入框斜杠面板里的「/ 导出对话」：宿主 POST /sessions/{id}/export 并保存返回的文件名
+    void sessionExportRequested();
     void connectionCheckRequested();
 
     void optionChosen(const QString &value, const QString &label);
@@ -260,6 +262,8 @@ private:
     void focusTurn(int turn);
 
     // 计划窗口：跑完即收起；选择浮层展开时上移让位
+    void hidePhasePanel();
+    void settlePhasePlan();
     void syncPhaseLift();
     static bool planComplete(const QVariantMap &plan);
 

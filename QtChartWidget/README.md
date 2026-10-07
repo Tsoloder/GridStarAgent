@@ -22,10 +22,10 @@ QtChartWidget/
 │   ├── markdownview.cpp     Markdown / 代码块 / 表格 / 引用 / 任务列表 / ```json 结构化块
 │   ├── messagewidgets.*     一轮一张卡：正文 + 过程区（思考/工具）+ 底部信息行 + 工具参数表
 │   ├── choiceoverlay.*      选择浮层（模型提问 / 工具参数确认 / 审批共用，浮在输入框上方）
-│   ├── composer.cpp         输入区（三行输入框 / 流式工具栏 / 附件芯片 / 浮层宿主）
+│   ├── composer.cpp         输入区（三行输入框 / 流式工具栏 / 附件芯片 / 斜杠面板与浮层宿主）
 │   ├── trajectoryview.*     轨迹视图（时间轴概览 + 事件账本 + 记录详情，对应 webui 轨迹 tab）
-│   ├── popups.cpp           会话面板（含状态徽标）、模型与 Skill 下拉、皮肤下拉、Toast
-│   ├── phasepanel.cpp       阶段计划面板（当前项背景色 + 呼吸点，跑完即收起）
+│   ├── popups.cpp           会话面板（含状态徽标）、模式与模型下拉、斜杠面板、皮肤下拉、Toast
+│   ├── phasepanel.cpp       阶段计划面板（圆点指示器 + 统计串，跑完即收起）
 │   ├── settingsdialog.cpp   设置中心对话框（模型 / 技能 / MCP 工具 / 用量 四个 Tab）
 │   ├── usagepanel.*         用量面板（筛选下拉 / 概览卡 / 日历区间浮层 / 明细表，对应 #panel-usage）
 │   ├── usagecharts.*        自绘图表（折线 / 环形 / 堆叠柱 + 缩放平移，对应 webui/charts.js）
@@ -245,7 +245,7 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 
    ```c
    QWidget *qtchartwidget_create(void);   // 返回 new gs::ChartWidget()
-   const char *qtchartwidget_version(void); // "2.1.0"
+   const char *qtchartwidget_version(void); // "2.2.0"
    ```
 
 ### 公开 API 分组（include/chartwidget.h）
@@ -255,7 +255,11 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 - 顶栏/会话栏：`setConnectionState` / `setSessions` / `setCurrentSessionTitle`
 - 视图页签：`setViewTab` / `viewTab`（`chat` / `traj`）
 - 输入区：`setModels` / `setCurrentModel` / `setSkills` / `setCurrentSkill` /
-  `setMode` / `setBusy` / `setConfigLoaded` / `setConfigWarning` / `setInputText`
+  `setMode` / `setBusy` / `setConfigLoaded` / `setConfigWarning` / `setInputText`。
+  交互模式与模型都是**触发器 + 下拉**（`modeTrigger` / `modelTrigger`，外层 `.modelControl`
+  框），正文以 `/` 开头就弹出**斜杠面板**：根级三组（指令：模型 / 导出对话；技能：不启用技能
+  + 各技能），选「模型」会换成带搜索框的可筛选模型列表。选中技能后走 `skillSelected`，
+  输入框上方出现可清除的技能芯片（`skillChip`）；面板里的「导出对话」发 `sessionExportRequested`
 - 附件：`addAttachments` / `clearAttachments` / `setVoiceEnabled` / `setVoiceRecording`
   （条目与 webui 同构：`{id, name, size, ext, kind, path, uploading}`；
   `kind=image` 且 `path`/`url` 指向本地文件时芯片显示 22×22 缩略图，其余显示扩展名）
@@ -276,10 +280,15 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 - 设置中心：`setSettingsDraft` / `setDiscoveredModels` / `setProviderBusy` /
   `setSettingsSkills` / `setMcpTools` / `setUsageStats` / `setUsageLoadFailed` /
   `openSettings` / `settingsSaved`
+- provider 草稿里的 `ssl_verify` 支持三档（与 webui `data-provider-field="ssl_verify"` 同构）：
+  `true`（默认，系统证书）/ `false`（跳过验证）/ 字符串（自定义 CA 证书路径，此时右侧多出
+  「CA 证书路径」输入行，切回前两档时该行收起并记住上次路径）。
+  `placeFormFields` 会跳过低可见字段，判据带父级（`field->parentWidget() && field->isHidden()`）——
+  刚 `new` 出来还没挂父级的字段 `isHidden()` 也是真，只看它会把整张表单跳过
 - 界面缩放：`zoomIn` / `zoomOut` / `zoomReset` / `zoomFactor`
   （快捷键 `Ctrl+=` / `Ctrl+-` / `Ctrl+0` 已内置于部件）
 - 信号：`sendMessage`、`stopRequested`、`modeChanged`、`modelSelected`、`skillSelected`、
-  `newSessionRequested`、`sessionSelected/Renamed/Cleared/Deleted`、
+  `newSessionRequested`、`sessionSelected/Renamed/Cleared/Deleted`、`sessionExportRequested`、
   `connectionCheckRequested`、`optionChosen`、`approvalDecided`、
   `workflowRunRequested`、`retryRequested`、`trajectoryReloadRequested`、
   `viewTabChanged`、`themeChanged`、`choiceOpenChanged`、`settingsSaveRequested`、
@@ -346,7 +355,12 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
   - 明细表：列随分组切换，点表头排序（数值列默认降序），名称列 toolTip 给出完整键
   - 请求按 `(start, end, provider, model)` 在库内缓存 32 条；每次发起都换新的
     `requestId`，晚到的旧响应 / 旧失败按 `requestId` 丢弃
-- 计划窗口只服务执行过程：本轮结束时计划全部完成就收起；选择浮层展开时自动上移让位
+- 计划窗口只服务执行过程：本轮结束时计划全部完成就收起（`finishAssistantInternal` 一进来就
+  结算，空轮兜底那条早退路径也要过），收起时连面板内容一起清；下一条 `plan_updated`
+  再亮出来。选择浮层展开时自动上移让位。阶段指示器是圆点（当前项换成 1.5px 开口环旋转），
+  标题右侧的统计串按「N 已完成 · N 进行中 · N 待处理」分段着色，宽度不够时从尾部丢段
+- 斜杠面板展开时会接管输入框的上下键与回车（`Escape` 关、`Enter` 选中当前行），
+  所以它开着时回车不会把正文以 `/` 发出去
 - 排版细节（QSS 表达不了、库内用代码补）：
   - **单行省略**：轨迹行进账本与分组头用自绘 `ElidedLabel`（`sizeHint` 按全文、
     `minimumSizeHint` 为 0），省略后原文仍保留在 toolTip
@@ -385,6 +399,17 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 - 浮层样式：用量页的两个浮层（筛选项下拉、日期区间面板）是 `Qt::Popup` 子窗口，以 ChartWidget
   为父窗口创建，**直接继承其样式表**（与既有模型 / 皮肤下拉一致），故上面这条修好后即恢复主题皮肤。
   注意别把它们先挂到设置对话框、事后再 `setParent` 重挂 —— Qt 会把样式重置回原生样式。
+- 与 webui 逐像素核对：仓库根上的 `_qt_visual/` 是一台独立小工作台（自建 .pro，用示例数据
+  把聊天 / 模式下拉 / 斜杠面板 / 计划面板抓成 PNG），`_qt_visual/qt_visual.pro` 的
+  `INCLUDEPATH` / `LIBS` 指向本库的 `include` / `bin`，产物也落在 `QtChartWidget/bin`。
+  **必须用 `D:\Application\Qt\Qt5.12.2\5.12.2\msvc2017_64\bin\qmake.exe` 显式生成 Makefile**：
+  PATH 里 Anaconda 的 `qmake` 会链接到 `Qt5Widgets_conda.dll`，两套 Qt 并存时表现为
+  `QWidget: Must construct a QApplication before a QWidget` 直接崩掉（qApp 认不出来）。
+  下拉浮层是独立的 `Qt::Popup` 顶层窗口，`chart.grab()` 抓不到，得遍历
+  `QApplication::topLevelWidgets()` 找可见的 Popup，按 `mapToGlobal` 差值贴回主图。
+  这台工作台查出过两个真缺陷：`makeLabel` 从不设 `objectName`（全仓 66 处标签按名查不到，
+  已按类名首段补上）、技能芯片被压成 22px（`QPushButton` 最小宽取自自己的空 text，
+  已改成按名字实测最小宽，`refreshZoom` 负责随缩放重算，`skillChipSizedToName` 钉住）
 
 ### 性能口径
 
@@ -428,7 +453,12 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 ### 宿主职责（这些在 webui 里由前端完成，库不做）
 
 - 全部网络：`/sessions`、`/chat/stream`（SSE）、`/upload`、`/asr`、`/config`、
-  `/workflows/run`、`/sessions/{id}/trajectory`、`/usage/stats` 等；库只推数据、收交互
+  `/workflows/run`、`/sessions/{id}/trajectory`、`/usage/stats`、
+  `POST /sessions/{id}/export`（斜杠面板的「导出对话」→ `sessionExportRequested`，
+  成功提示 `已导出：<path>`、失败 `导出失败：<error>`）等；库只推数据、收交互
+- `GET /sessions` 响应里的 `storage_issues`（会话目录不可访问 / 索引不可读 / 索引损坏）
+  也由宿主提示，同一条只弹一次（webui `warnStorageIssues`；库侧 `setSessions` 只收会话数组，
+  不接这个字段）
 - 附件：数量/类型/大小校验（webui 为 ≤6 个、≤10MB、≤4 张图）与上传，再把结果 `addAttachments`
 - 语音：录音、重采样到 16kHz、WAV 编码与 `POST /asr`，再把识别文本 `setInputText`；
   录音时长上限也在宿主侧（webui `app.js:1862,1906` 为 5 分钟，到点提示并自动停止）——
@@ -492,12 +522,12 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 测试进程自行设置 `QT_QPA_PLATFORM=offscreen`，不需要显示器；也不需要把 Qt 的 `bin`
 加进 PATH（`QtChartWidget.dll` 与测试同目录）。
 
-覆盖范围（39 项，含 init/cleanup）：
+覆盖范围（53 项，含 init/cleanup）：
 
 | 分组 | 用例 |
 | --- | --- |
 | 皮肤 / 缩放 | `themeSwitchAndSignal`（含未知皮肤回退、三套皮肤的 QSS 确实重设）、`appStyleSheetParsesFully`（整张样式表被 Qt 完整解析：无 `:not(` / `:!` 等不受支持的选择器，末尾追加的探针规则仍命中）、`zoomSteps`（档位步进与封顶） |
-| 输入区 | `modeModelSkillSignals`、`inputSendRoundTrip`（发送态 / 信号 / 清空）、`attachmentChipPreview`（图片缩略图 / 扩展名 / 上传中文案）、`inputAutoGrowOnResize`（宽度变了高度跟着重算） |
+| 输入区 | `modeModelSkillSignals`、`inputSendRoundTrip`（发送态 / 信号 / 清空）、`attachmentChipPreview`（图片缩略图 / 扩展名 / 上传中文案）、`skillChipSizedToName`（芯片高 28、宽度按名字实测、清空技能后整块隐藏）、`inputAutoGrowOnResize`（宽度变了高度跟着重算） |
 | 历史渲染 | `historyMergesTurnWithUsageAndTiming`（一轮一张卡 + 用量/用时/时刻）、`historyToolResultBackfill`（结果回填、摘要、参数表）、`expandKeepsScrollPosition`（展开工具项后重判贴底，流式分片不抢滚动） |
 | 选择浮层 | `optionsOverlayChooseAndEsc`（点选项即确认 + Esc 收起）、`optionsOverlayFreeText`（「其他」自由作答、空文本拦截）、`toolParamsOverlaySubmit`（参数回填成结构化消息）、`approvalOverlayRoundTrip`（批准回执 + 宿主收卡） |
 | 卡片 | `workflowProposalRun`、`phasePlanCollapsesWhenComplete`（跑完收起 / 执行中不收起）、`phasePlanSurvivesViewTabSwitch`（切轨迹再切回仍恢复） |
@@ -506,6 +536,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 | 排版与动效 | `letterSpacingApplied`（Polish 时补字距、其他控件不受影响）、`trajectoryRowElides`（省略并保留全文）、`hoverRevealsCopyButton`（悬浮 .5→1）、`processAndToolHoverAccent`（过程摘要 / 工具名悬停转青，运行态橙色优先）、`overlayAndCardTransitions`（浮层淡入淡出 + 卡片一次性 effect） |
 | 工具项与口径 | `toolArgsTableAndResultFormat`（参数表、JSON 美化、失败判定、限高滚动容器）、`askUserToolCallIsNotRendered`（询问类调用不落成工具条目）、`usageModelLabelMapping`（用量弹层自动映射供应商名称） |
 | 嵌入作用域 | `escScopedToOwnWidget`（宿主窗口的 Esc 不被吞、也不误关浮层）、`zoomShortcutScopedToWidget`（快捷键限定 WidgetWithChildren） |
+| 窄宿主 / 浮层布局 | `overlayGeometryMatchesWebui`（浮层几何与 webui 对齐）、`choiceOverlayFitsNarrowWindow` / `choiceOverlayShowsAboveComposer`、`openOptionsOverlay`、`settingsDialogCompactLayout` / `confirmDialogFitsNarrowSettings`（设置中心窄屏单列、确认框不越界）、`usagePopupsFitNarrowHost`、`sessionPanelReflowsWhileOpen`、`attachChipFitsNarrowWindow` / `bubbleAttachmentThumbFitsNarrowWindow`、`bubbleDetailPopupFitsNarrowHost` / `bubbleDetailPopupAnchoring`、`toastFitsWrappedText`、`markdownTableSizesToContent` |
 | 可达性 / 线程 | `keyboardReachability`（图标按钮可 Tab + `accessibleName` 取 toolTip、过程行 Enter 展开、`.session-select` 键盘选中）、`guiThreadGuard`（非 GUI 线程推送被丢弃，仅发布构建有效） |
 | 性能 | `renderPerformance`（长会话下的流式分片 / 轨迹首次建账本 / 增量追加 / 逐字搜索 / 滚一屏 / 选中一行：数字打日志，断言拦「退回全量重建」）、`trajectoryLedgerVirtualization`（控件数与记录数解耦、滚动换行、选中态跨窗口保留、滚动到底仍能命中） |
 
@@ -529,7 +560,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
   目前没有实例级 API；确实需要各自独立时，得在宿主侧隔离（例如分进程）
 - **样式表**：库把主题 `setStyleSheet` 在自身子树上，不影响宿主控件；反过来宿主若给
   `ChartWidget` 另设样式表，会在库换肤 / 缩放时被覆盖
-- **拖放**：库已开 `setAcceptDrops`，落在库范围内的拖拽由库接收（发 `attachmentsDropped`），
+- **拖放**：库已开 `setAcceptDrops`，落在库范围内的拖拽由库接收（发 `attachmentsAdded`），
   宿主在同一区域的拖放收不到
 - **设置对话框**是 `QDialog(parent = ChartWidget)` 的独立顶级窗口（窗口级模态），不会进入宿主布局，
   随父对象析构；库不提供内嵌形式的设置页

@@ -77,7 +77,7 @@ Composer::Composer(QWidget *parent)
 
     m_input = new QTextEdit(m_inputWrap);
     m_input->setObjectName(QStringLiteral("messageInput"));
-    m_input->setPlaceholderText(QString::fromUtf8("输入任务...按Enter发送，Shift+Enter换行"));
+    m_input->setPlaceholderText(QString::fromUtf8("输入任务...按Enter发送，Shift+Enter换行，输入 / 选择技能"));
     m_input->setFrameShape(QFrame::NoFrame);
     m_input->setFixedHeight(kInputMinHeight);
     m_input->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -109,43 +109,57 @@ Composer::Composer(QWidget *parent)
     m_attach->setIconName(QStringLiteral("paperclip"), 16);
     leftFlow->addWidget(m_attach);
 
-    auto *modeSwitch = new QWidget(m_leftControls);
-    modeSwitch->setObjectName(QStringLiteral("modeSwitch"));
-    auto *modeLayout = new QHBoxLayout(modeSwitch);
-    modeLayout->setContentsMargins(0, 0, 0, 0);
-    modeLayout->setSpacing(0);
-    m_manual = new QPushButton(QStringLiteral("手动"), modeSwitch);
-    m_auto = new QPushButton(QStringLiteral("自动"), modeSwitch);
-    for (QPushButton *button : { m_manual, m_auto }) {
-        setClass(button, QStringLiteral("modeButton"));
-        button->setFixedHeight(28);
-        button->setCursor(Qt::PointingHandCursor);
-        button->setFocusPolicy(Qt::TabFocus);
-        modeLayout->addWidget(button);
-    }
-    m_manual->setProperty("active", true);
-    leftFlow->addWidget(modeSwitch);
-
-    struct ControlDef { ComboTrigger **trigger; QWidget **control; const char *tip; };
-    const ControlDef defs[2] = { { &m_modelTrigger, &m_modelControl, "模型" },
-                                 { &m_skillTrigger, &m_skillControl, "Skill" } };
-    for (const ControlDef &def : defs) {
-        auto *control = new QFrame(m_leftControls);
-        setClass(control, QStringLiteral("modelControl"));
-        control->setAttribute(Qt::WA_StyledBackground, true);
-        control->setFixedHeight(30);
-        control->setMaximumWidth(240);
-        control->setToolTip(QString::fromUtf8(def.tip));
-        auto *layout = new QHBoxLayout(control);
-        layout->setContentsMargins(8, 0, 2, 0);
+    // 交互模式下拉（.model-control.mode-control）：原来是一对分段按钮，webui 已改成下拉
+    auto buildControl = [&](const QString &tip, ComboTrigger **trigger, QWidget **control) {
+        auto *frame = new QFrame(m_leftControls);
+        setClass(frame, QStringLiteral("modelControl"));
+        frame->setAttribute(Qt::WA_StyledBackground, true);
+        frame->setFixedHeight(30);
+        frame->setMaximumWidth(240);
+        frame->setToolTip(tip);
+        auto *layout = new QHBoxLayout(frame);
+        // webui 撤掉箭头后 padding 改成左右对称的 0 6px
+        layout->setContentsMargins(6, 0, 6, 0);
         layout->setSpacing(0);
-        ComboTrigger *trigger = new ComboTrigger(control);
-        trigger->setFocusPolicy(Qt::TabFocus);
-        layout->addWidget(trigger, 1);
-        *def.trigger = trigger;
-        *def.control = control;
-        leftFlow->addWidget(control);
+        ComboTrigger *combo = new ComboTrigger(frame);
+        combo->setFocusPolicy(Qt::TabFocus);
+        layout->addWidget(combo, 1);
+        *trigger = combo;
+        *control = frame;
+        leftFlow->addWidget(frame);
+    };
+    buildControl(QString::fromUtf8("交互模式"), &m_modeTrigger, &m_modeControl);
+    buildControl(QString::fromUtf8("模型"), &m_modelTrigger, &m_modelControl);
+    m_modeTrigger->setText(QString::fromUtf8("手动"));
+
+    // webui：Skill 触发器与下拉整块删除，改成输入框左侧的小标签（#skill-chip）
+    m_skillChip = new QPushButton(m_leftControls);
+    m_skillChip->setObjectName(QStringLiteral("skillChip"));
+    setClass(m_skillChip, QStringLiteral("skillChip"));
+    m_skillChip->setAttribute(Qt::WA_StyledBackground, true);
+    m_skillChip->setFixedHeight(28);
+    m_skillChip->setCursor(Qt::PointingHandCursor);
+    m_skillChip->setFocusPolicy(Qt::TabFocus);
+    m_skillChip->setToolTip(QString::fromUtf8("清除技能"));
+    {
+        auto *chipLayout = new QHBoxLayout(m_skillChip);
+        chipLayout->setContentsMargins(7, 0, 7, 0);
+        chipLayout->setSpacing(5);
+        m_skillChipName = makeLabel(QStringLiteral("skillChipName"), QString(), m_skillChip);
+        m_skillChipName->setTextInteractionFlags(Qt::NoTextInteraction);
+        m_skillChipClose = makeLabel(QStringLiteral("skillChipClose"), QString::fromUtf8("×"),
+                                     m_skillChip);
+        m_skillChipClose->setTextInteractionFlags(Qt::NoTextInteraction);
+        chipLayout->addWidget(m_skillChipName);
+        chipLayout->addWidget(m_skillChipClose);
+        // QPushButton 的最小宽来自自己的 text（这里是空的），不吃子控件的最小宽，
+        // 不补的话布局会把芯片压到只剩左右内边距的 22px（webui 侧是 flex:0 0 auto）。
+        // 试过 chipLayout->setSizeConstraint(SetMinimumSize)，它连芯片高一起压成 15，
+        // 所以改成按名字实测宽度写最小宽，字号缩放变化由 refreshZoom 兜
+        updateSkillChipWidth();
     }
+    m_skillChip->setVisible(false);
+    leftFlow->addWidget(m_skillChip);
 
     m_busyLabel = makeLabel(QStringLiteral("busyLabel"), QString(), m_controls);
     m_busyLabel->setTextInteractionFlags(Qt::NoTextInteraction);
@@ -197,10 +211,15 @@ Composer::Composer(QWidget *parent)
     connect(m_choice, &QObject::destroyed, this, [this] { m_choice = nullptr; });
 
     m_modelList = new ListBoxPopup(this);
-    m_skillList = new ListBoxPopup(this);
+    // objectName 保持 "listbox"（QSS 的 #listbox 认它），区分靠 role 动态属性
+    m_modelList->setProperty("role", QStringLiteral("model"));
+    m_modeList = new ListBoxPopup(this);
+    m_modeList->setProperty("role", QStringLiteral("mode"));
+    // 斜杠面板与选择浮层同一套挂载方式：浮在输入框上方，不入布局
+    m_slash = new SlashPanel(overlayParent);
+    m_slash->setVisible(false);
+    connect(m_slash, &QObject::destroyed, this, [this] { m_slash = nullptr; });
 
-    connect(m_manual, &QPushButton::clicked, this, [this] { setMode(QStringLiteral("manual")); });
-    connect(m_auto, &QPushButton::clicked, this, [this] { setMode(QStringLiteral("auto")); });
     connect(m_settings, &QPushButton::clicked, this, &Composer::settingsRequested);
     connect(m_attach, &QPushButton::clicked, this, &Composer::attachRequested);
     connect(m_voice, &QPushButton::clicked, this, &Composer::voiceRequested);
@@ -219,19 +238,33 @@ Composer::Composer(QWidget *parent)
         emit sendMessage(content, content, attachments);
     });
     connect(m_modelTrigger, &ComboTrigger::clicked, this, &Composer::openModelList);
-    connect(m_skillTrigger, &ComboTrigger::clicked, this, &Composer::openSkillList);
+    m_modelTrigger->setObjectName(QStringLiteral("modelTrigger"));
+    m_modeTrigger->setObjectName(QStringLiteral("modeTrigger"));
+    connect(m_modeTrigger, &ComboTrigger::clicked, this, [this] {
+        if (modeListOpen())
+            closeModeList();
+        else
+            openModeList();
+    });
     connect(m_modelList, &ListBoxPopup::chosen, this, [this](const QString &key) {
         setCurrentModel(key);
         emit modelSelected(key);
     });
-    connect(m_skillList, &ListBoxPopup::chosen, this, [this](const QString &id) {
-        setCurrentSkill(id);
-        emit skillSelected(id);
+    connect(m_modeList, &ListBoxPopup::chosen, this, [this](const QString &value) {
+        selectMode(value);
     });
+    connect(m_skillChip, &QPushButton::clicked, this, [this] {
+        // 点标签即清除技能，焦点还给输入框（webui：selectSkill("") 后 input.focus()）
+        selectSkill(QString());
+        m_input->setFocus(Qt::OtherFocusReason);
+    });
+    connect(m_slash, &SlashPanel::itemChosen, this, &Composer::runSlashItem);
     m_modelList->installEventFilter(this);
-    m_skillList->installEventFilter(this);
+    m_modeList->installEventFilter(this);
     connect(m_input, &QTextEdit::textChanged, this, [this] {
         autoGrowInput();
+        // 正文变化时同步斜杠面板：不以 "/" 开头就收起，否则刷新候选并保持展开
+        syncSlashMenu();
         updateSendState();
     });
 
@@ -259,12 +292,14 @@ Composer::~Composer()
 {
     // 浮层通常挂在宿主窗口下，Composer 被单独销毁时不能把它遗留在界面上。
     delete m_choice;
+    delete m_slash;
 }
 
 void Composer::hideEvent(QHideEvent *event)
 {
     if (m_choice)
         m_choice->hide();
+    closeSlashMenu();
     QWidget::hideEvent(event);
 }
 
@@ -272,6 +307,7 @@ void Composer::moveEvent(QMoveEvent *event)
 {
     QWidget::moveEvent(event);
     layoutChoiceOverlay();
+    layoutSlashPanel();
 }
 
 void Composer::resizeEvent(QResizeEvent *event)
@@ -282,6 +318,7 @@ void Composer::resizeEvent(QResizeEvent *event)
     QTimer::singleShot(0, this, [this] { autoGrowInput(); });
     applyAttachmentCompact();
     layoutChoiceOverlay();
+    layoutSlashPanel();
 }
 
 void Composer::showEvent(QShowEvent *event)
@@ -290,6 +327,7 @@ void Composer::showEvent(QShowEvent *event)
     if (m_choice && m_choiceOpen)
         m_choice->show();
     layoutChoiceOverlay();
+    layoutSlashPanel();
     if (m_choiceOpen)
         emit choiceResized();
 }
@@ -366,6 +404,31 @@ bool Composer::eventFilter(QObject *watched, QEvent *event)
             break;
         case QEvent::KeyPress: {
             auto *key = static_cast<QKeyEvent *>(event);
+            if (m_slashOpen && m_slash && m_slash->mode() == QLatin1String("root")) {
+                // 斜杠面板开着时正文里的按键先给面板：上下走候选、回车选中、Esc 收起。
+                // 模型模式下正文还是 "/"，面板的过滤词在它自己的搜索框里，这里不拦。
+                switch (key->key()) {
+                case Qt::Key_Escape:
+                    closeSlashMenu();
+                    return true;
+                case Qt::Key_Down:
+                case Qt::Key_Up:
+                    m_slash->moveFocus(key->key() == Qt::Key_Down ? 1 : -1);
+                    return true;
+                case Qt::Key_Return:
+                case Qt::Key_Enter:
+                    // 不能落到下面的发送分支：先关面板再说，否则会发出一条空消息
+                    if (!(key->modifiers() & Qt::ShiftModifier)) {
+                        if (m_slash->chooseFocused()) {
+                            closeSlashMenu();
+                            return true;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
             const bool enter = key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter;
             if (enter && !(key->modifiers() & Qt::ShiftModifier)) {
                 m_send->click();
@@ -378,8 +441,8 @@ bool Composer::eventFilter(QObject *watched, QEvent *event)
         }
     } else if (watched == m_modelList && event->type() == QEvent::Hide) {
         m_modelTrigger->setOpen(false);
-    } else if (watched == m_skillList && event->type() == QEvent::Hide) {
-        m_skillTrigger->setOpen(false);
+    } else if (watched == m_modeList && event->type() == QEvent::Hide) {
+        m_modeTrigger->setOpen(false);
     }
     return QWidget::eventFilter(watched, event);
 }
@@ -389,11 +452,193 @@ void Composer::setMode(const QString &mode)
     if (m_mode == mode)
         return;
     m_mode = mode;
-    m_manual->setProperty("active", mode == QLatin1String("manual"));
-    m_auto->setProperty("active", mode == QLatin1String("auto"));
-    restyle(m_manual);
-    restyle(m_auto);
+    m_modeTrigger->setText(mode == QLatin1String("auto") ? QString::fromUtf8("自动")
+                                                         : QString::fromUtf8("手动"));
     emit modeChanged(m_mode);
+}
+
+void Composer::selectMode(const QString &value)
+{
+    closeModeList();
+    setMode(value);
+}
+
+void Composer::openModeList()
+{
+    closeModelList();
+    closeSlashMenu();
+    m_modeList->setModeOptions(m_mode);
+    m_modeTrigger->setOpen(true);
+    m_modeList->openAbove(m_modeControl ? m_modeControl : m_modeTrigger);
+}
+
+void Composer::closeModeList()
+{
+    if (m_modeList)
+        m_modeList->hide();
+    m_modeTrigger->setOpen(false);
+}
+
+bool Composer::modeListOpen() const
+{
+    return m_modeList && m_modeList->isVisible();
+}
+
+// 名字宽度按字体实测（QSS 的 padding 不参与 sizeHint 计算，只能自己量）
+void Composer::refreshZoom()
+{
+    updateSkillChipWidth();
+}
+
+void Composer::updateSkillChipWidth()
+{
+    if (!m_skillChip || !m_skillChipName)
+        return;
+    const QFontMetrics fm(m_skillChipName->font());
+    const int inner = fm.horizontalAdvance(m_skillChipName->text()) + 5 + 7;
+    m_skillChip->setMinimumWidth(2 * 7 + inner);
+}
+
+void Composer::renderSkillChip()
+{
+    QString label = QStringLiteral("无 Skill");
+    for (const QVariant &v : m_skills) {
+        const QVariantMap item = v.toMap();
+        if (item.value(QStringLiteral("id")).toString() == m_skill) {
+            const QString name = item.value(QStringLiteral("name")).toString();
+            label = name.isEmpty() ? m_skill : name;
+            break;
+        }
+    }
+    m_skillChipName->setText(label);
+    updateSkillChipWidth();
+    // webui：没有技能时整块 .skill-chip 不显示
+    m_skillChip->setVisible(!m_skill.isEmpty());
+}
+
+void Composer::selectSkill(const QString &id)
+{
+    const bool fromMenu = m_slashOpen;
+    setCurrentSkill(id);
+    emit skillSelected(id);
+    // "/xx" 只是唤起面板的输入，选定后清掉，避免混进消息正文
+    if (m_input->toPlainText().startsWith(QLatin1Char('/'))) {
+        m_input->clear();
+        autoGrowInput();
+    }
+    closeSlashMenu();
+    updateSendState();
+    if (fromMenu)
+        m_input->setFocus(Qt::OtherFocusReason);
+}
+
+QString Composer::slashQuery() const
+{
+    const QString text = m_input->toPlainText();
+    if (!text.startsWith(QLatin1Char('/')))
+        return QString();
+    return text.mid(1).trimmed().toLower();
+}
+
+void Composer::openSlashRoot()
+{
+    m_slash->setRootOptions(m_skills, m_skill, m_model);
+    m_slash->setQuery(slashQuery());
+    m_slash->setVisible(true);
+    m_slashOpen = true;
+    layoutSlashPanel();
+    m_slash->raise();
+}
+
+void Composer::openSlashModelPicker()
+{
+    m_slash->setModelOptions(m_models, m_model);
+    // 模型面板的过滤词与正文无关，面板自带搜索框
+    m_slash->setQuery(QString());
+    m_slashOpen = true;
+    m_slash->setVisible(true);
+    layoutSlashPanel();
+    m_slash->raise();
+    m_slash->focusSearch();
+}
+
+void Composer::closeSlashMenu()
+{
+    if (m_slash) {
+        m_slash->hide();
+        // 收起时回到根面板：下次敲 "/" 应该看到技能与指令，而不是上次的模型列表
+        m_slash->resetToRoot();
+    }
+    m_slashOpen = false;
+}
+
+void Composer::runSlashItem(const QString &kind, const QString &id)
+{
+    if (kind == QLatin1String("skill")) {
+        selectSkill(id);
+        return;
+    }
+    if (kind == QLatin1String("model")) {
+        setCurrentModel(id);
+        emit modelSelected(id);
+        finishSlashPick();
+        return;
+    }
+    if (id == QLatin1String("model")) {
+        openSlashModelPicker();
+        return;
+    }
+    if (id == QLatin1String("export")) {
+        closeSlashMenu();
+        emit exportRequested();
+    }
+}
+
+void Composer::finishSlashPick()
+{
+    // 面板收起后正文里的 "/" 已经没有意义，一并清掉并还回焦点
+    if (m_input->toPlainText().startsWith(QLatin1Char('/'))) {
+        m_input->clear();
+        autoGrowInput();
+    }
+    closeSlashMenu();
+    updateSendState();
+    m_input->setFocus(Qt::OtherFocusReason);
+}
+
+void Composer::syncSlashMenu()
+{
+    if (m_slashOpen && m_slash && m_slash->mode() == QLatin1String("model"))
+        return; // 模型面板开着时不跟正文联动
+    const QString text = m_input->toPlainText();
+    if (!text.startsWith(QLatin1Char('/'))) {
+        if (m_slashOpen)
+            closeSlashMenu();
+        return;
+    }
+    if (m_slashOpen)
+        m_slash->setQuery(slashQuery());
+    else
+        openSlashRoot();
+}
+
+void Composer::layoutSlashPanel()
+{
+    if (!m_slash || !m_slashOpen)
+        return;
+    QWidget *host = m_slash->parentWidget();
+    if (!host)
+        return;
+    // webui .slash-menu{left:0;right:0;bottom:calc(100% + 6px)}：宽度贴输入框、底边在其上方 6px
+    const int panelWidth = qMax(0, m_inputWrap->width());
+    const int panelHeight = m_slash->heightForContent(panelWidth);
+    const QPoint bottomCenter = mapTo(host, QPoint(m_inputWrap->x() + panelWidth / 2,
+                                                   m_inputWrap->y() - 6));
+    QRect geometry(QPoint(bottomCenter.x() - panelWidth / 2, bottomCenter.y() - panelHeight),
+                   QSize(panelWidth, panelHeight));
+    // 上方塞不下时贴着宿主顶边，内容自己滚动
+    geometry.moveTop(qMax(host->rect().top(), geometry.top()));
+    m_slash->setGeometry(geometry);
 }
 
 void Composer::setBusy(bool busy)
@@ -453,31 +698,24 @@ void Composer::setSkills(const QVariantList &skills)
 void Composer::setCurrentSkill(const QString &id)
 {
     m_skill = id;
-    QString label = QStringLiteral("无 Skill");
-    for (const QVariant &v : m_skills) {
-        const QVariantMap item = v.toMap();
-        if (item.value(QStringLiteral("id")).toString() == id) {
-            const QString name = item.value(QStringLiteral("name")).toString();
-            label = name.isEmpty() ? id : name;
-            break;
-        }
-    }
-    m_skillTrigger->setText(label);
+    renderSkillChip();
 }
 
 void Composer::openModelList()
 {
+    closeModeList();
+    closeSlashMenu();
     m_modelList->setModelOptions(m_models, m_model);
     m_modelTrigger->setOpen(true);
     // webui 下拉贴在外层 .model-control 左缘，而不是内部按钮
     m_modelList->openAbove(m_modelControl ? m_modelControl : m_modelTrigger);
 }
 
-void Composer::openSkillList()
+void Composer::closeModelList()
 {
-    m_skillList->setSkillOptions(m_skills, m_skill);
-    m_skillTrigger->setOpen(true);
-    m_skillList->openAbove(m_skillControl ? m_skillControl : m_skillTrigger);
+    if (m_modelList)
+        m_modelList->hide();
+    m_modelTrigger->setOpen(false);
 }
 
 void Composer::addAttachments(const QVariantList &items)

@@ -349,7 +349,7 @@ static qreal letterSpacingBase(const QWidget *widget)
         { "eyebrow", 1.4 },          // .eyebrow
         { "sectionLabel", 1.4 },     // .section-label
         { "phaseTitle", 0.6 },       // .phase-head strong
-        { "phaseCount", 0.5 },       // .phase-head small
+        { "phaseCount", 0.3 },       // .phase-head small（统计串）
         { "modelGroupLabel", 1.2 },  // .model-group-label
         { "viewTab", 0.5 },          // .view-tab
         { "bubbleMeta", 0.4 },       // .bubble-meta
@@ -719,10 +719,11 @@ QFrame#phasePanel {
 QWidget#phaseHead { background: transparent; border-bottom: 1px solid transparent; }
 QWidget#phaseHead:hover { background: %ACCENTTINT%; }
 QWidget#phaseHead[expanded="true"] { background: %ACCENTTINT%; border-bottom: 1px solid %LINE%; }
-QLabel#phaseTitle { color: %TEXT%; font-size: 12px; font-weight: 700; background: transparent; }
+QLabel#phaseTitle { color: %TEXT%; font-size: 12px; font-weight: 600; background: transparent; }
+/* .phase-head small：统计串本体是 muted-2，各段颜色由 PhaseCountLabel 内联给出 */
 QLabel#phaseCount {
-    border: 1px solid %CYANMID%; border-radius: 9px; background: %INSET%; color: %CYAN%;
-    font-size: 10px; font-weight: 700; padding: 1px 8px;
+    background: transparent; border: 0; color: %MUTED2%;
+    font-size: 10px; font-weight: 500;
 }
 QLabel.phaseChevron { color: %MUTED2%; font-size: 10px; background: transparent; }
 QLabel.phaseChevron[expanded="true"] { color: %CYAN%; }
@@ -736,13 +737,6 @@ QLabel#configWarning {
     border-left: 2px solid %ORANGE%; padding: 6px 7px;
 }
 QWidget#controls { background: transparent; }
-QWidget#modeSwitch { background: transparent; }
-QPushButton.modeButton {
-    border: 1px solid transparent; background: transparent; color: %MUTED%; font-size: 11px;
-    padding: 0 7px; border-radius: 4px; min-height: 26px;
-}
-QPushButton.modeButton:hover { background: %SURFACE2%; color: %TEXT%; }
-QPushButton.modeButton[active="true"] { border: 1px solid %CYANMID%; background: %ACCENTTINT%; color: %CYAN%; }
 QFrame.modelControl { border: 1px solid transparent; background: transparent; border-radius: 4px; }
 QFrame.modelControl:hover { border: 1px solid %LINESTRONG%; background: %SURFACE2%; }
 QWidget.comboTrigger { background: transparent; border: 0; }
@@ -817,6 +811,48 @@ QLabel.modelCheck { color: %CYAN%; font-size: 11px; background: transparent; }
 QLabel.modelName { color: %TEXT%; font-size: 12px; background: transparent; }
 QLabel.modelId { color: %MUTED%; font-size: 10px; background: transparent; font-family: %MONO%; }
 QLabel.listboxEmpty { color: %MUTED%; font-size: 12px; background: transparent; padding: 16px; }
+
+/* ===== 交互模式下拉（.mode-listbox：固定 240 宽，两行标题 + 说明） ===== */
+QFrame#listbox.modeListbox { background: %PANEL%; }
+QWidget.modeOptionText { background: transparent; }
+QLabel.modeOptionTitle { color: %TEXT%; font-size: 12px; font-weight: 600; background: transparent; }
+QLabel.modeOptionHint { color: %MUTED2%; font-size: 10px; background: transparent; }
+QLabel.modeCheck { color: %CYAN%; font-size: 12px; background: transparent; }
+QWidget.modeOption[selected="true"] QLabel.modeOptionTitle { color: %CYAN%; }
+
+/* ===== Skill chip（取代原来的第三个下拉） ===== */
+QPushButton.skillChip {
+    border: 1px solid %CYANMID%; border-radius: 4px; background: %ACCENTTINT%;
+    color: %CYAN%; font-size: 11px; text-align: left;
+}
+QLabel.skillChipName { color: %CYAN%; font-size: 11px; font-weight: 600; background: transparent; }
+QLabel.skillChipClose { color: %MUTED2%; font-size: 12px; background: transparent; }
+QPushButton.skillChip:hover QLabel.skillChipClose { color: %ERRTEXT%; }
+
+/* ===== 斜杠面板（输入框敲 "/" 唤起，浮在输入框上方） ===== */
+QFrame#slashMenu {
+    border: 1px solid %LINESTRONG%; background: %INSET%; border-radius: 12px;
+}
+QScrollArea#slashScroll { border: 0; background: transparent; }
+QWidget.slashInner { background: transparent; }
+QLabel.slashGroupLabel {
+    color: %MUTED%; font-size: 10px; font-weight: 700; background: transparent;
+    padding: 7px 8px 4px 8px; letter-spacing: 1.2px;
+}
+QLineEdit.slashSearch {
+    border: 1px solid %LINESTRONG%; background: %BG%; color: %TEXT%;
+    font-size: 11px; padding: 0 8px; border-radius: 4px; min-height: 30px;
+}
+QLineEdit.slashSearch:focus { border-color: %CYANMID%; }
+QWidget.slashItem { background: transparent; border: 1px solid transparent; border-radius: 4px; }
+QWidget.slashItem:hover, QWidget.slashItem[focused="true"] {
+    border: 1px solid %CYANMID%; background: %ACCENTTINT%;
+}
+QLabel.slashName { color: %TEXT%; font-size: 12px; font-weight: 600; background: transparent; }
+QLabel.slashCode { color: %MUTED%; font-size: 10px; background: transparent; font-family: %MONO%; }
+QLabel.slashDesc { color: %MUTED2%; font-size: 10px; background: transparent; }
+QWidget.slashItem[selected="true"] QLabel.slashName,
+QWidget.slashItem[selected="true"] QLabel.slashCode { color: %CYAN%; }
 
 /* ===== Toast / 拖拽遮罩 ===== */
 QLabel#toast {

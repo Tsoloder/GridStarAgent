@@ -9,6 +9,7 @@ QtChartWidget/bin/
 QtChartWidget/build/
 _qt_*/release/
 _qt_*/debug/
+_qt_*/build/
 _qt_*/Makefile*
 _qt_*/.qmake.stash
 

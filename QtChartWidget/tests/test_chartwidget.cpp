@@ -386,6 +386,7 @@ private slots:
     void modeModelSkillSignals();
     void inputSendRoundTrip();
     void attachmentChipPreview();
+    void skillChipSizedToName();
     void attachChipFitsNarrowWindow();
     void bubbleAttachmentThumbFitsNarrowWindow();
 
@@ -613,6 +614,43 @@ void TestChartWidget::attachmentChipPreview()
                 .contains(QStringLiteral("上传中…")));
 
     QFile::remove(imagePath);
+}
+
+// style.css：.skill-chip{height:28px;flex:0 0 auto;gap:5px;padding:0 7px}。
+// QPushButton 的最小宽取自自己的 text（芯片是空的），不补最小宽会被压到只剩内边距的 22px，
+// 名字位只剩 2px（芯片宽度必须按名字实测，随名字变长而变宽）
+void TestChartWidget::skillChipSizedToName()
+{
+    const QString shortName = QStringLiteral("CFD");
+    const QVariantList longSkills{ QVariantMap{ { QStringLiteral("id"), QStringLiteral("mesh-check") },
+                                                { QStringLiteral("name"),
+                                                  QStringLiteral("网格质量校核与加密建议") } } };
+    m_chart->setSkills(QVariantList{ QVariantMap{ { QStringLiteral("id"), QStringLiteral("cfd") },
+                                                  { QStringLiteral("name"), shortName } } });
+    m_chart->setCurrentSkill(QStringLiteral("cfd"));
+    QTest::qWait(20);
+    QWidget *chip = m_chart->findChild<QWidget *>(QStringLiteral("skillChip"));
+    QVERIFY(chip);
+    QVERIFY(chip->isVisible());
+    QCOMPARE(chip->height(), 28);
+    const int shortWidth = chip->width();
+    QLabel *nameLabel = m_chart->findChild<QLabel *>(QStringLiteral("skillChipName"));
+    QVERIFY(nameLabel);
+    QCOMPARE(nameLabel->text(), shortName);
+    // 名字位要真的拿到宽度，而不是被压成 2px
+    QVERIFY(nameLabel->width() >= 20);
+
+    m_chart->setSkills(longSkills);
+    m_chart->setCurrentSkill(QStringLiteral("mesh-check"));
+    QTest::qWait(20);
+    QCOMPARE(nameLabel->text(), QStringLiteral("网格质量校核与加密建议"));
+    QCOMPARE(chip->height(), 28);
+    QVERIFY(chip->width() > shortWidth);
+
+    // 清掉技能：整块芯片隐藏（webui：没有技能时 .skill-chip 不显示）
+    m_chart->setCurrentSkill(QString());
+    QTest::qWait(20);
+    QVERIFY(!chip->isVisible());
 }
 
 // style.css：.attach-chip{max-width:230px}；@media(max-width:640px){max-width:150px}
@@ -1361,17 +1399,13 @@ void TestChartWidget::phasePlanCollapsesWhenComplete()
     QTest::qWait(20);
     QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("phasePanel"));
     QVERIFY(panel);
-    QVERIFY(panel->isVisible());
-
-    // 本轮结束时计划已全部进入终态 → 计划窗口收起
-    m_chart->appendAssistantText(QStringLiteral("处置完成。"));
-    m_chart->finishAssistant();
-    QTest::qWait(20);
+    // 渲染口就拦下已完成的计划（app.js renderPhase 开头的 planComplete 分支）
     QVERIFY(!panel->isVisible());
 
-    // 仍在执行中的计划不会被收起
+    // 仍在执行中的计划照常显示
     QVariantMap running;
     running.insert(QStringLiteral("id"), QStringLiteral("p3"));
+    running.insert(QStringLiteral("title"), QStringLiteral("校核越限"));
     running.insert(QStringLiteral("status"), QStringLiteral("running"));
     QVariantMap plan2;
     plan2.insert(QStringLiteral("title"), QStringLiteral("处置阶段"));
@@ -1379,10 +1413,42 @@ void TestChartWidget::phasePlanCollapsesWhenComplete()
     m_chart->setPhasePlan(plan2);
     QTest::qWait(20);
     QVERIFY(panel->isVisible());
-    m_chart->appendAssistantText(QStringLiteral("继续。"));
+
+    // 本轮结束时计划还没跑完 → 窗口留着
+    m_chart->appendAssistantText(QStringLiteral("正在校核。"));
     m_chart->finishAssistant();
     QTest::qWait(20);
     QVERIFY(panel->isVisible());
+
+    QVariantMap done2;
+    done2.insert(QStringLiteral("id"), QStringLiteral("p3"));
+    done2.insert(QStringLiteral("title"), QStringLiteral("校核越限"));
+    done2.insert(QStringLiteral("status"), QStringLiteral("done"));
+    QVariantMap plan3;
+    plan3.insert(QStringLiteral("title"), QStringLiteral("处置阶段"));
+    plan3.insert(QStringLiteral("phases"), QVariant(QVariantList{ done, done2 }));
+    // 渲染口就拦下全终态计划，不必等收尾那一刀
+    m_chart->setPhasePlan(plan3);
+    QTest::qWait(10);
+    QVERIFY(!panel->isVisible());
+    // 收起要连面板内容一起清掉（app.js hidePhasePanel: innerHTML = ""）
+    QVERIFY(panel->findChild<QWidget *>(QStringLiteral("phaseStepsInner"))
+                ->findChildren<QWidget *>().isEmpty());
+
+    // 收尾那一刀要在空轮兜底之前：只带思考、没有正文的那一轮以前会直接从
+    // finishAssistantInternal 早退，计划窗口留在屏上、state 也不清
+    m_chart->setPhasePlan(plan2);
+    QTest::qWait(10);
+    QVERIFY(panel->isVisible());
+    m_chart->appendReasoning(QStringLiteral("再核一遍。"));
+    m_chart->setPhasePlan(plan3); // 阶段到头 → 计划窗口该收起
+    QTest::qWait(10);
+    QVERIFY(!panel->isVisible());
+    m_chart->finishAssistant(); // 空轮兜底：这条消息本身会被丢掉
+    QTest::qWait(20);
+    QVERIFY(!panel->isVisible());
+    QVERIFY(panel->findChild<QWidget *>(QStringLiteral("phaseStepsInner"))
+                ->findChildren<QWidget *>().isEmpty());
 }
 
 // ---------------------------------------------------------------- 轨迹 / 会话
@@ -2210,32 +2276,46 @@ void TestChartWidget::overlayGeometryMatchesWebui()
     QTest::qWait(20);
     QVERIFY(!sessionPanel->isVisible());
 
-    // --- 模型 / Skill 下拉 ---
-    const QList<QWidget *> controls = widgetsByClass(m_chart.data(), QStringLiteral("modelControl"));
-    const QList<QWidget *> triggers = widgetsByClass(m_chart.data(), QStringLiteral("comboTrigger"));
-    QCOMPARE(controls.size(), 2);
-    QCOMPARE(triggers.size(), 2);
+    // --- 模式 / 模型下拉（Skill 已改为输入框里的斜杠面板，这里只剩两个下拉） ---
+    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("modelControl")).size(), 2);
+    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("comboTrigger")).size(), 2);
+    // 按名字取，不按 findChildren 的顺序：顺序取决于对象树深度，加个控件就会翻
+    QWidget *modeTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modeTrigger"));
+    QWidget *modelTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modelTrigger"));
+    QVERIFY(modeTrigger && modelTrigger);
+    QWidget *modeControl = modeTrigger->parentWidget();
+    QWidget *modelControl = modelTrigger->parentWidget();
+    QVERIFY(modeControl && modelControl);
 
     // 先在宽窗口验证下拉左缘对齐；窄窗口下另有“限制在宿主内”的边界测试。
     m_chart->resize(800, hostHeight);
     QTest::qWait(20);
 
-    auto openPopup = [this](QWidget *trigger) -> QWidget * {
+    auto openPopup = [this](QWidget *trigger, const QString &role) -> QWidget * {
         clickWidget(trigger);
         QTest::qWait(20);
-        const QList<QWidget *> popups =
-            m_chart->findChildren<QWidget *>(QStringLiteral("listbox"));
-        for (QWidget *popup : popups) {
-            if (popup->isVisible())
+        for (QWidget *popup : m_chart->findChildren<QWidget *>(QStringLiteral("listbox"))) {
+            if (popup->property("role").toString() == role && popup->isVisible())
                 return popup;
         }
         return nullptr;
     };
 
-    QWidget *modelPopup = openPopup(triggers.at(0));
+    // --- 模式下拉：240 宽（.mode-listbox），两行标题 + 说明 ---
+    QWidget *modePopup = openPopup(modeTrigger, QStringLiteral("mode"));
+    QVERIFY(modePopup);
+    QCOMPARE(modePopup->width(), qMin(240, hostWidth - 18));
+    const QPoint modeAnchor = modeControl->mapToGlobal(modeControl->contentsRect().topLeft());
+    QCOMPARE(modePopup->mapToGlobal(QPoint(0, 0)).x(), modeAnchor.x());
+    QCOMPARE(modeAnchor.y() - modePopup->mapToGlobal(QPoint(0, 0)).y(),
+             modePopup->height() + 7);
+    QCOMPARE(widgetsByClass(modePopup, QStringLiteral("modeOption")).size(), 2);
+    modePopup->hide();
+    QTest::qWait(20);
+
+    QWidget *modelPopup = openPopup(modelTrigger, QStringLiteral("model"));
     QVERIFY(modelPopup);
     QCOMPARE(modelPopup->width(), qMin(330, hostWidth - 18));
-    const QWidget *modelControl = controls.at(0);
     // left:0 贴外层 .model-control 左缘（不是内部按钮）；绝对定位的包含块是它的 padding box
     const QPoint modelAnchor =
         modelControl->mapToGlobal(modelControl->contentsRect().topLeft());
@@ -2247,24 +2327,12 @@ void TestChartWidget::overlayGeometryMatchesWebui()
     modelPopup->hide();
     QTest::qWait(20);
 
-    QWidget *skillPopup = openPopup(triggers.at(1));
-    QVERIFY(skillPopup);
-    QCOMPARE(skillPopup->width(), qMin(250, hostWidth - 18));
-    const QWidget *skillControl = controls.at(1);
-    const QPoint skillAnchor =
-        skillControl->mapToGlobal(skillControl->contentsRect().topLeft());
-    QCOMPARE(skillPopup->mapToGlobal(QPoint(0, 0)).x(), skillAnchor.x());
-    QCOMPARE(skillAnchor.y() - skillPopup->mapToGlobal(QPoint(0, 0)).y(),
-             skillPopup->height() + 7);
-    skillPopup->hide();
-    QTest::qWait(20);
-
     // 窄窗口：宽度按 calc(100vw - 18px) 收敛（仍不超过 max-width），且整体不越出宿主窗口
     m_chart->setMinimumSize(0, 0); // 控件自带 420x460 下限，否则 resize 到不了 300
     m_chart->resize(300, hostHeight);
     QTest::qWait(20);
     QCOMPARE(m_chart->width(), 300);
-    modelPopup = openPopup(triggers.at(0));
+    modelPopup = openPopup(modelTrigger, QStringLiteral("model"));
     QVERIFY(modelPopup);
     // 开浮层时内部控件会让位，宿主随后被布局下限撑回一点，所以这里量的是“不超过”而不是等值
     QVERIFY(modelPopup->width() <= qMin(330, m_chart->width() - 18));

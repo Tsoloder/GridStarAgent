@@ -200,6 +200,13 @@ private:
     QLineEdit *m_keyEnvEdit = nullptr;
     QLineEdit *m_apiKeyEdit = nullptr;
     QComboBox *m_defaultApiCombo = nullptr;
+    // SSL 证书验证：默认（系统证书）/ 跳过验证 / 自定义 CA 证书路径。
+    // 自定义时那个路径框才现身，值直接写进 provider 的 ssl_verify（字符串即路径）
+    QComboBox *m_sslCombo = nullptr;
+    QWidget *m_sslPathRow = nullptr;
+    QLineEdit *m_sslPathEdit = nullptr;
+    // 下拉切回「自定义」时要还回上次填的路径，provider 里此刻只存着 true/false
+    QString m_sslPathMemory;
     QPushButton *m_clearKeyButton = nullptr;
     QPushButton *m_testButton = nullptr;
     QLabel *m_inlineResult = nullptr;

@@ -31,6 +31,7 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPixmap>
+#include <QSet>
 #include <QStringList>
 #include <QTimer>
 #include <QUrl>
@@ -535,6 +536,8 @@ private:
     bool m_runtimeReady = false;
     bool m_mcpConnected = false;
     bool m_bootstrapStarted = false;
+    // 会话存储异常每次启动只提示一次（对应 webui warnStorageIssues 的 warnedStorageIssues 集合）
+    QSet<QString> m_warnedStorageIssues;
 };
 
 DemoHost::DemoHost(ChartWidget *chart, bool live, const QString &apiBase)
@@ -831,6 +834,16 @@ void DemoHost::refreshSessions(bool loadFirst)
             const QVariantList sessions =
                 object.value(QStringLiteral("sessions")).toArray().toVariantList();
             m_chart->setSessions(sessions);
+            // app.js warnStorageIssues：同名异常只弹一次，否则每次刷新都盖掉别的提示
+            const QVariantList issues =
+                object.value(QStringLiteral("storage_issues")).toArray().toVariantList();
+            for (const QVariant &issue : issues) {
+                const QString text = issue.toString();
+                if (text.isEmpty() || m_warnedStorageIssues.contains(text))
+                    continue;
+                m_warnedStorageIssues.insert(text);
+                m_chart->showToast(QStringLiteral("会话存储异常：") + text);
+            }
             if (!loadFirst)
                 return;
             if (sessions.isEmpty()) {
@@ -1326,6 +1339,32 @@ void DemoHost::wire()
             loadTrajectoryRemote();
         else
             loadTrajectory();
+    });
+    // 输入框斜杠面板的「/ 导出对话」：直接打后端导出接口，不必跑一整轮对话
+    QObject::connect(c, &ChartWidget::sessionExportRequested, c, [this] {
+        if (m_sessionId.isEmpty()) {
+            m_chart->showToast(QStringLiteral("当前没有可导出的会话"));
+            return;
+        }
+        if (!m_live) {
+            m_chart->showToast(QStringLiteral("已导出会话 %1（宿主实现）").arg(m_sessionId));
+            return;
+        }
+        requestJson(
+            QStringLiteral("POST"),
+            QStringLiteral("/sessions/") + encodedId(m_sessionId) + QStringLiteral("/export"),
+            QJsonObject(),
+            [this](const QJsonObject &object, int status) {
+                if (status < 200 || status >= 300) {
+                    m_chart->showToast(
+                        QStringLiteral("导出失败：%1")
+                            .arg(object.value(QStringLiteral("error")).toString()));
+                    return;
+                }
+                const QString path = object.value(QStringLiteral("path")).toString();
+                m_chart->showToast(QStringLiteral("已导出：%1")
+                                       .arg(path.isEmpty() ? QStringLiteral("exports/") : path));
+            });
     });
 
     QObject::connect(c, &ChartWidget::optionChosen, c,

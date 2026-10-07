@@ -381,6 +381,8 @@ ProcRow::ProcRow(const QString &key, const QString &label, QWidget *parent)
     m_chevron = new Chevron(m_head);
     m_chevron->setFixedSize(8, 8);
     m_dot = new PulseDot(m_head);
+    // .run-dot 已从呼吸实心点改为旋转开口环（spinRing .7s）
+    m_dot->setStyle(PulseDot::Spin);
     m_dot->setColor(key == QLatin1String("tools") ? gs::palette().orange : gs::palette().cyan);
     m_dot->setVisible(false);
     m_label = headLabel(QStringLiteral("procLabel"), label, m_head);

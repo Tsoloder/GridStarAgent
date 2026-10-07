@@ -13,6 +13,68 @@
 
 namespace gs {
 
+// ----------------------------------------------------------- PhaseCountLabel
+
+PhaseCountLabel::PhaseCountLabel(QWidget *parent) : QLabel(parent)
+{
+    setTextFormat(Qt::RichText);
+    // 宽可以在 sizeHint 之下压（约束来自外层布局的 max-width 语义），高固定
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    setMinimumWidth(0);
+}
+
+void PhaseCountLabel::setSegments(const QList<QPair<QString, QColor>> &segments)
+{
+    m_segments = segments;
+    if (m_segments.isEmpty())
+        m_segments.append(qMakePair(QStringLiteral("0 已完成"), gs::palette().muted2));
+    m_rich = QString();
+    m_plain = QString();
+    for (int i = 0; i < m_segments.size(); ++i) {
+        if (i)
+            m_plain += QStringLiteral(" · ");
+        m_plain += m_segments.at(i).first;
+    }
+    rebuild();
+}
+
+void PhaseCountLabel::resizeEvent(QResizeEvent *event)
+{
+    QLabel::resizeEvent(event);
+    rebuild();
+}
+
+// CSS 里这一段是 flex:0 1 auto + ellipsis：宽度不够就从尾部丢段，至少留第一段
+void PhaseCountLabel::rebuild()
+{
+    if (m_segments.isEmpty())
+        return;
+    const QFontMetrics fm(font());
+    int count = m_segments.size();
+    while (count > 1) {
+        QString plain;
+        for (int i = 0; i < count; ++i) {
+            if (i)
+                plain += QStringLiteral(" · ");
+            plain += m_segments.at(i).first;
+        }
+        if (fm.horizontalAdvance(plain) <= width())
+            break;
+        --count;
+    }
+    QString rich;
+    for (int i = 0; i < count; ++i) {
+        if (i)
+            rich += QStringLiteral(" · ");
+        rich += QStringLiteral("<span style=\"color:%1\">%2</span>")
+                    .arg(cssColor(m_segments.at(i).second), m_segments.at(i).first);
+    }
+    if (m_rich == rich)
+        return;
+    m_rich = rich;
+    setText(rich);
+}
+
 // ------------------------------------------------------------------ PhaseStep
 
 PhaseStep::PhaseStep(const QString &title, const QString &note, const QString &status,
@@ -20,17 +82,19 @@ PhaseStep::PhaseStep(const QString &title, const QString &note, const QString &s
     : QWidget(parent), m_title(title), m_note(note), m_status(status)
 {
     setAttribute(Qt::WA_Hover, true);
-    setFixedHeight(30); // CSS: padding 6px 8px + 18px 圆圈
+    setFixedHeight(30); // CSS: padding 6px 8px + 14px 行高
     if (!note.isEmpty())
         setToolTip(note);
     else if (!title.isEmpty())
         setToolTip(title);
 
-    // 运行态的呼吸圆点：叠在状态圆圈中心，非运行态隐藏
+    // 运行态指示器：10px 开口环（.phase-step.running:before），非运行态隐藏
     m_pulse = new PulseDot(this);
+    m_pulse->setStyle(PulseDot::Spin);
+    m_pulse->setRing(10, 1.5);
     m_pulse->setColor(gs::palette().cyan);
     m_pulse->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    m_pulse->move(8 + 9 - 3, 6 + 9 - 3);
+    m_pulse->move(8, 6 + (18 - 10) / 2);
     syncPulse();
 }
 
@@ -85,30 +149,23 @@ void PhaseStep::paintEvent(QPaintEvent *)
 
     const Palette &pal = gs::palette();
     QColor text = pal.muted;
-    QColor glyph = pal.muted2;
-    QColor circleBorder = pal.line;
-    QColor circleBg = pal.inset;
-    QString markIcon = QStringLiteral("circle");
+    QColor dot = pal.muted2; // 待处理：灰点 .55 透明
+    qreal dotOpacity = 0.55;
     if (done) {
         text = pal.okText;
-        markIcon = QStringLiteral("check");
-        circleBorder = pal.okLine;
-        circleBg = pal.okTint;
-        glyph = pal.green;
+        dot = pal.green;
+        dotOpacity = 1.0;
     } else if (running) {
+        // 运行态：指示器换成 10px 开口环（PulseDot 子控件），本体不画点
         text = pal.textBright;
-        markIcon.clear(); // 运行态用呼吸圆点，不再画字形
-        circleBorder = pal.cyanMid;
-        circleBg = pal.accentTint;
-        glyph = pal.cyan;
     } else if (failed) {
         text = pal.errText;
-        markIcon = QStringLiteral("x");
-        circleBorder = pal.errLine;
-        circleBg = pal.errTint;
-        glyph = pal.red;
+        dot = pal.red;
+        dotOpacity = 1.0;
     } else if (skipped) {
-        markIcon = QStringLiteral("chevrons-right");
+        // 跳过：虚线空心点，且整行 55% 透明
+        dot = pal.muted2;
+        dotOpacity = 1.0;
     }
 
     p.setOpacity(skipped ? 0.55 : 1.0); // CSS .phase-step.skipped { opacity: .55 }
@@ -121,29 +178,41 @@ void PhaseStep::paintEvent(QPaintEvent *)
     else if (m_hover)
         p.fillPath(bg, pal.accentTint);
 
-    // 步骤间连接线：left 16.5px（padding 8 + 圆心 8.5），宽 1px
+    // 状态点 8×8 @ (8, 占位行上下居中后 +rowTop)；竖线中心与点中心对齐
+    const qreal rowTop = (height() - 18) / 2.0; // CSS: padding 6px，行高 18px
+    const QPointF dotCenter(8 + 4, rowTop + 9);
+    const int lineX = qRound(dotCenter.x()) - 10; // CSS 里竖线 left:11.5px，比圆心还靠左
+
+    // 步骤间连接线：从点下方 2px 一直连到下一条（CSS left:11.5px; top:17px; bottom:-6px）
     p.setPen(Qt::NoPen);
     p.setBrush(pal.line);
     if (m_connectorTop)
-        p.drawRect(QRectF(16.5, 0, 1, 6));
+        p.drawRect(QRectF(lineX, 0, 1, qMax(0.0, dotCenter.y() - 1)));
     if (m_connectorBottom)
-        p.drawRect(QRectF(16.5, 26, 1, height() - 26));
+        p.drawRect(QRectF(lineX, dotCenter.y() + 1, 1,
+                          qMax(0.0, height() - dotCenter.y() - 1)));
 
-    // 状态圆圈 18×18 @ (8,6)
-    const QRectF circle(8.5, 6.5, 17, 17);
-    QPen circlePen(circleBorder);
-    circlePen.setWidthF(1);
-    if (skipped)
-        circlePen.setStyle(Qt::DashLine); // CSS: border-style dashed
-    p.setPen(circlePen);
-    p.setBrush(circleBg);
-    p.drawEllipse(circle);
-    // 状态图标 9×9，居中于圆圈（圆心 17,15）；运行态的呼吸圆点由 PulseDot 子控件承担
-    if (!markIcon.isEmpty())
-        p.drawPixmap(12.5, 10.5, iconPixmap(markIcon, glyph, 9));
+    if (running) {
+        // 环由子控件旋转绘制，这里只留背景
+    } else {
+        QColor dotColor = dot;
+        dotColor.setAlphaF(dotColor.alphaF() * dotOpacity);
+        if (skipped) {
+            // CSS .phase-step.skipped:before { background:transparent; border:1px dashed var(--muted-2) }
+            QPen skipPen(dotColor);
+            skipPen.setWidthF(1);
+            skipPen.setStyle(Qt::DashLine);
+            p.setPen(skipPen);
+            p.setBrush(Qt::NoBrush);
+        } else {
+            p.setPen(Qt::NoPen);
+            p.setBrush(dotColor);
+        }
+        p.drawEllipse(dotCenter, 4.0, 4.0);
+    }
 
     // 标题（11px, weight 500）+ 备注（10px, 55% 透明度）
-    const int textLeft = 8 + 18 + 9; // marker + margin-right 9px
+    const int textLeft = qRound(dotCenter.x()) + 4 + 9; // 点右缘 + CSS margin-right 9px
     const int available = qMax(0, width() - textLeft - 8);
 
     QFont titleFont = p.font();
@@ -202,7 +271,7 @@ PhasePanel::PhasePanel(QWidget *parent) : QFrame(parent)
 
     m_title = new QLabel(QStringLiteral("阶段计划"), m_head);
     m_title->setObjectName(QStringLiteral("phaseTitle"));
-    m_count = new QLabel(QStringLiteral("0/0"), m_head);
+    m_count = new PhaseCountLabel(m_head);
     m_count->setObjectName(QStringLiteral("phaseCount"));
     m_chevron = new QLabel(m_head);
     setClass(m_chevron, QStringLiteral("phaseChevron"));
@@ -240,6 +309,67 @@ PhasePanel::PhasePanel(QWidget *parent) : QFrame(parent)
     layout->addWidget(m_steps);
 }
 
+// 标题后的统计串：已完成 / 进行中 / 待处理 / 失败 / 跳过，只列非零项（app.js phaseStats）
+static QList<QPair<QString, QColor>> phaseStatsSegments(const QVariantList &phases)
+{
+    int ok = 0, run = 0, wait = 0, fail = 0, skip = 0;
+    for (const QVariant &item : phases) {
+        QString st = item.toMap().value(QStringLiteral("status")).toString();
+        if (st.isEmpty())
+            st = QStringLiteral("pending");
+        if (st == QLatin1String("skipped"))
+            ++skip;
+        else if (st == QLatin1String("done") || st == QLatin1String("succeeded")
+                 || st == QLatin1String("completed"))
+            ++ok;
+        else if (st == QLatin1String("active") || st == QLatin1String("running")
+                 || st == QLatin1String("in_progress"))
+            ++run;
+        else if (st == QLatin1String("failed") || st == QLatin1String("error")
+                 || st == QLatin1String("cancelled"))
+            ++fail;
+        else
+            ++wait;
+    }
+
+    const Palette &pal = gs::palette();
+    QList<QPair<QString, QColor>> segs;
+    const auto push = [&segs](int count, const QString &label, const QColor &color) {
+        if (count > 0)
+            segs.append(qMakePair(QStringLiteral("%1 %2").arg(count).arg(label), color));
+    };
+    push(ok, QStringLiteral("已完成"), pal.green);   // .st-ok
+    push(run, QStringLiteral("进行中"), pal.cyan);   // .st-run
+    push(wait, QStringLiteral("待处理"), pal.muted); // .st-wait
+    push(fail, QStringLiteral("失败"), pal.red);     // .st-fail
+    push(skip, QStringLiteral("跳过"), pal.muted2);  // .st-skip
+    return segs;
+}
+
+// 清空步骤区：先摘掉父子关系再 deleteLater，否则旧行在事件循环处理前仍挂在
+// 面板的对象树上（"面板已空"这种断言会看到残影）
+void PhasePanel::clearSteps()
+{
+    while (QLayoutItem *item = m_innerLayout->takeAt(0)) {
+        if (QWidget *w = item->widget()) {
+            w->setParent(nullptr);
+            w->deleteLater();
+        }
+        delete item;
+    }
+    m_innerLayout->addStretch(1);
+}
+
+void PhasePanel::clearPlan()
+{
+    // 计划窗口收起时连内容一起清掉：留着旧行会让下一条无计划的消息仍显示面板
+    m_title->setText(QStringLiteral("阶段计划"));
+    m_count->setSegments({});
+    clearSteps();
+    m_progress->setPercent(0);
+    setVisible(false);
+}
+
 void PhasePanel::setPlan(const QVariantMap &plan)
 {
     const QVariantList phases = plan.value(QStringLiteral("phases")).toList();
@@ -261,14 +391,11 @@ void PhasePanel::setPlan(const QVariantMap &plan)
     }
 
     m_title->setText(title);
-    m_count->setText(QStringLiteral("%1/%2").arg(completed).arg(phases.size()));
+    // 原分数徽标已被统计串取代（dfbb564）：N 已完成 · N 进行中 · N 待处理
+    m_count->setSegments(phaseStatsSegments(phases));
     m_progress->animateTo(qRound(completed * 100.0 / phases.size()));
 
-    while (QLayoutItem *item = m_innerLayout->takeAt(0)) {
-        if (QWidget *w = item->widget())
-            w->deleteLater();
-        delete item;
-    }
+    clearSteps();
     for (int i = 0; i < phases.size(); ++i) {
         const QVariantMap phase = phases.at(i).toMap();
         QString stepTitle = phase.value(QStringLiteral("title")).toString();
@@ -287,7 +414,6 @@ void PhasePanel::setPlan(const QVariantMap &plan)
         row->setConnectors(i > 0, i < phases.size() - 1);
         m_innerLayout->addWidget(row);
     }
-    m_innerLayout->addStretch(1);
     layoutProgress();
 }
 

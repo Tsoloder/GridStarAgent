@@ -349,6 +349,7 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_composer, &Composer::modeChanged, this, &ChartWidget::modeChanged);
     connect(m_composer, &Composer::modelSelected, this, &ChartWidget::modelSelected);
     connect(m_composer, &Composer::skillSelected, this, &ChartWidget::skillSelected);
+    connect(m_composer, &Composer::exportRequested, this, &ChartWidget::sessionExportRequested);
     connect(m_composer, &Composer::settingsRequested, this, [this] { openSettings(); });
     connect(m_composer, &Composer::attachRequested, this, &ChartWidget::attachRequested);
     connect(m_composer, &Composer::voiceRequested, this, &ChartWidget::voiceRequested);
@@ -1231,6 +1232,14 @@ void ChartWidget::finishAssistant()
     finishAssistantInternal(false);
 }
 
+// 每轮收尾都要过一遍：计划窗口只服务执行过程，本轮结束时计划已全部完成就收起。
+// 放在空轮兜底之前——那一支会提前 return，否则空正文的那一轮会把计划窗口留在屏上
+void ChartWidget::settlePhasePlan()
+{
+    if (planComplete(m_phasePlanData))
+        hidePhasePanel();
+}
+
 void ChartWidget::finishAssistantInternal(bool deferred)
 {
     MessageWidget *message = m_current;
@@ -1240,6 +1249,9 @@ void ChartWidget::finishAssistantInternal(bool deferred)
 
     message->stopLiveTiming();
     message->settleProcess();
+
+    // 先结算计划窗口，后面的空轮兜底可能直接返回
+    settlePhasePlan();
 
     const StructuredBlocks parsed = structuredBlocks(m_currentText);
     message->body()->setText(parsed.visible);
@@ -1270,10 +1282,6 @@ void ChartWidget::finishAssistantInternal(bool deferred)
     // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下
     if (!deferred && !ask.isEmpty())
         m_composer->showChoice(ask);
-
-    // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起
-    if (planComplete(m_phasePlanData))
-        m_phaseWrap->setVisible(false);
 
     m_currentText.clear();
     updateEmptyState();
@@ -1493,10 +1501,24 @@ void ChartWidget::setPhasePlan(const QVariant &value)
     const QVariantList phases = phase.value(QStringLiteral("phases")).toList();
     if (phases.isEmpty())
         return;
+    // 计划窗口只服务执行过程：全部阶段进入终态就收起，下一条 plan_updated 会再次出现。
+    // 规则放在渲染口（app.js renderPhase 开头），实时 plan_updated、切会话加载、历史回放三条路都绕不过去
+    if (planComplete(phase)) {
+        hidePhasePanel();
+        return;
+    }
     m_phasePlanData = phase;
     m_phaseWrap->setVisible(true);
     m_phasePanel->setPlan(phase);
     syncPhaseLift();
+}
+
+// 收起计划窗口：面板内容与 state 一起清掉，避免切会话后残留旧计划（app.js hidePhasePanel）
+void ChartWidget::hidePhasePanel()
+{
+    m_phasePlanData.clear();
+    m_phaseWrap->setVisible(false);
+    m_phasePanel->clearPlan();
 }
 
 void ChartWidget::showToast(const QString &text)
@@ -1557,7 +1579,8 @@ void ChartWidget::clearMessages()
     m_workflowSteps.clear();
     m_lastTurnAwaiting = false;
     m_phasePlanData.clear();
-    m_phaseWrap->setVisible(false); // loadSession: el.phasePanel.classList.add("hidden")
+    m_phaseWrap->setVisible(false); // loadSession 走 hidePhasePanel()：收起要连面板内容一起清
+    m_phasePanel->clearPlan();
     m_composer->closeChoice();
     updateEmptyState();
     rebuildTurnRail();
@@ -2047,6 +2070,9 @@ void ChartWidget::applyZoom()
     const QList<ComboTrigger *> combos = findChildren<ComboTrigger *>();
     for (ComboTrigger *combo : combos)
         combo->refreshZoom();
+    // 输入框里的技能芯片：宽度是按名字字号实测的
+    if (m_composer)
+        m_composer->refreshZoom();
     // 用量页的筛选触发器同理（chevron 与日历的小图标）
     const QList<UsageSelect *> usageSelects = findChildren<UsageSelect *>();
     for (UsageSelect *select : usageSelects)
@@ -2086,6 +2112,6 @@ extern "C" QTCHARTWIDGET_EXPORT QWidget *qtchartwidget_create()
 
 extern "C" QTCHARTWIDGET_EXPORT const char *qtchartwidget_version()
 {
-    // 2.1.0：公开头只做加法（用量统计 API/信号），改这里时同步改 CHANGELOG 与 README
-    return "2.1.0";
+    // 2.2.0：公开头只做加法（新增信号 sessionExportRequested），改这里时同步改 CHANGELOG 与 README
+    return "2.2.0";
 }
