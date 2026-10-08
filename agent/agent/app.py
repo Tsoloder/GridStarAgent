@@ -1564,5 +1564,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=1231)
     parser.add_argument("--host", default="127.0.0.1")
+    # 提权重启时由 data_dir_guard 传入，用于把数据目录钉给提权子进程；
+    # 真正生效在 paths 导入阶段，这里只是让 argparse 接受它而不报错。
+    parser.add_argument("--data-dir", default=None,
+                        help="数据目录（提权重启时内部传入，通常无需手动指定）")
     args = parser.parse_args()
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
