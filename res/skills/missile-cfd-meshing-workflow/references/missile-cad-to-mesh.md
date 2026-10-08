@@ -1,6 +1,6 @@
 # 导弹 CAD → 网格全流程
 
-导弹专用 CAD 导入到网格导出全流程参数。对应 t.py 模块 1/3/6/7。
+导弹专用 CAD 导入到网格导出全流程参数。对应 需求文件 模块 1/3/6/7。
 
 ## §1 CAD 导入与单位设置
 
@@ -29,7 +29,7 @@
 
 ### 2.2 Agent 侧逻辑（公差查询 + 5 倍递增）
 
-1. 先调用 `GetDealWatertightTolenrance()` 获取默认公差值
+1. 取公差：**用户明确指定公差时，直接以其为准**（不再查询默认值）；未指定时调用 `GetDealWatertightTolenrance()` 获取默认公差值。参数优先级为 **用户明确值 → 默认查询值**（与 需求文件 2.1「具体以用户输入参数为准」一致，与 §5、§4 的同类写法保持一致）。
 2. 用获取的公差调用 `DealWatertight`
 3. 检查返回值中的 `has_free_edges` 字段判断是否还有自由边
 4. 若存在自由边，公差 ×5 重试
@@ -38,12 +38,27 @@
    - 无自由边 → 成功 → 进入下一流程
    - 自由边全在半模线 → 成功
    - 其他位置有自由边 → 提示模型可能有缝隙/穿插/孔洞
+7. **用户修复后继续**（需求文件 1.2 要求）：出现"其他位置有自由边"时停止本阶段，请用户手动修复模型；**用户处理完毕后，确认"继续执行"再进入下一流程**（manual 模式用 `options` 给出"继续 / 终止"选项；auto 模式向用户说明后等待用户确认）。
 
 ## §3 分部件与碎面合并
 
 ### §3.1 碎面合并
 
-- **工具**：`UGSurfaceProcessing(edgeIDs, type, tolerance, minLenth)` `[复用]`
+- **工具**：`UGSurfaceProcessing(edgeIDs, type, tolerance, minLenth)` `[复用]` — 作用于**超边**。参数语义（工具固有，以工具 docstring 为准）：`edgeIDs` = 超边 ID 串（如 `"5,6,7"`）；`type` = **-1 合并 / 2 打散 / 3 删除**；`tolerance` = **面积比**（⚠️ **不是几何容差/公差**，勿按"公差"口径理解取值）；`minLenth` = **最小边长**。需求文件未规定这两个取值 → 按当前模型尺度**现场确定**（`minLenth` 与网格最小尺寸同量级），**不得沿用记忆或历史运行中的数值**；输入不当返回 `"false"`。⚠️ **调用失败时只允许换参重试 1 次**（`minLenth` 按模型尺度微调），仍 `false` **立即停止穷举**，改走 `UGDelRedundantDom`（删重面/topo 错误面/内部面），再不行则跳过并 `note` —— 🔴 **严禁多次换参反复重试同一工具**（已知返回 `false` 时换参命中的概率极低，反复试只耗轮次、不会成功）。
+
+**修复工具清单（按推荐顺序；均为通用工具，导弹可用）**：
+
+| 顺序 | 工具 | 用途 | 关键参数 |
+|---|---|---|---|
+| 1 | `UGDamageRepari(edgeIDs, repairPattern, fillStyle)` | **碎面修复** —— 工具 docstring 原文即"碎面修复"，**本阶段首选**（此前只在别处提过 `UGSurfaceProcessing`，容易漏掉它） | `repairPattern` = **-1 合并 / 2 打散 / 3 删除**；`fillStyle` = 填充方式；`edgeIDs` = **超边 ID** |
+| 2 | `AutoExtractConnector(ids)` / `ManualExtractConnector(ids, precision)` | **提取边界线** —— 把相邻面共用的边界重建为**一条共享线**，直接治"面之间不共享边"造成的**不封闭** | `ids` = **超边 ID**；`ManualExtractConnector` 另有 `precision` = 合并精度 |
+| 3 | `UGRepairRedundantDom(selectedID, domType, precisio, overlapRatio)` | **修复**重面 / topo 错误面 / 内部面（`UGDelRedundantDom` 是**删除**版） | `domType` = 1 重面 / 2 topo 错误面 / 3 内部面；`selectedID` = **超面 ID** |
+| 4 | `CreateCoons(ids)` | 用 **4 条边界重建一张曲面** —— 把碎曲面换成单面 | `ids` = **超边 ID** |
+| 5 | `DeleteFC(ids, flag)` / `DeleteNbsFace(ids, flag)` | 删除数模线 / 数模面；`flag=1` 连带删除关联对象 | ⚠️ **破坏性，必须先确认工程已备份** |
+
+> 🔴 **顺序原则**：先"**合并 / 修复**"（1–3），再考虑"**删除**"（5）；删除类操作前**必须确认已备份**。全部无效时兜底 = **回到源头 CAD 把面缝合成实体后重新导出**（见 `missile-mesh-sealing-check.md`「CAD 拓扑体检」处置）。
+
+> ⚠️ `UGSurfaceProcessing` 作用于**超边 ID**（`type`=-1 合并 / 2 打散 / 3 删除），需有效超边集合；调用失败时本阶段跳过。**跳过时必须在 `note` 中显式记录"需求文件 1.4 的对应要求当前未满足"**，明确列出：① 头部/尾部未合并为单面；② 翼/舵「无明显二面角时各部件合并为一个面」未执行。需求文件 1.4 用词为"**尽量**"，属可接受降级，但**必须留痕**，不得含糊成"按规则跳过"——日后核对需求时才看得出缺口在哪。
 
 按部件规则：
 
@@ -59,7 +74,7 @@
 - `UGSpitAssemblyCreateNewGroup` `[复用]` — 创建部件组
 - `UGSpitAssemblyMoveNodesToNewGroup` `[复用]` — 移动元素到组
 
-详见 `references/missile-segmentation.md` 获取 5 类分割详细规则。
+详见 `references/missile-segmentation.md` 获取部件分割详细规则。
 
 ## §4 表面网格生成
 
@@ -69,96 +84,8 @@
 - 按部件组：`GenerateSurMeshBySpitAssemblyGroupProperty(ids, targetSize, minSize, adaptAngle, way, groupProperty)` `[复用]`
 - 补充：弹体二面角夹角处加密 0.002×D
 
-## §6 空间网格生成
 
-### §6.1 场景分类（4 种）
+> 网格封闭性检查与修复工具清单 → `references/missile-mesh-sealing-check.md`
+> 空间网格与外场创建 → `references/missile-farfield-and-volume.md` 
 
-| 场景 | 条件 | 处理 |
-|------|------|------|
-| 一 | 外场存在 + 全模 | 外场面→外场属性，物面→物面属性，法向量向外 |
-| 二 | 外场存在 + 半模 | 外场→外场属性，物面→物面属性，生维面→对称属性，法向量向外 |
-| 三 | 无外场 + 全模 | 先通过体创建生成外场 |
-| 四 | 无外场 + 半模 | 先设半模边界 → 体创建外场 → 生成空间网格 |
-
-### §6.2 外场规则
-
-- **弓形外场**，按 1 倍弹体长度设置
-- 头部距离按 1.5 倍头部半径
-- **工具**：`CreateMissileFarField(bodyLength, headRadius)` — 场景三/四（无外场）时调用
-- 半模边界：`UGHalfModelLine(cnIDs, symmetry)` `[复用]`
-
-### §6.3 体创建
-
-- **工具**：`UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)` `[复用]`
-- 参数说明：
-
-| 参数 | 说明 |
-|------|------|
-| `geoParam` | 4 个浮点数（长度/半径/短轴/长轴），默认值通过 `GetCreateBlockDefaultParam()` 获取。导弹弓形外场按 1×弹体长度调整 |
-| `chooseParam` | 外场形状：`0`=球形 `1`=立方体 `2`=圆柱 `3`=弓形 |
-| `centerCoor` | 体网格块中心坐标，默认值通过 `GetCreateBlockDefaultParam()` 获取 |
-| `meshType` | `0`=给定尺寸，`1`=期望点数（默认 41） |
-| `meshSizeOrDimension` | 网格尺寸（float），从 `GetCreateBlockDefaultParam` 返回的 `meshSize` 字段改名传入 |
-
-- 调用约定（强制）：
-  1. 先调用 `GetCreateBlockDefaultParam()` 获取默认 `geoParam`/`chooseParam`/`centerCoor`/`meshType`/`meshSize`。
-  2. **字段名映射**：返回值中的 `meshSize` 传入 `UGBlockCreate` 时必须改名为 `meshSizeOrDimension`，并转为数值（float）；严禁传字符串、严禁使用 `meshSize` 作为参数名（MCP Schema 无此参数，会直接校验失败）。
-  3. 若按 §6.2 外场规则调整了 `geoParam`，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致。
-
-### §6.4 空间网格参数
-
-| 参数 | 默认值 |
-|------|--------|
-| y+ | 1 |
-| 雷诺数 Re | 1.5×10⁷（范围 1×10⁷~3×10⁷） |
-| 参考长度 | 平均气动弦长（MAC） |
-| 增长率 | 1.15 |
-| 层数 | 40 |
-| 扩散因子 | 粗网格 0.5 / 中等 0.8 / 细网格 0.98 |
-| 单元类型 | 四面体 |
-
-- **体网格生成**：`UGUGSp(generateWay, ids, layer=40, growRate=1.15, caliperFirst=计算值, diffusionFactor=0.5/0.8/0.98)` `[复用]`
-
-## §7 质量检查与输出
-
-### §7.1 面网格质量
-
-- **工具**：`ExamineDomain(examType, ids)` `[复用]`
-- **examType**：`"MinmumAngle"`（最小角检查）
-- **标准**：除去各向异性单元，最小角 > 10°
-- 若 < 10°：查看位置，模型特征导致的可不处理
-
-### §7.2 体网格质量
-
-- **工具**：`ExamineBlock(examType, ids)` `[复用]`
-- **examType**：`"ExamineMaximumIncludeAngle"`（最大角检查）
-- **标准**：最大角 ≤ 178°；> 178° 需输出数量；**禁止 179.9° 单元**
-
-### §7.3 综合质量检查（可选）
-
-- **工具**：`CheckMissileMeshQuality(domainIds, blockIds)`
-- 返回：`{"surfaceMinAngle": float, "volumeMaxAngle": float, "badCellCount": int, "passed": bool}`
-- **注意**：该工具为辅助参考，Agent 必须首先使用通用工具 `ExamineDomain` 和 `ExamineBlock` 做真实质量检查，不能仅依赖 `CheckMissileMeshQuality` 的 `passed` 字段作为质量合格的唯一依据。
-
-### §7.4 边界条件设置
-
-- **工具**：`BorderConditionAddGroup(name, groupID, colorNumber)` `[复用]`
-- **工具**：`BorderConditionSaveDataToDomain(domainIDs, name, groupID, property)` `[复用]`
-- 参数说明：
-
-| 参数 | 说明 |
-|------|------|
-| `name` | 边界条件组名，直接使用导弹分部件分组名称（如 "nose"/"body"/"fin"/"rudder"/"tail"） |
-| `groupID` | 从 100 开始递增，每个分组 +1（100, 101, 102, ...） |
-| `colorNumber` | 按分组顺序循环取 0–5 |
-| `domainIDs` | 逗号分隔的网格面 ID 字符串，如 `"4,31,55"`。通过 `GetSpliteAssemlyDomainsBatch` 获取各分组 domain IDs 后拼接 |
-| `property` | 首次铺底**必须为 `-10`**（无边界条件）；实际属性（物面→粘性固壁、外场→远场、对称→对称）在铺底完成后逐组设置 |
-
-- 分类：外场、物面、对称
-- 物面可按分部件细分：弹头、弹体、弹翼、舵、尾部
-- **首次铺底 property 必须为 -10（无边界条件）**
-
-### §7.5 输出
-
-- **保存工程**：`SaveSpdFile(filename)` `[复用]`，名字默认为模型名，路径默认为模型路径
-- **网格导出**：`ExportGrid(outType="cgns", objType, name, outIDs, dataType, precision, unit)` `[复用]`，CGNS 格式
+# END

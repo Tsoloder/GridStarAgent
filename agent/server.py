@@ -132,12 +132,13 @@ GetPointCount = query.GetPointCount
 GetNewConnectorId = query.GetNewConnectorId
 GetDomainsByType = query.GetDomainsByType
 GetRecentMessages = query.GetRecentMessages
-ProcessWithServerForMissile = missile.ProcessWithServerForMissile
-DetermineFinTEDirection = missile.DetermineFinTEDirection
-IdentifyFinLeadingEdge = missile.IdentifyFinLeadingEdge
+ClassifyMissile = missile.ClassifyMissile
+GetMissilePartGroups = missile.GetMissilePartGroups
+DetermineWingTEDirection = missile.DetermineWingTEDirection
+IdentifyWingLeadingEdge = missile.IdentifyWingLeadingEdge
 CreateMissileFarField = missile.CreateMissileFarField
 CheckMissileMeshQuality = missile.CheckMissileMeshQuality
-GetMissileModelParameters = missile.GetMissileModelParameters
+GetMissileDimensions = missile.GetMissileDimensions
 
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)

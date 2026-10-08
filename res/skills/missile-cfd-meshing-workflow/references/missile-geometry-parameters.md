@@ -1,61 +1,93 @@
-# 导弹几何参数
+# 导弹几何尺寸参数
 
-导弹专用几何参数体系。对应 t.py 模块 2。
+导弹专用几何参数体系。对应 需求文件 模块 2。
 
 ## 工具
 
-- **`GetMissileModelParameters()`** — 获取导弹全部关键几何参数
-- 需先运行导弹版 AI 分割（`ProcessWithServerForMissile`）
+- **`GetMissileDimensions()`** — 获取导弹全部关键几何尺寸参数（后端接口名 `GetMissileDimensions`，无参数）
+- 需先运行 AI 部件分割（`ClassifyMissile`）；分割后查分组用 `GetMissilePartGroups()`
 
-## 返回参数
+## 返回参数（10 项，后端 snake_case 字段）
 
-| 参数 | 符号 | 说明 | 用途 |
+| 后端字段 | 符号 | 说明 | 用途 |
 |------|------|------|------|
-| bodyDiameter | D | 弹径：头部锥体与弹体交接处直径或弹尾直径 | 弹体/尾部/头部网格尺寸基准 |
-| finRootChord | C_root | 翼/舵根部弦长（前缘到尾缘距离） | 翼/舵网格尺寸基准 |
-| finTipChord | C_tip | 翼/舵梢部弦长 | 翼/舵梢部网格尺寸 |
-| ballNoseRadius | R | 球头半径 | 球头网格尺寸 |
-| rudderGapHeight | H | 舵底间隙高度（舵底到弹体距离） | 舵面网格参数 |
-| characteristicLength | L | 特征长度（软件自行计算） | 空间网格参考长度 |
-| bodyLength | — | 弹体长度 | 外场基准（弓形外场 1×弹体长度） |
-| noseType | — | 头部类型："ball" 或 "sharp" | 区分球头/尖锐头部处理 |
+| `fuselage_length` | — | 全弹长 | 外场基准（弓形外场 1×全弹长） |
+| `body_diameter` | D | 弹径（主体口径） | 弹体/尾部/头部网格尺寸基准 |
+| `body_diameter_tail` | — | 弹尾口径 | 尾部区域参考 |
+| `nose_radius` | R | 球头半径（尖头时为 0） | 球头网格尺寸 |
+| `wing_root_chord` | C_root(翼) | 翼根弦长（前缘到尾缘） | **弹翼**网格尺寸基准 |
+| `wing_tip_chord` | C_tip(翼) | 翼梢弦长（三角翼时≈0） | **弹翼**梢部网格尺寸 |
+| `wing_half_span` | — | 半翼展 | 弹翼展向分布 |
+| `fin_root_chord` | C_root(舵) | 舵根弦长 | **舵**网格尺寸基准 |
+| `fin_tip_chord` | C_tip(舵) | 舵梢弦长 | **舵**梢部网格尺寸 |
+| `fin_clearance_height` | H | 舵底间隙高度（舵底到弹体距离） | 舵面网格参数 |
+
+> **命名对应（重要）**：弹翼子面分组为 `wing*`（归并到主组 `wing`）；舵子面分组为 `fin*`（归并到主组 `fin`）。`wing_*_chord` 供弹翼使用，`fin_*_chord` 供舵使用，**不可混用**。
+>
+> **后端未返回项**：无头部类型字段。头部类型按 `nose_radius > 0` 判为球头(ball)、`== 0` 判为尖头(sharp)。
+
+### 需求文件 2.1 要求但不在上述 10 项中的量
+
+| 量 | 需求文件 要求 | 来源 | 当前状态 |
+|---|---|---|---|
+| **平均气动弦长 MAC** | 需求文件 目录含"2.1 MAC 计算"；空间网格参考长度取 MAC（模块 6.3） | **后端接口返回** | ⚠️ 当前 `GetMissileDimensions` 的 10 项**未含 MAC**——需后端补充该字段（或确认由哪个接口返回）；空间网格参考长度暂用全弹长/当地弦长近似 |
+| 特征长度 | 需求文件 2.1："特征长度：软件自行计算" | 软件内部计算，**agent 不传入** | — |
 
 ## 参数依赖关系
 
 ```
-bodyDiameter (D) ──┬── 头部网格参数（球头 min(0.01×D, 0.25×R)、尖角 0.005×D）
-                   ├── 弹体网格参数（0.05×D）
-                   ├── 尾部网格参数（0.05×D）
-                   └── 弹体二面角加密（0.002×D）
+body_diameter (D) ──┬── 头部网格参数（球头 min(0.01×D, 0.25×R)、尖角 0.005×D）
+                    ├── 弹体网格参数（0.05×D）
+                    ├── 尾部网格参数（0.05×D）
+                    └── 弹体二面角加密（0.002×D）
 
-finRootChord (C_root) ──┬── 翼/舵网格参数（0.02×当地弦长）
-                       └── 翼/舵前缘/梢部（0.008×当地弦长）
+nose_radius (R) ───────── 球头网格参数（min(0.01×D, 0.25×R)）
 
-ballNoseRadius (R) ──── 球头网格参数（min(0.01×D, 0.25×R）)
+wing_root_chord / wing_tip_chord ──┬── 弹翼网格参数（0.02×当地弦长）
+                                   └── 弹翼前缘/梢部（0.008×当地弦长）
 
-rudderGapHeight (H) ──── 舵底间隙区域处理
+fin_root_chord / fin_tip_chord ────┬── 舵网格参数（0.02×当地弦长）
+                                   └── 舵前缘/梢部（0.008×当地弦长）
 
-bodyLength ──────────── 弓形外场（1×弹体长度）
+fin_clearance_height (H) ─────── 舵底间隙区域处理
+
+fuselage_length ─────────────── 弓形外场（1×全弹长）
 ```
 
 ## 参数获取与验证
 
-调用 `GetMissileModelParameters()` 后，检查返回值完整性：
+调用 `GetMissileDimensions()` 后，检查返回值完整性：
 
 ```plaintext
-1. 若 bodyDiameter (D) == 0.0 或为 null → 立即停止后续所有步骤，告知用户缺失参数
-2. 若 finRootChord (C_root) == 0.0 → 禁止使用弦长相关公式（0.008×C、0.02×C）
-3. 若 noseType 为 null 或空字符串 → 禁止分支计算头部网格参数
+1. 若 body_diameter (D) == 0.0 或为 null → 立即停止后续所有步骤，告知用户缺失参数
+2. 若 wing_root_chord == 0.0 或 fin_root_chord == 0.0 → 禁止对相应部件使用弦长公式（0.008×C、0.02×C）
+3. 若 nose_radius 为 null → 无法判断头部类型，禁止分支计算头部网格参数
 
-当任一核心参数（D/C_root/noseType）无效时，Agent 必须：
+当任一核心参数（D / 弦长 / R）无效时，Agent 必须：
 - 不继续执行依赖该参数的网格生成操作
 - 明确告知用户缺少的参数并请求提供
 - 严禁用 0.0 代入公式计算
 ```
 
+## 几何量的唯一来源（反推禁令）
+
+**D / R / 全弹长 / 各当地弦长（含 MAC）的唯一来源是本接口（`GetMissileDimensions`）或用户直接输入** —— 需求文件 2.1 原文「**备注：具体以用户输入参数为准**」，所以"用户输入"是 需求文件 认可的**正规路径**，不是降级。
+
+| 数量 | 唯一来源 | ❌ 禁止来源 |
+|---|---|---|
+| D（弹径） | `body_diameter` / 用户输入 | 由分组属性 `targetSize` 反推 |
+| R（球头半径） | `nose_radius` / 用户输入 | 反推 |
+| 全弹长 | `fuselage_length`（本接口）/ 用户输入 | 任何非导弹几何查询工具（口径按各自模型定义，对导弹会返回量级不符的值） |
+| 各当地弦长 | `wing_*_chord`（弹翼）/ `fin_*_chord`（舵）/ 用户输入 | 由分组属性 `targetSize`×10 或 `0.02×弹径` 反推 |
+| MAC | 后端接口返回（**当前 10 项未含**） | 用全弹长/弦长充当真值（只能作近似并在 `note` 声明） |
+
+> ⚠️ **为什么禁止反推**：分组属性 `targetSize=72.16634`、`minSize=3.60832`，比值 **0.05**；而 需求文件 3.2 规定「最小尺寸 = 目标尺寸 × 1/10」——系数对不上。按 `0.05×D` 或 `0.1×D` 反推会得到**相差 2 倍**的 D，直接带偏 `bodySpacing`/`rootSpacing`/各向异性尺寸。**分组属性只用于表面网格的 `groupProperty` 传参。**
+
+> ⚠️ **接口返回兜底值或字段为 0 时**：该字段**不可用** → 对应部件按全局默认尺寸生成，不得用估算值冒充、不得反复重试本接口。受影响的下游：**外场创建（全弹长/球头半径）**、各向异性与后缘的当地弦长。
+
 ## 前置条件
 
-1. 导弹 5 类 AI 分割已完成
+1. 部件分组已存在（用 `GetAllSpitAssemblyGroupProperty` / `GetMissilePartGroups` 验证）。⚠️ `ClassifyMissile` 返回恒定 `"true"` 时**不得据此判定"分割完成"**。
 2. 上述条件不满足时停止
 
 ## 当地弦长使用规则
@@ -64,6 +96,7 @@ bodyLength ──────────── 弓形外场（1×弹体长度�
 
 | 出现位置 | 使用 C_root（根部弦长） | 使用 C_tip（梢部弦长） |
 |---------|----------------------|----------------------|
+| **表面网格（模块 3.2）翼/舵 0.02×** | **整组取 C_root** | 不适用（分组为整组，无法按展向分段） |
 | 弦向分布（前缘端 0.008×） | 靠近根部段使用 | 靠近梢部段使用 |
 | 弦向分布（后缘端 0.008×） | 靠近根部段使用 | 靠近梢部段使用 |
 | 弦向分布（中间值 0.02×） | 根部段用 C_root | 梢部段用 C_tip |
@@ -74,5 +107,6 @@ bodyLength ──────────── 弓形外场（1×弹体长度�
 | 后缘面 rootSpacing（靠近根部端） | 用 C_root | — |
 | 中间区域 | 线性插值：C_local = C_root + (C_tip - C_root) × (x/L_span) |
 
-- C_root = finRootChord，C_tip = finTipChord
-- 舵(rudder)的弦长字段名与翼(fin)相同，均取自 `GetMissileModelParameters` 返回值的 `finRootChord` 和 `finTipChord`
+- **弹翼（`wing*` 分组）**：C_root = `wing_root_chord`，C_tip = `wing_tip_chord`
+- **舵（`fin*` 分组）**：C_root = `fin_root_chord`，C_tip = `fin_tip_chord`
+- 取弦长时**按部件选字段**：弹翼 → `wing_root_chord` / `wing_tip_chord`；舵 → `fin_root_chord` / `fin_tip_chord`。

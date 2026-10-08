@@ -4,7 +4,7 @@
 与飞机模块（advanced.py / query.py）完全分离，不修改飞机任何代码。
 所有函数均为 thin wrapper，通过 send_post_request 调用 GridStar 服务端（127.0.0.1:1313）。
 
-对齐 t.py 知识库 7 模块工作流。
+对齐需求文件 7 模块工作流。
 """
 
 import json
@@ -15,76 +15,69 @@ from client import send_post_request
 # ===== 导弹 advanced 类工具 =====
 
 
-def ProcessWithServerForMissile(serverHost: str, serverPort: int, outputDir: str):
-    """导弹 5 类 AI 部件分割：对当前已导入的导弹数模执行水密性处理 → 表面网格生成 → 点云导出 → 远程 AI 分割(5类) → 几何法翼面子部件分割 → 各部件自动染色 → 清除网格。
+def ClassifyMissile(serverHost: str, serverPort: int, outputDir: str):
+    """导弹 AI 部件分割（后端接口名 ClassifyMissile）：对当前已导入的导弹数模执行水密性处理 → 表面网格生成 → 点云导出 → 远程 AI 分割 → 几何法子部件分割 → 各部件自动染色 → 清除网格。
 
-    分割类别（5 类）：
+    分割类别（主体 3 类 + 弹翼/舵子面 + 舵轴）：
     - nose(弹头)：球头 / 尖锐头部
-    - body(弹体)
-    - fin(弹翼)：三角翼 / 梯形翼
-    - rudder(舵)：控制部件，底部与弹体有间隙，含舵轴/尾舵
+    - fuselage(弹体)
     - tail(尾部)：尾部收段
-
-    fin 组进一步拆分为：
-    - finLeadingEdge / finTrailingEdge / finUpperSurface / finLowerSurface / finTip / finRoot
-
-    rudder 组进一步拆分为：
-    - rudderLeadingEdge / rudderTrailingEdge / rudderUpperSurface / rudderLowerSurface / rudderTip / rudderRoot
+    - 弹翼(wing)无主组，按 需求文件 1.4 拆分为（3 个基本子面 + 1 条件性子面）：
+      wingLeadingEdge / wingTrailingEdge / wingSideSurface（+ wingTip 仅梯形翼存在，三角翼无）
+    - 舵(fin)无主组，按 需求文件 1.4 拆分为（5 子面）：
+      finLeadingEdge / finTrailingEdge / finTop / finSideSurface / finRoot
+    - finshaft（舵轴，独立分组，不属于上述子面）
 
     使用场景：导弹数模文件已通过 ImportCADFile 导入到 GridStar 中。
     执行后返回 JSON 格式的部件分割结果（含翼面子部件）。
 
     Args:
-        serverHost: 远程推理服务器 IP 地址。
-        serverPort: 远程推理服务器端口号。
-        outputDir: 点云文件和分割结果 JSON 的输出目录。
+        serverHost: 远程推理服务器 IP 地址（默认 "7.31.130.92"）。
+        serverPort: 远程推理服务器端口号（默认 9009）。
+        outputDir: 点云文件和分割结果 JSON 的输出目录（默认 "D:/A_GridStarCode/output"）。
 
     Returns:
-        成功时返回 status="success"，result 为以下格式的列表（共 12 个分组，5 大类 + 7 子面）：
+        成功时返回 status="success"，result 为以下格式的列表（共 12 个分组：nose/fuselage/tail 3 主体类 + 舵轴 + 3 个弹翼基本子面 + 5 个舵子面；wingTip 仅梯形翼时才额外返回）：
 
-        [  # ===== 5 大类 =====
-          {"group_name": "nose",  "faces": [...]},   # 弹头（球头或尖头）
-          {"group_name": "body",  "faces": [...]},   # 弹体
-          {"group_name": "fin",   "faces": [...]},   # 弹翼（大类，含以下 6 个细分）
-          {"group_name": "rudder","faces": [...]},   # 舵（大类，含以下 6 个细分）
-          {"group_name": "tail",  "faces": [...]},   # 尾部
-          # ===== fin 子面 =====
-          {"group_name": "finLeadingEdge",   "faces": [...]},  # 翼前缘面
-          {"group_name": "finTrailingEdge",  "faces": [...]},  # 翼后缘面
-          {"group_name": "finUpperSurface",  "faces": [...]},  # 翼上表面
-          {"group_name": "finLowerSurface",  "faces": [...]},  # 翼下表面
-          {"group_name": "finTip",           "faces": [...]},  # 翼梢面（梯形翼才有）
-          {"group_name": "finRoot",          "faces": [...]},  # 翼根部面
-          # ===== rudder 子面 =====
-          {"group_name": "rudderLeadingEdge",  "faces": [...]},  # 舵前缘面
-          {"group_name": "rudderTrailingEdge", "faces": [...]},  # 舵后缘面
-          {"group_name": "rudderUpperSurface", "faces": [...]},  # 舵上表面
-          {"group_name": "rudderLowerSurface", "faces": [...]},  # 舵下表面
-          {"group_name": "rudderTip",          "faces": [...]},  # 舵梢面
-          {"group_name": "rudderRoot",         "faces": [...]},  # 舵根部面
+        [  # ===== 主体类 =====
+          {"group_name": "nose",      "faces": [...]},   # 弹头（球头或尖头）
+          {"group_name": "fuselage",  "faces": [...]},   # 弹体
+          {"group_name": "tail",      "faces": [...]},   # 尾部
+          {"group_name": "finshaft",  "faces": [...]},   # 舵轴（独立分组）
+          # ===== 弹翼子面（无 wing 主组；需求文件 1.4：前缘面、后缘面、翼侧面；翼梢面仅梯形翼）=====
+          {"group_name": "wingLeadingEdge",  "faces": [...]},  # 翼前缘面
+          {"group_name": "wingTrailingEdge", "faces": [...]},  # 翼后缘面
+          {"group_name": "wingSideSurface",  "faces": [...]},  # 翼侧面
+          {"group_name": "wingTip",          "faces": [...]},  # 翼梢面（仅梯形翼存在，三角翼无）
+          # ===== 舵子面（无 fin 主组；需求文件 1.4：前缘面、舵顶面、根部面、后缘面、侧面）=====
+          {"group_name": "finLeadingEdge",  "faces": [...]},  # 舵前缘面
+          {"group_name": "finTrailingEdge", "faces": [...]},  # 舵后缘面
+          {"group_name": "finTop",          "faces": [...]},  # 舵顶面
+          {"group_name": "finSideSurface",  "faces": [...]},  # 舵侧面
+          {"group_name": "finRoot",         "faces": [...]},  # 舵根部面
         ]
 
         faces 为整数 face_id 列表，对应数模原始面。该结果直接用于后续 UGSpitAssembly 分组操作。
         失败时返回 status="error"。
     """
-    return send_post_request("ProcessWithServerForMissile", {
+    return send_post_request("ClassifyMissile", {
         "serverHost": serverHost,
         "serverPort": serverPort,
         "outputDir": outputDir
     }, timeout=360)
 
 
-def DetermineFinTEDirection(finTeDomainId: int, finTipDomainId: int, longIds: str):
+def DetermineWingTEDirection(wingTeDomainId: int, wingTipDomainId: int, longIds: str):
     """导弹翼后缘方向判定：判断两条长边哪端靠近翼梢。
 
     封装了后缘面与翼梢面的网格线拓扑匹配逻辑，
     调用者不需要关心网格线间的几何关系细节。
 
     Args:
-        finTeDomainId: 翼后缘网格面 ID（来自 GetSpliteAssemlyDomains("finTrailingEdge")）。
-        finTipDomainId: 翼梢网格面 ID（来自 GetSpliteAssemlyDomains("finTip")）。
+        wingTeDomainId: 弹翼后缘网格面 ID（来自 GetAllSpitAssemblyGroupProperty 解析的 ["wingTrailingEdge"].domain[].ids）。
+        wingTipDomainId: 弹翼梢部网格面 ID（来自 GetAllSpitAssemblyGroupProperty 解析的 ["wingTip"].domain[].ids）。
         longIds: MergeEdgesByDomain 返回的 longids，直接传入，如 "[101, 102]"。
-            调用链：先用 GetSpliteAssemlyDomains("finTrailingEdge") 拿后缘面 domain，
+            调用链：先用 GetAllSpitAssemblyGroupProperty 拿后缘面 domain，
             再调 MergeEdgesByDomain(domainId) → 取返回的 longids 字段，直接传入本参数。
 
     Returns:
@@ -95,41 +88,42 @@ def DetermineFinTEDirection(finTeDomainId: int, finTipDomainId: int, longIds: st
         }
         失败时返回 status="error"。
     """
-    return send_post_request("DetermineFinTEDirection", {
-        "finTeDomainId": finTeDomainId,
-        "finTipDomainId": finTipDomainId,
+    return send_post_request("DetermineWingTEDirection", {
+        "wingTeDomainId": wingTeDomainId,
+        "wingTipDomainId": wingTipDomainId,
         "longIds": longIds
     })
 
 
-def IdentifyFinLeadingEdge(
-    finUpperIds: str,
-    finLowerIds: str,
-    bodyIds: str,
-    finTipIds: str):
+def IdentifyWingLeadingEdge(
+    wingSideIds: str,
+    wingLeadingEdgeIds: str,
+    fuselageIds: str,
+    wingTipIds: str):
     """识别导弹翼前缘线及其与弹体、翼梢的共点关系。
 
-    通过翼上表面、下表面、弹体和翼梢的网格面 ID 集合，
-    自动找出前缘线（翼上表面与下表面的共边），
+    通过翼侧面、前缘面、弹体和翼梢的网格面 ID 集合，
+    自动找出前缘线（翼侧面与前缘面的公共边），
     并判断前缘线与弹体、翼梢的共点关系（首点还是尾点）。
 
-    使用场景：表面网格生成后，已有翼上/下表面、弹体、翼梢的 domain ID 集合。
-    调用前需先通过 GetSpliteAssemlyDomains 获取各分组的 domain ID 列表。
+    使用场景：表面网格生成后，已有翼侧面、前缘面、弹体、翼梢的 domain ID 集合。
+    调用前需先通过 GetAllSpitAssemblyGroupProperty 解析各分组的 domain ID 列表
+    （该接口返回 list[{组名:{line:[...], domain:[{ids:[...]}]}}]，取 domain[].ids 拼接）。
 
     Args:
-        finUpperIds: 翼上表面的网格面 ID 列表，逗号分隔，如 "1,2,3"。
-            来源：GetSpliteAssemlyDomains("finUpperSurface") → domains 字段，用逗号拼接。
-        finLowerIds: 翼下表面的网格面 ID 列表，逗号分隔，如 "4,5,6"。
-            来源：GetSpliteAssemlyDomains("finLowerSurface")。
-        bodyIds: 弹体的网格面 ID 列表，逗号分隔，如 "7,8"。
-            来源：GetSpliteAssemlyDomains("body")。
-        finTipIds: 翼梢的网格面 ID 列表，逗号分隔，如 "9,10"。
-            来源：GetSpliteAssemlyDomains("finTip")。
+        wingSideIds: 弹翼侧面的网格面 ID 列表，逗号分隔，如 "1,2,3"。
+            来源：GetAllSpitAssemblyGroupProperty 中 ["wingSideSurface"].domain[].ids，用逗号拼接。
+        wingLeadingEdgeIds: 弹翼前缘面的网格面 ID 列表，逗号分隔，如 "4,5"。
+            来源：GetAllSpitAssemblyGroupProperty 中 ["wingLeadingEdge"].domain[].ids。
+        fuselageIds: 弹体的网格面 ID 列表，逗号分隔，如 "7,8"。
+            来源：GetAllSpitAssemblyGroupProperty 中 ["fuselage"].domain[].ids。
+        wingTipIds: 弹翼梢部的网格面 ID 列表，逗号分隔，如 "9,10"。
+            来源：GetAllSpitAssemblyGroupProperty 中 ["wingTip"].domain[].ids。
 
     Returns:
         成功时返回 status="success"，result 为 JSON：
         {
-          "leading_edge_ids": [101, 102, 103],   # 前缘线 ID 列表（finUpper 与 finLower 的共边）
+          "leading_edge_ids": [101, 102, 103],   # 前缘线 ID 列表（翼侧面与前缘面的公共边）
           "body_adjacent": {                       # 前缘线与弹体的共点关系
             "connector_id": 101,                  # 与弹体共点的前缘线 ID
             "common_point": "start"               # 共点位于前缘线的哪一端（"start"或"end"）
@@ -141,53 +135,53 @@ def IdentifyFinLeadingEdge(
         }
         失败时返回 status="error"。
     """
-    return send_post_request("IdentifyFinLeadingEdge", {
-        "finUpperIds": finUpperIds,
-        "finLowerIds": finLowerIds,
-        "bodyIds": bodyIds,
-        "finTipIds": finTipIds
+    return send_post_request("IdentifyWingLeadingEdge", {
+        "wingSideIds": wingSideIds,
+        "wingLeadingEdgeIds": wingLeadingEdgeIds,
+        "fuselageIds": fuselageIds,
+        "wingTipIds": wingTipIds
     })
 
 
-def CreateMissileFarField(bodyLength: float, headRadius: float):
+def CreateMissileFarField(fuselageLength: float, noseRadius: float):
     """创建导弹弓形外场。
 
-    弓形外场规则（对齐 t.py 模块 6）：
-    - 外场尺寸：1 倍弹体长度
-    - 头部距离：1.5 倍头部半径
+    弓形外场规则（对齐 需求文件 模块 6）：
+    - 外场尺寸：1 倍全弹长
+    - 头部距离：1.5 倍球头半径
 
     场景三（无外场 + 全模）和场景四（无外场 + 半模）时调用。
     场景一/二已有外场时不需要调用。
 
     Args:
-        bodyLength: 弹体长度（外场基准），来自 GetMissileModelParameters 的 bodyLength 字段。
-        headRadius: 头部半径（球头半径 R，用于计算头部距离），
-            来自 GetMissileModelParameters 的 ballNoseRadius 字段。
+        fuselageLength: 全弹长（外场基准尺寸），来自 GetMissileDimensions 的 fuselage_length 字段。
+        noseRadius: 球头半径 R（用于计算头部距离），
+            来自 GetMissileDimensions 的 nose_radius 字段。
 
     Returns:
         成功时返回 status="success"，result 为 JSON：
         {
           "farFieldId": 50,                    # 创建的外场 domain ID
           "farFieldName": "MissileFarField",   # 外场名称
-          "farFieldSize": 3000.0,              # 实际外场尺寸（= bodyLength）
-          "headDistance": 45.0                 # 头部距离（= 1.5 × headRadius）
+          "farFieldSize": 3000.0,              # 实际外场尺寸（= fuselageLength）
+          "headDistance": 45.0                 # 头部距离（= 1.5 × noseRadius）
         }
         失败时返回 status="error"。
     """
     return send_post_request("CreateMissileFarField", {
-        "bodyLength": bodyLength,
-        "headRadius": headRadius
+        "fuselageLength": fuselageLength,
+        "noseRadius": noseRadius
     })
 
 
 def CheckMissileMeshQuality(domainIds: str = "", blockIds: str = ""):
     """导弹网格质量综合检查。
 
-    面网格质量标准（对齐 t.py 模块 7.1）：
+    面网格质量标准（对齐 需求文件 模块 7.1）：
     - 除去各向异性单元，最小角 > 10°
     - 若 < 10°：查看位置，模型特征导致的可不处理
 
-    体网格质量标准（对齐 t.py 模块 7.2）：
+    体网格质量标准（对齐 需求文件 模块 7.2）：
     - 最大角 ≤ 178°
     - > 178° 需输出数量
     - 禁止 179.9° 单元
@@ -214,36 +208,67 @@ def CheckMissileMeshQuality(domainIds: str = "", blockIds: str = ""):
 # ===== 导弹 query 类工具 =====
 
 
-def GetMissileModelParameters():
-    """获取导弹全部关键几何参数。
+def GetMissileDimensions():
+    """获取导弹全部关键几何尺寸参数（后端接口名 GetMissileDimensions）。
 
-    需先运行导弹版 AI 分割（ProcessWithServerForMissile）方能获取有效值。
+    需先运行 AI 分割（ClassifyMissile）方能获取有效值。
 
-    返回参数（对齐 t.py 模块 2）：
-    - bodyDiameter (D): 弹径，头部锥体与弹体交接处直径或弹尾直径（单位：mm）
-    - ballNoseRadius (R): 球头半径（单位：mm），sharp 头时可能为 0
-    - finRootChord (C_root): 翼/舵根部弦长，前缘到尾缘距离（单位：mm）
-    - finTipChord (C_tip): 翼/舵梢部弦长（单位：mm），三角翼时 C_tip ≈ 0
-    - rudderGapHeight (H): 舵底间隙高度，舵底到弹体距离（单位：mm）
-    - characteristicLength (L): 特征长度，软件自行计算（单位：mm）
-    - bodyLength: 弹体长度（单位：mm），用于外场基准
-    - noseType: 头部类型，"ball"（球头）或 "sharp"（尖锐头部）
+    返回参数（10 项，后端 snake_case 字段）：
+    - fuselage_length: 全弹长（外场基准，弓形外场 = 1× 全弹长）
+    - body_diameter: 弹径（主体口径，弹体/尾部/头部网格尺寸基准 D）
+    - body_diameter_tail: 弹尾口径
+    - nose_radius: 球头半径（球头网格尺寸基准 R；尖头时为 0）
+    - wing_root_chord: 翼根弦长（弹翼网格尺寸基准）
+    - wing_tip_chord: 翼梢弦长（弹翼梢部网格尺寸）
+    - wing_half_span: 半翼展（展向分布用）
+    - fin_root_chord: 舵根弦长（舵网格尺寸基准）
+    - fin_tip_chord: 舵梢弦长
+    - fin_clearance_height: 舵底间隙高度（舵底到弹体距离 H）
+
+    > 命名提示：本模块函数名与参数名统一使用现行命名 —— `wing` = 弹翼、`fin` = 舵、`fuselage` = 弹体、`finshaft` = 舵轴；分组名与参数名同此口径。
 
     Returns:
         成功时返回 status="success"，result 为 JSON 字符串：
         {
-          "bodyDiameter": 300.0,
-          "ballNoseRadius": 30.0,
-          "finRootChord": 200.0,
-          "finTipChord": 100.0,
-          "rudderGapHeight": 5.0,
-          "characteristicLength": 300.0,
-          "bodyLength": 3000.0,
-          "noseType": "ball"
+          "fuselage_length": 12500.0,
+          "body_diameter": 800.0,
+          "body_diameter_tail": 700.0,
+          "nose_radius": 50.0,
+          "wing_root_chord": 1200.0,
+          "wing_tip_chord": 800.0,
+          "wing_half_span": 2500.0,
+          "fin_root_chord": 600.0,
+          "fin_tip_chord": 400.0,
+          "fin_clearance_height": 50.0
         }
         失败时返回 status="error"。
     """
-    raw = send_post_request("GetMissileModelParameters", {})
+    raw = send_post_request("GetMissileDimensions", {})
+    if isinstance(raw, dict) and raw.get("status") == "success":
+        return raw.get("result", raw)
+    return raw
+
+
+def GetMissilePartGroups():
+    """获取当前模型中已有的导弹部件分组信息（后端接口名 GetMissilePartGroups）。
+
+    需先运行 AI 分割（ClassifyMissile）完成分类。
+
+    后端遍历模型的 AssemblyGroup，过滤出导弹部件分组，统计每组包含的超面（面片）ID。
+
+    Returns:
+        成功时返回 status="success"，result 为 JSON 数组：
+        [
+          {"group_name": "nose",  "face_count": 3, "face_ids": [0, 5, 12]},
+          {"group_name": "wing",  "face_count": 6, "face_ids": [...]},
+          ...
+        ]
+        - group_name: 组名（后端 6 类：nose / fuselage / tail / wing / fin / finshaft）
+        - face_count: 该组包含的超面数量
+        - face_ids: 该组包含的超面 ID 列表
+        失败时返回 status="error"。
+    """
+    raw = send_post_request("GetMissilePartGroups", {})
     if isinstance(raw, dict) and raw.get("status") == "success":
         return raw.get("result", raw)
     return raw

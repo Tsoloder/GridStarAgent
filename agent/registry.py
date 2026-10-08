@@ -176,14 +176,15 @@ TOOL_GROUPS = (
     },
     {
         "id": "missile",
-        "description": "导弹网格生成：导弹 5 类 AI 部件分割、后缘方向判定、翼前缘识别、导弹弓形外场创建、导弹网格质量检查、导弹几何参数查询。",
+        "description": "导弹网格生成：导弹 AI 部件分割、部件分组查询、后缘方向判定、翼前缘识别、导弹弓形外场创建、导弹网格质量检查、导弹几何尺寸查询。",
         "tools": (
-            missile.ProcessWithServerForMissile,
-            missile.DetermineFinTEDirection,
-            missile.IdentifyFinLeadingEdge,
+            missile.ClassifyMissile,
+            missile.GetMissilePartGroups,
+            missile.DetermineWingTEDirection,
+            missile.IdentifyWingLeadingEdge,
             missile.CreateMissileFarField,
             missile.CheckMissileMeshQuality,
-            missile.GetMissileModelParameters,
+            missile.GetMissileDimensions,
         ),
     },
 )
