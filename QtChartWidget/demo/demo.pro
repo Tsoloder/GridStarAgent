@@ -2,7 +2,7 @@ TEMPLATE = app
 TARGET   = demo
 CONFIG  += c++17 console
 CONFIG  -= app_bundle
-QT      += core gui widgets
+QT      += core gui widgets network
 
 msvc: QMAKE_CXXFLAGS += /utf-8
 

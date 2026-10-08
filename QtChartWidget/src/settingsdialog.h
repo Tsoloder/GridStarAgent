@@ -7,16 +7,23 @@
 #include <QWidget>
 
 QT_BEGIN_NAMESPACE
+class QBoxLayout;
 class QCheckBox;
 class QComboBox;
+class QGridLayout;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QResizeEvent;
+class QSpacerItem;
 class QStackedWidget;
 class QVBoxLayout;
 QT_END_NAMESPACE
 
 namespace gs {
+
+class UsagePanel;
 
 // HTML <details> 的等价物：点击 summary 展开 / 收起 body
 class ExpandCard : public QFrame
@@ -44,9 +51,10 @@ private:
     bool m_open = false;
 };
 
-// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 三个 Tab
+// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 / 用量 四个 Tab
 // 对应 app.js 的 renderSettings / renderProviderEditor / renderModelCard /
-// renderCandidates / renderSkills / renderMcpTools / validateSettings / saveSettings
+// renderCandidates / renderSkills / renderMcpTools / validateSettings / saveSettings /
+// renderUsagePanel
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -68,6 +76,11 @@ public:
     void setMcpTools(const QVariantList &tools, bool connected, bool loading,
                      const QString &error);
 
+    // 用量页：配置目录（显示名映射）与后端回填
+    void setUsageCatalog(const QVariantList &models);
+    void setUsageStats(const QString &requestId, const QVariantMap &data);
+    void setUsageLoadFailed(const QString &requestId, const QString &error);
+
     void switchTab(const QString &tab);
     QString activeTab() const { return m_tab; }
     void setStatus(const QString &text);
@@ -80,20 +93,26 @@ signals:
     void refreshSkillsRequested();
     void refreshMcpRequested();
     void saveRequested(const QVariantMap &config, const QVariant &revision);
+    void usageStatsRequested(const QString &requestId, const QString &start, const QString &end,
+                             const QString &provider, const QString &model);
 
 protected:
     void closeEvent(QCloseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     // Esc 走 reject()，脏检查要在两条路径上都生效
     void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void buildUi();
+    // style.css @media(max-width:640px)：设置窗口转紧凑布局
+    void applyCompactMode(bool compact);
     QWidget *buildModelsPage();
     QWidget *buildProviderSidebar();
     QWidget *buildProviderEditor();
     QWidget *buildSkillsPage();
     QWidget *buildMcpPage();
+    QWidget *buildUsagePage();
 
     void renderSettings();
     void renderProviderList();
@@ -142,16 +161,32 @@ private:
 
     // 框架
     QStackedWidget *m_stack = nullptr;
+    QHBoxLayout *m_headLayout = nullptr;
+    QHBoxLayout *m_tabsLayout = nullptr;
+    QSpacerItem *m_tabsSpacer = nullptr;
+    QHBoxLayout *m_actionsLayout = nullptr;
     QPushButton *m_tabModels = nullptr;
     QPushButton *m_tabSkills = nullptr;
     QPushButton *m_tabMcp = nullptr;
+    QPushButton *m_tabUsage = nullptr;
     QPushButton *m_saveButton = nullptr;
     QLabel *m_status = nullptr;
 
     // 供应商侧栏
+    QWidget *m_providerSidebar = nullptr;
+    QVBoxLayout *m_providerSidebarLayout = nullptr;
     QVBoxLayout *m_providerNavLayout = nullptr;
 
     // 供应商编辑器
+    QWidget *m_providerEditor = nullptr;
+    QVBoxLayout *m_providerEditorLayout = nullptr;
+    QGridLayout *m_providerGrid = nullptr;
+    QList<QWidget *> m_providerFields;
+    // .form-grid：每个模型卡片一套，切紧凑模式时重排为单列
+    QList<QGridLayout *> m_modelGrids;
+    QList<QList<QWidget *>> m_modelGridFields;
+    QBoxLayout *m_providerActions = nullptr;
+    QSpacerItem *m_providerActionsSpacer = nullptr;
     QWidget *m_placeholder = nullptr;
     QFrame *m_sectionProvider = nullptr;
     QFrame *m_sectionModels = nullptr;
@@ -165,6 +200,13 @@ private:
     QLineEdit *m_keyEnvEdit = nullptr;
     QLineEdit *m_apiKeyEdit = nullptr;
     QComboBox *m_defaultApiCombo = nullptr;
+    // SSL 证书验证：默认（系统证书）/ 跳过验证 / 自定义 CA 证书路径。
+    // 自定义时那个路径框才现身，值直接写进 provider 的 ssl_verify（字符串即路径）
+    QComboBox *m_sslCombo = nullptr;
+    QWidget *m_sslPathRow = nullptr;
+    QLineEdit *m_sslPathEdit = nullptr;
+    // 下拉切回「自定义」时要还回上次填的路径，provider 里此刻只存着 true/false
+    QString m_sslPathMemory;
     QPushButton *m_clearKeyButton = nullptr;
     QPushButton *m_testButton = nullptr;
     QLabel *m_inlineResult = nullptr;
@@ -179,6 +221,8 @@ private:
     QPushButton *m_addManualButton = nullptr;
 
     // 技能 / MCP
+    QVBoxLayout *m_skillsPageLayout = nullptr;
+    QVBoxLayout *m_mcpPageLayout = nullptr;
     QLabel *m_skillCount = nullptr;
     QLabel *m_skillsStatus = nullptr;
     QVBoxLayout *m_skillsLayout = nullptr;
@@ -187,6 +231,11 @@ private:
     QLabel *m_mcpStatus = nullptr;
     QVBoxLayout *m_mcpLayout = nullptr;
     QPushButton *m_refreshMcp = nullptr;
+
+    // 用量页
+    UsagePanel *m_usagePanel = nullptr;
+
+    bool m_compact = false;
 };
 
 } // namespace gs

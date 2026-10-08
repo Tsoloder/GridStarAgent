@@ -25,6 +25,8 @@ class FlowLayout : public QLayout
 public:
     explicit FlowLayout(QWidget *parent = nullptr, int margin = 0, int hSpacing = 6, int vSpacing = 6);
     ~FlowLayout() override;
+    // 运行时改间距（窄屏下 .usage-filters 从 gap:8px 收到 5px）
+    void setSpacings(int horizontal, int vertical);
 
     void addItem(QLayoutItem *item) override;
     int horizontalSpacing() const;
@@ -55,6 +57,7 @@ class Chevron : public QWidget
 public:
     explicit Chevron(QWidget *parent = nullptr);
     void setOpen(bool open);
+    void setHovered(bool hovered);
     bool isOpen() const { return m_open; }
     QSize sizeHint() const override { return QSize(10, 10); }
     QSize minimumSizeHint() const override { return QSize(10, 10); }
@@ -64,6 +67,7 @@ protected:
 
 private:
     bool m_open = false;
+    bool m_hovered = false;
 };
 
 // 工具项状态圆点（.tool-dot）：执行中橙色带光晕，成功绿色，失败红色
@@ -118,6 +122,7 @@ signals:
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     bool event(QEvent *event) override;
 
@@ -185,14 +190,21 @@ public:
     // item 与 attachments 的条目同构：{name, size, ext, uploading, kind, path[, url]}
     explicit AttachChip(const QVariantMap &item, QWidget *parent = nullptr);
     void setUploading(bool uploading);
+    // style.css：.attach-chip{max-width:230px}；@media(max-width:640px) 收到 150px。
+    // Qt 侧用文件名省略宽度兑现这条约束（宽屏 140 即 230 减去固定件后的余量）
+    void setCompact(bool compact);
 
 signals:
     void removeClicked();
 
 private:
+    void updateNameElide();
+
     QLabel *m_name = nullptr;
     QLabel *m_size = nullptr;
+    QString m_fullName;
     qint64 m_bytes = 0;
+    bool m_compact = false;
 };
 
 // SVG 图标按钮：图标经 iconPixmap 着色后设置，hover/禁用态自动换色。
@@ -220,13 +232,18 @@ private:
     bool m_hovering = false;
 };
 
-// 呼吸圆点（.run-dot / 阶段项 active 指示）：运行态下透明度往复动画
+// 状态指示器：呼吸圆点（badgePulse 1.4s 透明度往复）或旋转圆环（spinRing 0.7s）
 class PulseDot : public QWidget
 {
     Q_OBJECT
 public:
+    enum Style { Pulse, Spin };
     explicit PulseDot(QWidget *parent = nullptr);
     void setColor(const QColor &color);
+    // Spin：不填色的开口圆环，围绕中心匀速旋转（.run-dot 的新形态）
+    void setStyle(Style style);
+    // 覆盖 Spin 环的几何：sizePx 是含描边的外径，borderPx 是描边宽度
+    void setRing(int sizePx, qreal borderPx);
     void setActive(bool active);
     bool isActive() const { return m_active; }
     QSize sizeHint() const override { return QSize(6, 6); }
@@ -236,7 +253,11 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    void advance();
     QColor m_color;
+    Style m_style = Pulse;
+    int m_ringSize = 8;      // Spin 环外径（含描边）
+    qreal m_ringBorder = 1.5; // 描边宽度
     bool m_active = false;
     qreal m_phase = 0.0;
     QTimer *m_timer = nullptr;
@@ -288,6 +309,37 @@ private:
     int m_turn = 0;
     bool m_active = false;
     bool m_hover = false;
+};
+
+// 轮次列表面板中的一行（.turn-rail-row）：序号徽标 + 单行省略的提问摘要。
+// 悬浮 / 当前态高亮由 QSS 的 :hover 与 [active="true"] 承担，这里只管点击与省略。
+class TurnRailRow : public QWidget
+{
+    Q_OBJECT
+public:
+    TurnRailRow(int turn, const QString &text, QWidget *parent = nullptr);
+    int turn() const { return m_turn; }
+    QString turnText() const { return m_text; }
+    // 正文可能在行创建之后才回填（createMessage 收尾时就重建了轨道），
+    // 所以允许就地改写文案，不必整条重建
+    void setTurnText(const QString &text);
+    void setRowActive(bool active);
+    bool isRowActive() const { return m_active; }
+    QSize sizeHint() const override;
+
+signals:
+    void activated(int turn);
+
+protected:
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void keyPressEvent(QKeyEvent *event) override;
+
+private:
+    int m_turn = 0;
+    QString m_text;
+    QLabel *m_index = nullptr;
+    ElidedLabel *m_label = nullptr;
+    bool m_active = false;
 };
 
 // 轨迹行内耗时条（.traj-row-bar）：带边框的胶囊轨道 + 按比例填充

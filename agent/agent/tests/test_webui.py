@@ -293,8 +293,26 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=64" in index
-    assert "style.css?v=55" in index
+    assert "app.js?v=75" in index
+    assert "style.css?v=58" in index
+
+
+def test_webui_storage_issue_surfacing_contract():
+    """会话存储读不出来时界面必须说出来，不能和「没有会话」长得一样。"""
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    # 后端把异常随列表一起返回
+    assert '"storage_issues": issues' in backend
+    assert "from session import (" in backend
+    assert "storage_issues," in backend
+    # 前端有独立提示函数，且两条取列表的路径都调用它
+    assert "function warnStorageIssues(issues)" in script
+    assert "warnStorageIssues(data.storage_issues)" in script
+    assert "warnStorageIssues(sessions.value.storage_issues)" in script
+    # 同一句话只提示一次，避免每次刷新都盖掉别的提示
+    assert "const warnedStorageIssues = new Set()" in script
+    assert "warnedStorageIssues.has(issue)" in script
 
 
 def test_webui_voice_input_contract():
@@ -308,8 +326,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=55" in index
-    assert "app.js?v=64" in index
+    assert "style.css?v=58" in index
+    assert "app.js?v=75" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -371,7 +389,8 @@ def test_webui_choice_card_contract():
     assert 'if (el.composer) el.composer.classList.remove("choice-open");' in script
     assert "function openChoiceOverlay(payload)" in script
     assert "function closeChoiceOverlay()" in script
-    assert 'requestAnimationFrame(() => host.classList.add("open"))' in script
+    assert "requestAnimationFrame" in script
+    assert 'host.classList.add("open")' in script
     assert 'host.classList.remove("open");' in script
 
     # 模型询问：ask_user_question 工具事件与旧 options 文本块都走同一套浮层
@@ -406,33 +425,387 @@ def test_webui_choice_card_contract():
 
 
 def test_webui_turn_rail_navigates_conversation_turns():
-    """对话界面最左侧竖排白点：一轮一个点，悬浮显示该轮提问，点击跳转，当前轮高亮。"""
+    """对话界面最左侧竖排白点：一轮一个点，鼠标移入展开整轮列表，点击行/点跳转，当前轮高亮。"""
     index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
     stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
 
-    # 轨道与悬浮窗是对话区旁的独立节点，悬浮窗不放在轨道内（轨道可滚动，放进去会被 overflow 裁掉）
+    # 轨道与轮次面板是对话区旁的独立节点，面板不放在轨道内（轨道可滚动，放进去会被 overflow 裁掉）
     assert 'id="turn-rail"' in index
-    assert 'id="turn-rail-tip"' in index
-    assert index.index('id="turn-rail-tip"') > index.index('id="turn-rail"')
+    assert 'id="turn-rail-panel"' in index
+    assert 'id="turn-rail-list"' in index
+    assert index.index('id="turn-rail-panel"') > index.index('id="turn-rail"')
 
-    # 轮次以用户消息为界：一个点对应一条 user 消息
+    # 轮次以用户消息为界：一个点对应一条 user 消息，列表一行摘要同一轮
     assert 'function renderTurnRail()' in script
     assert 'el.messages.querySelectorAll(".message.user")' in script
     # 消息区增删统一走 MutationObserver + 下一帧合并刷新，点集未变不重建
     assert "new MutationObserver(syncTurnRail).observe(el.messages, {childList: true});" in script
     assert "function syncTurnRail()" in script
-    # 悬浮显示该轮提问、点击定位到该轮、滚动时重算当前轮高亮
-    assert "function showTurnRailTip(" in script
-    assert "function hideTurnRailTip()" in script
+    # 移入轨道展开整轮列表、点击定位到该轮、滚动时重算当前轮高亮
+    assert "function showTurnRailPanel(" in script
+    assert "function hideTurnRailPanel()" in script
+    assert "function jumpToTurn(" in script
+    assert 'el.turnRail.addEventListener("mouseenter", showTurnRailPanel);' in script
     assert 'node.scrollIntoView({block: "start", behavior: "smooth"})' in script
     assert "function updateTurnRailActive()" in script
     assert "updateTurnRailActive(); }, {passive: true});" in script
     assert "syncTurnRail();" in script[script.index("function switchViewTab"):]
 
-    # 固定在最左边缘垂直居中，点/当前点/悬浮窗的样式
+    # 固定在最左边缘垂直居中，点/当前点的样式 + 右侧列表行样式
     for rule in (".turn-rail{position:fixed;left:0;top:50%;transform:translateY(-50%)",
                  ".turn-rail-dot{", ".turn-rail-dot:before{", ".turn-rail-dot.active:before{",
-                 ".turn-rail-tip{position:fixed;", ".turn-rail-tip.show{"):
+                 ".turn-rail-panel{position:fixed;", ".turn-rail-panel.show{",
+                 ".turn-rail-row{", ".turn-rail-index{", ".turn-rail-row.active .turn-rail-index{"):
         assert rule in stylesheet
+
+
+def test_webui_usage_panel_contract():
+    """设置中心第四个 Tab「用量」：供应商/模型维度、按天/按小时、日历选区间、三图 + 明细表。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    charts = (Path(WEBUI_DIR) / "charts.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+    backend_dir = Path(__file__).resolve().parents[1]
+    stats = (backend_dir / "usage_stats.py").read_text(encoding="utf-8")
+
+    # Tab 排在 MCP 之后，面板与筛选控件齐备
+    assert 'data-settings-tab="usage"' in index
+    assert 'id="panel-usage"' in index
+    assert index.index('data-settings-tab="usage"') > index.index('data-settings-tab="mcp"')
+    for anchor in ('id="usage-group"', 'id="usage-provider"', 'id="usage-model"', 'id="usage-granularity"',
+                   'id="usage-range"', 'id="usage-range-panel"', 'id="usage-calendar"', 'id="usage-overview"',
+                   'id="usage-line"', 'id="usage-pie"', 'id="usage-bar"', 'id="usage-table"'):
+        assert anchor in index
+    # 筛选顺序：分组 → 供应商 → 模型 → 粒度 → 日期
+    assert index.index('id="usage-group"') < index.index('id="usage-provider"')
+    assert index.index('id="usage-provider"') < index.index('id="usage-model"')
+    assert index.index('id="usage-model"') < index.index('id="usage-granularity"')
+    # 日历面板挂在筛选行下而不是日期触发器内：它宽约 560，
+    # 跟着触发器左缘向右展开会顶出弹窗右缘被裁掉
+    assert index.index('id="usage-range-panel"') > index.index('id="usage-refresh"')
+    assert index.index('id="usage-range-panel"') < index.index('id="usage-status"')
+    assert ".usage-filters{position:relative;" in stylesheet
+    assert ".usage-range-panel{position:absolute;z-index:26;top:calc(100% + 5px);right:0;left:auto;max-width:100%;" in stylesheet
+    # 图表模块先于 app.js 加载，且不引任何外部资源（内网离线）
+    assert 'charts.js?v=' in index
+    assert index.index('charts.js?v=') < index.index('app.js?v=')
+    assert '<script src="http' not in index
+
+    # 接口与聚合口径
+    assert "/usage/stats" in script
+    assert "/usage/stats" in (backend_dir / "app.py").read_text(encoding="utf-8")
+    assert "function loadUsageStats(" in script
+    assert "function usageRollupDays(" in script
+    assert "function usageDrilled(" in script
+    assert 'if (tab === "usage")' in script
+    # 供应商/模型筛选项只列「有调用记录」的模型：candidates 按时间窗算出、不随筛选缩水。
+    # 列出从没调用过的配置模型只会让用户选到空结果。
+    assert "function usageSyncCatalog(" in script
+    assert "data.candidates" in script
+    assert '"candidates"' in stats
+    assert "function usageProviderName(" in script
+    assert "function usageModelName(" in script
+    assert "&provider=" in script
+    assert '"provider"' in stats
+    # 配置目录只用于名称映射，不再作为选项来源
+    assert "(state.models || []).filter(item => item.enabled !== false)" in script
+    # 选中项在当前时间窗无记录时仍保留下拉里，不静默清空
+    assert "usage.modelOptions.push({value: usage.model" in script
+    # 结果缓存有上限：key 精确到分钟，跨分钟后旧条目再也命中不了，不设上限会一直堆积
+    assert "USAGE_CACHE_LIMIT" in script
+    assert "if (Object.keys(usage.cache).length >= USAGE_CACHE_LIMIT) usage.cache = {};" in script
+    # 命中缓存时也要作废在飞请求，否则它返回时会把这份缓存结果覆盖成上一个筛选的数据
+    assert "usage.token += 1;" in script
+    # 分组只决定饼图与明细表的拆分维度，不再置灰模型下拉、也不再清空已选筛选
+    assert "el.usageModel.disabled" not in script
+    for label in ("最近 12 小时", "最近 24 小时", "最近 3 天", "最近 7 天", "最近 30 天"):
+        assert label in script
+    for label in ("模型用量", "供应商用量", "按小时", "按天"):
+        assert label in script
+    # 12/24 小时档在按天下只剩一两个点，选择后自动切到按小时
+    assert "if (usagePreset(id).hours) usage.granularity = \"hour\";" in script
+    # 单个模型下饼图退化为该模型的 token 构成，避免只剩一个满圆
+    assert "缓存读" in script and "缓存写" in script
+    # 缓存命中率口径不假设 input 与 cache_read 的包含关系
+    assert "totals.cache_read / base" in script
+
+    # 图表模块自带折线/饼/柱与时间轴缩放，零依赖
+    for name in ("function line(", "function pie(", "function bar(", "function bindTimeZoom(",
+                 "function clampView(", "function arcPath("):
+        assert name in charts
+    assert "https://" not in charts and "http://" not in charts.replace("http://www.w3.org/2000/svg", "")
+    assert 'svg.addEventListener("dblclick"' in charts
+    assert 'svg.addEventListener("wheel"' in charts
+    assert 'svg.addEventListener("mousedown"' in charts
+
+    # 用量一律以 M 为单位：同一页混用 K 与 M 无法横向比较，故不再有 K 档
+    assert "function formatMillions(" in charts
+    assert "/ 102.4" not in charts
+    assert 'return "0M";' in charts
+    # 不足 1M 时按数量级补足小数位，否则 8.8K 会被压成 0.00M，看起来像没有消耗
+    assert "Math.min(8, 1 - Math.floor(Math.log(abs) / Math.LN10))" in charts
+    # 用量面板统一走 M 格式化
+    for call in ("Charts.formatMillions(totals.total)", "Charts.formatMillions(totals.input)",
+                 "Charts.formatMillions(totals.output)", "Charts.formatMillions(row[item.key])"):
+        assert call in script
+    # 模型设置的上下文窗口仍用 K/M 自适应：128K 换成 0.13M 反而难读
+    assert "function formatTokens(value) { return value >= 1048576" in script
+    assert "formatTokens(totals" not in script and "formatTokens(row[item" not in script
+    # 轮次是计数不是用量：只给 token 列打 tokens 标记，否则 33 轮会写成 0.000033M
+    assert '{key:"turns",label:"轮次",numeric:true},' in script
+    assert 'escapeHtml(item.tokens ? Charts.formatMillions(row[item.key]) : row[item.key])' in script
+
+    for rule in (".usage-panel{", ".usage-filters{", ".usage-select{", ".usage-listbox{",
+                 ".usage-range-panel{", ".usage-cal-day{", ".usage-overview{", ".usage-stat{",
+                 ".usage-table{", ".chart-legend{", ".chart-tip{", ".chart-empty{", ".pie-legend{"):
+        assert rule in stylesheet
+
+
+def test_webui_serves_charts_module():
+    response = client.get("/ui/charts.js")
+
+    assert response.status_code == 200
+    assert "javascript" in response.headers["content-type"]
+
+
+def test_webui_clears_stream_state_and_avoids_duplicate_streams():
+    """清空会话要像删除一样丢弃前端流状态，且同会话不允许开出第二条 SSE。
+
+    回归的 bug：clearSession 只请求后端、不清理 controllers/streams/stashed，
+    被切走会话的暂存 DOM 会在切回时被 restoreView 挂回，看起来「清空没生效」。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 统一的流状态清理：中断在跑的流并清掉 controller/stream/stash 三张表
+    assert "function dropStreamState(id)" in script
+    assert "state.stashed.delete(id);" in script
+
+    clear = script[script.index("async function clearSession(session)"):]
+    clear = clear[:clear.index("async function deleteSession")]
+    assert "dropStreamState(session.id);" in clear
+    # 清空后要抹掉中断流异步写入的 stopped 徽标
+    assert "state.status.delete(session.id);" in clear
+    # 丢弃暂存 DOM 必须在刷新视图之前，否则切回时挂回的是清空前的旧内容
+    assert clear.index("dropStreamState(session.id);") < clear.index("await loadSession(session.id);")
+
+    delete = script[script.index("async function deleteSession(session)"):]
+    assert "dropStreamState(session.id);" in delete
+
+    # error 事件抛出前必须主动断开，避免响应体不被读完、连接挂到 GC
+    consume = script[script.index("async function consumeSse(response, onEvent, controller)"):]
+    consume = consume[:consume.index("function handleStreamEvent")]
+    assert "controller.abort();" in consume
+    assert "reader.cancel();" in consume
+
+    # 同会话双流防护：发送与重连在锁定会话后都要再确认一次没有在跑的流
+    guard = "if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;"
+    send = script[script.index("async function sendMessage("):]
+    send = send[:send.index("async function reconnectStream")]
+    assert guard in send
+    reconnect = script[script.index("async function reconnectStream"):]
+    reconnect = reconnect[:reconnect.index("async function maybeReconnect")]
+    assert guard in reconnect
+
+
+def test_webui_phase_panel_visibility_contract():
+    """计划窗口只有一条可见性规则：有未收尾阶段才显示，全部收尾即收起。
+
+    回归守卫：切会话时若只给面板加 hidden，上一条会话的旧 DOM 与旧
+    state.phasePlan 会留在页面里，之后切回对话页签时会按"看起来还有计划"
+    重新亮出来，表现为切换对话后仍显示上一个流程面板。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 收起必须同时清 DOM 与状态，否则残留会被后续判断当成"还有计划"
+    hide = script[script.index("function hidePhasePanel()"):]
+    hide = hide[:hide.index("function renderPhase(")]
+    assert 'el.phasePanel.classList.add("hidden");' in hide
+    assert 'el.phasePanel.innerHTML = "";' in hide
+    assert "state.phasePlan = null;" in hide
+
+    # 完成即收起的规则收在渲染口，实时更新/切会话/回放历史都绕不过去
+    render = script[script.index("function renderPhase("):]
+    render = render[:render.index("// 过程区挂在卡底")]
+    assert "if (planComplete(phase)) { hidePhasePanel(); return; }" in render
+
+    # 切会话走同一个收起函数
+    load = script[script.index("async function loadSession("):]
+    load = load[:load.index("function renderSessions(")]
+    assert 'el.messages.innerHTML = ""; hidePhasePanel();' in load
+    assert 'el.phasePanel.classList.add("hidden")' not in load
+
+    # 回对话页签按状态判断，不再按残留 DOM 判断
+    tab = script[script.index("function switchViewTab("):]
+    tab = tab[:tab.index("// 时间轴命中检测")]
+    assert ('if (state.phasePlan && !planComplete(state.phasePlan)) '
+            'el.phasePanel.classList.remove("hidden");') in tab
+    assert "el.phasePanel.innerHTML.trim()" not in tab
+
+    # 本轮结束时的收起同样走同一函数
+    assert "if (visible && planComplete(state.phasePlan)) hidePhasePanel();" in script
+
+
+def test_webui_mode_dropdown_contract():
+    """交互模式由分段按钮改为下拉：每项一行标题 + 一行小字说明，选中项打勾。
+
+    值仍以 state.mode 发往 /chat/stream 的 interaction_mode，契约不变。
+    """
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 结构：触发器 + 列表，复用模型下拉的控件族；分段按钮与旧样式不得残留
+    assert 'class="model-control mode-control"' in index
+    assert 'id="mode-trigger"' in index and 'id="mode-label"' in index and 'id="mode-listbox"' in index
+    assert "data-mode" not in index
+    assert "mode-switch" not in index and "mode-switch" not in stylesheet
+
+    # 选项：标题 + 一行说明 + 打勾，且仅选中项可见
+    assert '{value:"manual", title:"手动", hint:' in script
+    assert '{value:"auto", title:"自动", hint:' in script
+    assert 'class="mode-option-text"><strong>' in script
+    assert 'class="mode-check" aria-hidden="true">✓' in script
+    assert ".mode-option[aria-selected=\"true\"] .mode-check{visibility:visible}" in stylesheet
+    assert ".mode-option-text small{" in stylesheet and "display:block" in stylesheet
+    assert ".mode-listbox{" in stylesheet
+
+    # 行为：选择写回 state.mode，发送时作为 interaction_mode；三个下拉互斥
+    assert "function selectMode(value)" in script
+    assert 'option.setAttribute("aria-selected", String(state.mode === item.value));' in script
+    assert "interaction_mode:state.mode" in script
+    assert "el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();" in script
+    assert "function openModeList() { closeModelList(); closeSlashMenu();" in script
+    assert 'if (state.modeListOpen && !inside(".mode-control")) closeModeList();' in script
+    assert "closeModelList(); closeSlashMenu(); closeModeList(); closeSessions();" in script
+
+
+def test_webui_composer_dropdowns_are_hover_driven():
+    """输入框的下拉统一为悬停展开、点击开合，且触发按钮不再带箭头。
+
+    技能已改为输入框里的 "/" 面板，不再有第三个下拉（见斜杠面板用例）。
+    """
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 触发按钮内不得再有箭头；其它下拉（主题、会话、用量）保持原样
+    for trigger in ('id="mode-trigger"', 'id="model-trigger"'):
+        start = index.index(trigger)
+        assert "chevron" not in index[start:index.index("</button>", start)]
+    assert 'id="theme-trigger"' in index
+    theme = index[index.index('id="theme-trigger"'):]
+    assert "chevron" in theme[:theme.index("</button>")]
+
+    # 悬停绑定：进入即展开、移开延迟收起
+    assert "function bindHoverDropdown(root, open, close)" in script
+    assert 'root.addEventListener("mouseenter", () => { cancel(); open(); });' in script
+    assert "}, HOVER_CLOSE_DELAY);" in script
+    assert 'bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);' in script
+    assert 'bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);' in script
+    assert "bindHoverDropdown(el.skillTrigger" not in script
+
+    # 点击仍是开合切换
+    assert ("el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList();"
+            in script)
+    assert "el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();" in script
+
+    # 互斥收在各自的 open 里：悬停扫过一排控件时不会同时开着两个面板
+    assert "function openModelList() { closeModeList(); closeSlashMenu();" in script
+    assert "function openModeList() { closeModelList(); closeSlashMenu();" in script
+
+
+def test_webui_dropdown_check_sits_at_right():
+    """下拉的选中勾排在文字右侧。
+
+    模型列表原先把勾放在最前，配 18px 定宽首列；改成尾部列后，
+    勾由 justify-self 贴右，行的左边距不再被占位列撑开。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 模型列表：文字在前，勾在后
+    assert ('<strong>${escapeHtml(modelName(item))}</strong>'
+            '<small>${escapeHtml(item.model_id || item.id || key)}</small>'
+            '<span class="model-check">') in script
+    assert 'option.innerHTML = `<span class="model-check">' not in script
+
+    # 模式下拉本来就是文字在前
+    assert '<span class="mode-option-text"><strong>' in script
+
+    # 输入框下拉的定宽首列已取消，勾挪到最后一列并等宽占位（避免选中/未选中行抖动）；
+    # 桌面端模型 id 是可见的第三列，网格必须保留三列，否则勾会换行
+    assert "grid-template-columns:18px minmax(0,1fr) auto;grid-gap:7px" not in stylesheet
+    assert "grid-template-columns:minmax(0,1fr) auto auto" in stylesheet
+    assert ".model-candidates button{width:100%;display:grid;grid-template-columns:18px" in stylesheet
+    assert ".model-check{min-width:12px;justify-self:end;color:var(--cyan)}" in stylesheet
+
+
+def test_webui_skill_slash_menu_contract():
+    """技能选择从下拉按钮改成输入框的 "/" 面板。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 旧的技能下拉已移除，保留隐藏输入作为取值容器，并新增面板与已选标签
+    assert "skill-trigger" not in index and "skill-listbox" not in index
+    assert 'id="skill-select" type="hidden"' in index
+    assert 'id="slash-menu"' in index and 'id="skill-chip"' in index
+    assert 'id="slash-menu" class="slash-menu hidden"' in index
+    assert "skill-control" not in stylesheet and "skill-control" not in script
+    # 输入框提示语提示可用 "/" 选技能
+    assert "输入 / 选择技能" in index
+
+    # 触发与过滤：只在输入以 "/" 开头时展开，输入内容作为过滤词
+    assert "function slashQuery()" in script and "if (!text.startsWith(\"/\")) return null;" in script
+    assert "function syncSlashMenu()" in script
+    assert "if (slashQuery() === null) { closeSlashMenu(); return; }" in script
+    assert "function slashMatch(text, query)" in script
+
+    # 指令分组：模型（切到可搜索的模型面板）与导出对话（直接调后端导出）；指令排在技能之前
+    assert '{id: "model", name: "模型", description: "选择本次会话使用的模型"}' in script
+    assert '{id: "export", name: "导出对话", description: "把当前会话导出为 Markdown 文件"}' in script
+    assert 'return [{label: "指令", items: commands}, {label: "技能", items: skills}];' in script
+    # 供应商发现来的模型不进选择范围：斜杠面板与模型下拉都只列配置里写过的，
+# 但"查名字"仍用全量目录，避免既有会话选中的发现模型显示成"未配置"
+    assert 'function configuredModels() { return visibleModels().filter(item => item.status !== "discovered"); }' in script
+    assert "const groups = new Map(); configuredModels().forEach(item =>" in script
+    assert "return [{label: \"模型\", items: configuredModels().map(item => ({" in script
+    assert '没有已配置的模型' in script
+    assert "state.models.filter(item => item.status === \"discovered\")" not in script
+    assert "function openSlashModelPicker()" in script
+    assert 'search.placeholder = "搜索模型...";' in script
+    # 行只在打开/切模式时建一次，按键只切可见性：避免打字过程中丢按键
+    assert "let slashRowCache = [];" in script
+    assert "function applySlashFilter()" in script
+    assert "if (state.slashOpen && slashRowCache.length) { applySlashFilter(); return; }" in script
+    assert "function visibleSlashRows()" in script
+    assert "function runSlashExport()" in script
+    assert "`/sessions/${encodeURIComponent(sessionId)}/export`" in script
+    assert 'state.slashMode = "model";' in script
+    assert 'state.slashMode = "root";' in script
+    # 模型面板选中后收起面板、清掉正文的 "/"，焦点回到输入框
+    assert "function finishSlashModelPick()" in script
+    assert 'if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }' in script
+
+    # 行为：键盘上下选择、Enter 确认、Escape 收起；选定后清掉 "/xx" 并写入隐藏输入
+    assert "function handleSlashKeys(event)" in script
+    assert 'if (event.key === "Escape") { event.preventDefault(); closeSlashMenu(); return true; }' in script
+    assert 'if (event.key === "Enter") {' in script
+    assert "function selectSkill(id)" in script
+    assert 'if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }' in script
+    assert "function renderSkillChip()" in script
+    assert 'el.skillChip.onclick = () => { selectSkill(""); el.input.focus(); };' in script
+
+    # 接线：输入事件同步面板、回车先给面板处理；点击外部与 Esc 都能收起
+    assert "el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };" in script
+    assert "el.input.onkeydown = event => { if (handleSlashKeys(event)) return;" in script
+    assert 'if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();' in script
+    # 点面板内的选项可能重建面板内容（如「模型」指令），被点的行已脱离 DOM，
+    # 因此"点在面板外"必须按事件派发时固定的 composedPath 判断
+    assert 'const path = typeof event.composedPath === "function" ? event.composedPath() : [];' in script
+    assert "const inside = selector => path.some(node => node.nodeType === 1 && node.matches && node.matches(selector));" in script
+    assert "closeModelList(); closeSlashMenu(); closeModeList(); closeSessions();" in script
+
+    # 取值链路不变：仍以 selected_skills 发给后端
+    assert "const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];" in script
 

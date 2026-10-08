@@ -18,12 +18,15 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_PATH = Path(__file__).with_name("model_metadata.json")
 SOURCE_URL = "https://models.dev/api.json"
+
+# models.dev 会拒绝默认的 urllib User-Agent（403），必须带上一个常规值。
+USER_AGENT = "GridStarAgent/1.0 (+https://models.dev)"
 
 # base_url 主机 → models.dev 的 provider key。
 # 供应商 ID 是用户自己起的，只有 API 地址能可靠地指出数据该从哪一家查。
@@ -197,7 +200,11 @@ def resolve(model_id: str, base_url: str = "") -> Optional[ModelLimits]:
 
 def build_snapshot(source: str = SOURCE_URL, out_path: Path = SNAPSHOT_PATH) -> int:
     """从 models.dev 拉取数据并写出压缩快照，返回收录的模型数量。"""
-    raw = Path(source).read_bytes() if not source.startswith(("http://", "https://")) else urlopen(source, timeout=120).read()  # noqa: S310
+    if source.startswith(("http://", "https://")):
+        request = Request(source, headers={"User-Agent": USER_AGENT})
+        raw = urlopen(request, timeout=120).read()  # noqa: S310
+    else:
+        raw = Path(source).read_bytes()
     payload = json.loads(raw.decode("utf-8"))
     providers: dict[str, dict[str, list]] = {}
     for provider_key, provider in payload.items():

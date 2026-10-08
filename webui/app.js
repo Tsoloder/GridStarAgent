@@ -18,11 +18,18 @@ const state = {
   // status: id → 徽标状态 running|done|stopped|error（done 常驻，该会话下次发消息时刷新）；
   // stashed: 切走会话时摘下暂存的消息 DOM，切回后原样挂回继续实时更新
   controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
-  modelListOpen: false, modelOptionIndex: -1, modelSearch: "",
+  modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
   attachments: [], uploading: 0,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
+  // 用量面板：视图状态自持，图表只负责渲染并回传新的时间视窗
+  // provider/model 筛选项取自「配置好的」模型目录，而不是历史用量，否则筛选器与设置页对不上
+  usage: {loaded:false,loading:false,error:"",open:null,data:null,view:null,cache:{},token:0,
+    range:{preset:"7d",start:null,end:null},granularity:"day",groupBy:"model",
+    provider:"",model:"",
+    catalog:{},configuredProviders:{},providerOptions:[],modelOptions:[],
+    calendar:null,pendingStart:null,pendingEnd:null,sort:{key:"total",desc:true}},
   viewTab: "chat",
   traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
@@ -30,16 +37,25 @@ const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
-  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillTrigger: $("#skill-trigger"), skillLabel: $("#skill-label"), skillListbox: $("#skill-listbox"),
+  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"),
   input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"), composer: $(".composer"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
   skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
+  usageGroup: $("#usage-group"), usageGroupLabel: $("#usage-group-label"), usageGroupList: $("#usage-group-list"),
+  usageProvider: $("#usage-provider"), usageProviderLabel: $("#usage-provider-label"), usageProviderList: $("#usage-provider-list"),
+  usageModel: $("#usage-model"), usageModelLabel: $("#usage-model-label"), usageModelList: $("#usage-model-list"),
+  usageGranularity: $("#usage-granularity"), usageGranularityLabel: $("#usage-granularity-label"), usageGranularityList: $("#usage-granularity-list"),
+  usageRange: $("#usage-range"), usageRangeLabel: $("#usage-range-label"), usageRangePanel: $("#usage-range-panel"),
+  usageCalendar: $("#usage-calendar"), usageRangePresets: $("#usage-range-presets"), usageRefresh: $("#usage-refresh"),
+  usageStatus: $("#usage-status"), usageOverview: $("#usage-overview"), usageLine: $("#usage-line"),
+  usagePie: $("#usage-pie"), usagePieTitle: $("#usage-pie-title"), usageBar: $("#usage-bar"),
+  usageTable: $("#usage-table"), usageTableTitle: $("#usage-table-title"), usageLive: $("#usage-live"),
   tabChat: $("#tab-chat"), tabTraj: $("#tab-trajectory"), trajView: $("#trajectory-view"),
   trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
   trajTimeline: $("#traj-timeline"), composer: $(".composer"),
-  turnRail: $("#turn-rail"), turnRailTip: $("#turn-rail-tip"),
+  turnRail: $("#turn-rail"), turnRailPanel: $("#turn-rail-panel"), turnRailList: $("#turn-rail-list"), turnRailCount: $("#turn-rail-count"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -57,6 +73,15 @@ function showToast(message) {
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.toast.classList.add("hidden"), 5000);
 }
+// 会话存储异常只提示一次：每次刷新都弹同一句话会盖住别的重要提示
+const warnedStorageIssues = new Set();
+function warnStorageIssues(issues) {
+  (issues || []).forEach(issue => {
+    if (!issue || warnedStorageIssues.has(issue)) return;
+    warnedStorageIssues.add(issue);
+    showToast("会话存储异常：" + issue);
+  });
+}
 // 气泡时间：HH:MM:SS；无效/空值返回空串（老会话没有 ts 时不显示）
 function formatClock(value) {
   if (!value) return "";
@@ -73,19 +98,24 @@ function formatDuration(ms) {
   const m = Math.floor(ms / 60000), s = Math.round((ms % 60000) / 1000);
   return m + "m" + (s < 10 ? "0" : "") + s + "s";
 }
-// 剪贴板：优先 async API，失败回退 execCommand（兼容旧内核/非安全上下文）
-function copyText(text) {
+// 剪贴板：优先 async API；被拒绝（失焦/iframe 权限限制/权限拒绝）时回退 execCommand，
+// 两条路都失败才报错，避免新 API 存在但不可用时直接提示失败
+async function copyText(text) {
   if (navigator.clipboard && navigator.clipboard.writeText) {
-    return navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (_) { /* 落入 execCommand 回退 */ }
   }
   const area = document.createElement("textarea");
   area.value = text;
   area.style.cssText = "position:fixed;top:0;left:0;opacity:0";
   document.body.append(area);
   area.select();
-  try { document.execCommand("copy"); } catch (_) {}
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
   area.remove();
-  return Promise.resolve();
+  if (!ok) throw new Error("clipboard unavailable");
 }
 function showDialog({title, message = "", input, confirmText = "确定", cancelText = "取消", danger = false}) {
   return new Promise(resolve => {
@@ -129,21 +159,24 @@ function usageModelLabel(key) {
   return `${providerName} / ${modelId}`;
 }
 function visibleModels() { return state.models.filter(item => item.enabled !== false && item.provider_enabled !== false); }
+// 只列配置里写过的模型：供应商发现来的整份目录不进选择范围。
+// 查名字仍走 visibleModels()，否则既有会话选中的发现模型会显示成"未配置"。
+function configuredModels() { return visibleModels().filter(item => item.status !== "discovered"); }
 function renderModelList() {
   const selected = el.model.value; el.modelListbox.innerHTML = "";
-  const groups = new Map(); visibleModels().forEach(item => { if (!groups.has(item.provider)) groups.set(item.provider, []); groups.get(item.provider).push(item); });
+  const groups = new Map(); configuredModels().forEach(item => { if (!groups.has(item.provider)) groups.set(item.provider, []); groups.get(item.provider).push(item); });
   groups.forEach((items, provider) => {
     // 分组标题显示供应商名称，没有配置名称时回退到供应商 ID
     const label = items[0].provider_name || provider;
     const group = document.createElement("div"); group.className = "model-group"; group.setAttribute("role","group"); group.setAttribute("aria-label",label);
     group.innerHTML = `<div class="model-group-label">${escapeHtml(label)}</div>`;
-    items.forEach(item => { const key = modelKey(item), option = document.createElement("button"); option.type = "button"; option.className = `model-option${key === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(key === selected)); option.dataset.value = key; option.innerHTML = `<span class="model-check">${key === selected ? "✓" : ""}</span><strong>${escapeHtml(modelName(item))}</strong><small>${escapeHtml(item.model_id || item.id || key)}</small>`; option.onclick = () => selectModel(key); group.append(option); });
+    items.forEach(item => { const key = modelKey(item), option = document.createElement("button"); option.type = "button"; option.className = `model-option${key === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(key === selected)); option.dataset.value = key; option.innerHTML = `<strong>${escapeHtml(modelName(item))}</strong><small>${escapeHtml(item.model_id || item.id || key)}</small><span class="model-check">${key === selected ? "✓" : ""}</span>`; option.onclick = () => selectModel(key); group.append(option); });
     el.modelListbox.append(group);
   });
-  if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">未配置可用模型</div>';
+  if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">没有已配置的模型</div>';
 }
 function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); }
-function openModelList() { renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
+function openModelList() { closeModeList(); closeSlashMenu(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
 function closeModelList() { state.modelListOpen = false; state.modelSearch = ""; el.modelListbox.classList.add("hidden"); el.modelTrigger.setAttribute("aria-expanded","false"); }
 function focusModelOption() { const options = [...el.modelListbox.querySelectorAll(".model-option")]; options.forEach((item,index) => item.classList.toggle("focused",index === state.modelOptionIndex)); const active = options[state.modelOptionIndex]; if (active) active.scrollIntoView({block:"nearest"}); }
 function handleModelKeys(event) {
@@ -156,18 +189,265 @@ function handleModelKeys(event) {
   state.modelSearch = (state.modelSearch + event.key).toLowerCase(); clearTimeout(handleModelKeys.timer); handleModelKeys.timer = setTimeout(() => state.modelSearch = "",700); const index = options.findIndex(item => item.textContent.toLowerCase().includes(state.modelSearch)); if (index >= 0) { state.modelOptionIndex = index; focusModelOption(); }
 }
 function selectedSkill() { return state.skills.find(item => item.id === el.skill.value) || null; }
-function renderSkillList() {
-  const selected = el.skill.value; el.skillListbox.innerHTML = "";
-  [{ id: "", name: "无 Skill", description: "" }].concat(state.skills).forEach(item => {
-    const option = document.createElement("button"); option.type = "button"; option.className = `model-option${item.id === selected ? " selected" : ""}`; option.setAttribute("role","option"); option.setAttribute("aria-selected",String(item.id === selected)); option.dataset.value = item.id;
-    if (item.description) option.title = item.description;
-    option.innerHTML = `<span class="model-check">${item.id === selected ? "✓" : ""}</span><strong>${escapeHtml(item.name || item.id)}</strong><small></small>`;
-    option.onclick = () => selectSkill(item.id); el.skillListbox.append(option);
+// 技能与指令由输入框的 "/" 唤起：敲 "/" 展开候选，输入内容作为过滤词，
+// 选中技能写回隐藏输入并清掉 "/xx"，当前技能以输入框左侧的小标签显示；
+// 指令类选项（模型、导出对话）选中后直接执行动作。
+const SLASH_COMMANDS = [
+  {id: "model", name: "模型", description: "选择本次会话使用的模型"},
+  {id: "export", name: "导出对话", description: "把当前会话导出为 Markdown 文件"},
+];
+// 面板里的行与它们的候选项一一对应，过滤时只切可见性
+let slashRowCache = [];
+function slashQuery() {
+  const text = el.input ? el.input.value : "";
+  if (!text.startsWith("/")) return null;
+  return text.slice(1).trim().toLowerCase();
+}
+function slashMatch(text, query) {
+  return !query || String(text || "").toLowerCase().includes(query);
+}
+// 模型选择模式的过滤词来自面板里的搜索框，与正文输入无关
+function modelPickQuery() {
+  return String(state.slashModelQuery || "").trim().toLowerCase();
+}
+function slashGroups() {
+  if (state.slashMode === "model") {
+    return [{label: "模型", items: configuredModels().map(item => ({
+      id: modelKey(item), name: modelName(item), code: item.model_id || item.id || modelKey(item),
+      description: item.provider_name || item.provider || "",
+      kind: "model",
+    }))}];
+  }
+  // 全部候选都建出来，过滤只靠 applySlashFilter 切可见性：
+  // 这样删字变宽时能重新出现，也不会每敲一个字重建 DOM。
+  const skills = [{id: "", name: "不启用技能", description: "默认：按消息内容自动匹配技能"}]
+    .concat(state.skills || [])
+    .map(item => ({id: item.id || "", name: item.name || item.id, code: item.id || "—",
+                   description: item.description || "", kind: "skill"}));
+  const commands = SLASH_COMMANDS.map(item => ({
+    id: item.id, name: item.name, code: item.id, description: item.description, kind: "command",
+  }));
+  // 指令在前：模型、导出这类动作比技能更常用
+  return [{label: "指令", items: commands}, {label: "技能", items: skills}];
+}
+function renderSlashMenu() {
+  // 行只在打开面板或切换模式时建一次，之后按键只切换可见性：
+  // 每敲一个字都重建 DOM（含 scrollIntoView）会让浏览器丢掉这次按键的插入动作。
+  let search = $("#slash-search", el.slashMenu);
+  if (state.slashMode === "model") {
+    if (!search) {
+      search = document.createElement("input");
+      search.id = "slash-search"; search.className = "slash-search"; search.type = "text";
+      search.placeholder = "搜索模型..."; search.autocomplete = "off";
+      search.oninput = () => { state.slashModelQuery = search.value; applySlashFilter(); };
+      search.onkeydown = handleSlashKeys;
+    }
+  } else if (search) {
+    search = null;
+  }
+  el.slashMenu.innerHTML = "";
+  if (search) el.slashMenu.append(search);
+  const list = document.createElement("div"); list.id = "slash-list";
+  el.slashMenu.append(list);
+  slashRowCache = [];
+  slashGroups().forEach(group => {
+    const box = document.createElement("div"); box.className = "slash-group";
+    const label = document.createElement("div"); label.className = "slash-group-label"; label.textContent = group.label;
+    box.append(label);
+    group.items.forEach(item => {
+      const row = document.createElement("button"); row.type = "button"; row.className = "slash-item"; row.setAttribute("role","option");
+      row.dataset.slashId = item.id; row.dataset.slashKind = item.kind;
+      const selected = item.kind === "skill" ? el.skill.value === item.id
+        : item.kind === "model" ? el.model.value === item.id : false;
+      row.setAttribute("aria-selected", String(selected));
+      if (item.description) row.title = item.description;
+      row.innerHTML = `<strong>${escapeHtml(item.name)}</strong><code>${escapeHtml(item.code)}</code><span class="slash-desc">${escapeHtml(item.description)}</span>`
+        + (item.kind === "model" ? `<span class="model-check">${selected ? "✓" : ""}</span>` : "");
+      row.onmouseenter = () => focusSlashItem(visibleSlashRows().indexOf(row));
+      row.onclick = () => runSlashItem(item);
+      box.append(row);
+      slashRowCache.push({row, item, label, box});
+    });
+    list.append(box);
+  });
+  applySlashFilter();
+}
+function visibleSlashRows() {
+  return [...el.slashMenu.querySelectorAll(".slash-item")].filter(row => !row.hidden);
+}
+function applySlashFilter() {
+  const query = state.slashMode === "model"
+    ? (modelPickQuery() || slashQuery() || "")
+    : (slashQuery() || "");
+  let shown = 0;
+  slashRowCache.forEach(entry => {
+    const hit = slashMatch(entry.item.name, query) || slashMatch(entry.item.code, query) || slashMatch(entry.item.id, query);
+    entry.row.hidden = !hit;
+    if (hit) shown += 1;
+  });
+  // 整组没命中就连标题一起藏；全空时给一句提示
+  const groups = new Map();
+  slashRowCache.forEach(entry => {
+    const state0 = groups.get(entry.box) || {hits: 0};
+    if (!entry.row.hidden) state0.hits += 1;
+    groups.set(entry.box, state0);
+  });
+  groups.forEach((state0, box) => { box.hidden = state0.hits === 0; });
+  let empty = $("#slash-empty", el.slashMenu);
+  if (!shown) {
+    if (!empty) {
+      empty = document.createElement("div"); empty.id = "slash-empty"; empty.className = "listbox-empty";
+      el.slashMenu.append(empty);
+    }
+    empty.textContent = state.slashMode === "model" ? "没有匹配的已配置模型" : "没有匹配的技能或指令";
+  } else if (empty) {
+    empty.remove();
+  }
+  const rows = visibleSlashRows();
+  const current = rows.findIndex(row => row.getAttribute("aria-selected") === "true");
+  focusSlashItem(current >= 0 ? current : 0);
+}
+function runSlashItem(item) {
+  if (item.kind === "skill") { selectSkill(item.id || ""); return; }
+  if (item.kind === "model") { selectModel(item.id); finishSlashModelPick(); return; }
+  if (item.id === "model") { openSlashModelPicker(); return; }
+  if (item.id === "export") { runSlashExport(); return; }
+}
+// 「模型」指令：面板切换成可搜索的模型列表，选中后回落为常规状态
+function openSlashModelPicker() {
+  state.slashMode = "model";
+  state.slashModelQuery = "";
+  renderSlashMenu();
+  const search = $("#slash-search", el.slashMenu);
+  if (search) search.focus();
+}
+function finishSlashModelPick() {
+  // 面板收起后正文里的 "/" 已经没有意义，一并清掉并还回焦点
+  if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }
+  closeSlashMenu();
+  updateSendState();
+  el.input.focus();
+}
+// 「导出对话」指令：直接调后端导出接口（与模型侧的导出工具同一实现）
+async function runSlashExport() {
+  const sessionId = currentId();
+  closeSlashMenu();
+  if (!sessionId) { showToast("当前没有可导出的会话"); return; }
+  try {
+    const data = await request(`/sessions/${encodeURIComponent(sessionId)}/export`, {method:"POST", body:"{}"});
+    showToast(`已导出：${data.path || "exports/"}`);
+  } catch (error) { showToast(`导出失败：${error.message}`); }
+}
+function focusSlashItem(index) {
+  const rows = [...el.slashMenu.querySelectorAll(".slash-item")];
+  state.slashIndex = index;
+  rows.forEach((row, position) => row.classList.toggle("focused", position === index));
+  if (rows[index]) rows[index].scrollIntoView({block:"nearest"});
+}
+function openSlashMenu() {
+  closeModeList(); closeModelList();
+  state.slashOpen = true;
+  el.slashMenu.classList.remove("hidden");
+}
+function closeSlashMenu() {
+  state.slashOpen = false;
+  // 收起时回到根面板：下次敲 "/" 应该看到技能与指令，而不是上次的模型列表
+  state.slashMode = "root";
+  state.slashModelQuery = "";
+  el.slashMenu.classList.add("hidden");
+  el.slashMenu.innerHTML = "";
+}
+// 输入框内容变化时同步面板：不以 "/" 开头就收起，否则刷新候选并保持展开
+function syncSlashMenu() {
+  if (slashQuery() === null) { closeSlashMenu(); return; }
+  // 面板已开着就只更新过滤结果，避免正文每敲一个字都重建面板 DOM
+  if (state.slashOpen && slashRowCache.length) { applySlashFilter(); return; }
+  renderSlashMenu();
+  openSlashMenu();
+}
+function handleSlashKeys(event) {
+  if (!state.slashOpen) return false;
+  // 过滤后行只是被隐藏，键盘必须在"可见行"里走动，否则回车会点到被筛掉的项
+  const rows = visibleSlashRows();
+  if (event.key === "Escape") { event.preventDefault(); closeSlashMenu(); return true; }
+  if (!rows.length) return false;
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    focusSlashItem((state.slashIndex + (event.key === "ArrowDown" ? 1 : -1) + rows.length) % rows.length);
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    rows[Math.max(0, Math.min(state.slashIndex, rows.length - 1))].click();
+    return true;
+  }
+  return false;
+}
+function selectSkill(id) {
+  const fromMenu = state.slashOpen;
+  el.skill.value = id || "";
+  // "/xx" 只是唤起面板的输入，选定后清掉，避免混进消息正文
+  if (el.input.value.startsWith("/")) { el.input.value = ""; autoGrowInput(); }
+  closeSlashMenu();
+  renderSkillChip();
+  updateSendState();
+  if (fromMenu) el.input.focus();
+}
+function renderSkillChip() {
+  const item = selectedSkill();
+  el.skillChip.classList.toggle("hidden", !item);
+  if (item) $("b", el.skillChip).textContent = item.name || item.id;
+}
+// 交互模式下拉：每项一行标题加一行说明（手动逐步确认 / 自动连续执行），选中项右侧打勾
+const MODE_OPTIONS = [
+  {value:"manual", title:"手动", hint:"每步操作先确认参数，由审批面板把关"},
+  {value:"auto", title:"自动", hint:"按默认参数连续执行，不逐步确认"},
+];
+function modeTitle(value) { const item = MODE_OPTIONS.find(entry => entry.value === value); return item ? item.title : "手动"; }
+function renderModeList() {
+  el.modeListbox.innerHTML = "";
+  MODE_OPTIONS.forEach(item => {
+    const option = document.createElement("button"); option.type = "button"; option.className = "model-option mode-option"; option.setAttribute("role","option");
+    option.dataset.mode = item.value; option.setAttribute("aria-selected", String(state.mode === item.value));
+    option.innerHTML = `<span class="mode-option-text"><strong>${item.title}</strong><small>${item.hint}</small></span><span class="mode-check" aria-hidden="true">✓</span>`;
+    option.onclick = () => selectMode(item.value);
+    el.modeListbox.append(option);
   });
 }
-function selectSkill(id) { el.skill.value = id || ""; const item = selectedSkill(); el.skillLabel.textContent = item ? (item.name || item.id) : "无 Skill"; closeSkillList(); }
-function openSkillList() { renderSkillList(); state.skillListOpen = true; el.skillListbox.classList.remove("hidden"); el.skillTrigger.setAttribute("aria-expanded","true"); }
-function closeSkillList() { state.skillListOpen = false; el.skillListbox.classList.add("hidden"); el.skillTrigger.setAttribute("aria-expanded","false"); }
+function selectMode(value) {
+  state.mode = MODE_OPTIONS.some(item => item.value === value) ? value : "manual";
+  el.modeLabel.textContent = modeTitle(state.mode);
+  closeModeList();
+  renderModeList();
+}
+function openModeList() { closeModelList(); closeSlashMenu(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
+function closeModeList() { state.modeListOpen = false; el.modeListbox.classList.add("hidden"); el.modeTrigger.setAttribute("aria-expanded","false"); }
+function handleModeKeys(event) {
+  if (!["ArrowDown","ArrowUp","Enter","Escape"].includes(event.key)) return;
+  event.preventDefault();
+  if (!state.modeListOpen) { if (event.key !== "Escape") openModeList(); return; }
+  if (event.key === "Escape") { closeModeList(); return; }
+  const options = [...el.modeListbox.querySelectorAll(".mode-option")];
+  if (event.key === "Enter") { const target = el.modeListbox.querySelector(".mode-option.focused") || el.modeListbox.querySelector('[aria-selected="true"]'); if (target) target.click(); return; }
+  const current = options.findIndex(item => item.classList.contains("focused"));
+  const next = options[(current + (event.key === "ArrowDown" ? 1 : -1) + options.length) % options.length];
+  options.forEach(item => item.classList.toggle("focused", item === next));
+  if (next) next.focus();
+}
+// 输入框三个下拉共用的悬停逻辑：指针进入即展开，移开延迟收起。
+// 列表是控件的子节点，指针移到面板上不算离开，这点延迟只用来跨过触发按钮与
+// 面板之间的空隙；点击仍是开合切换，悬停已展开时点击即收起。
+const HOVER_CLOSE_DELAY = 150;
+function bindHoverDropdown(root, open, close) {
+  if (!root) return;
+  let timer = null;
+  const cancel = () => { if (timer) { clearTimeout(timer); timer = null; } };
+  root.addEventListener("mouseenter", () => { cancel(); open(); });
+  root.addEventListener("mouseleave", () => {
+    cancel();
+    timer = setTimeout(() => { timer = null; close(); }, HOVER_CLOSE_DELAY);
+  });
+}
 function setConnection(status, label) {
   el.connection.className = `connection ${status}`;
   $("b", el.connection).textContent = label;
@@ -193,6 +473,15 @@ function stopSession(id) {
   const controller = state.controllers.get(id);
   if (controller) controller.abort();
   request(`/sessions/${encodeURIComponent(id)}/cancel`, {method:"POST",body:"{}"}).catch(() => {});
+}
+// 丢弃某会话的前端流状态：中断在跑的流并清掉 controller/stream/stash 三张表。
+// 删除与清空会话都要走这里，否则被切走会话的暂存 DOM 会在清空后又被挂回，看起来像没清。
+function dropStreamState(id) {
+  const controller = state.controllers.get(id);
+  if (controller) controller.abort();
+  state.controllers.delete(id);
+  state.streams.delete(id);
+  state.stashed.delete(id);
 }
 // 会话列表徽标：前端实时状态优先；刷新页面后靠服务端 active 字段兜底
 const STATUS_TEXT = {running:"进行中", done:"已完成", stopped:"已停止", error:"异常", waiting:"待确认"};
@@ -676,24 +965,35 @@ el.messages.addEventListener("click", event => {
 
 /* --- 对话轮次导航轨：页面最左边缘竖排白点，一轮一个点 ---
    轮次以用户消息为界：一条 user 消息与其后的 assistant/tool 消息同属一轮。
-   悬浮显示该轮提问，点击定位到该轮；当前所处的轮次（滚动位置落在中间线及以前的最末一轮）高亮。 */
-let railNodes = [], railDots = [], railPending = false;
+   鼠标移入轨道区域即向右展开完整轮次列表（序号 + 该轮提问摘要），点击列表行或白点定位到该轮；
+   当前所处的轮次（滚动位置落在中间线及以前的最末一轮）在轨道白点与列表行上同步高亮。 */
+let railNodes = [], railDots = [], railRows = [], railPending = false, railPanelTimer = 0;
 function railTurnText(node) {
   const body = node.querySelector(".markdown");
   const text = (body ? body.textContent : "").replace(/\s+/g, " ").trim();
   return text || "（本轮无文本内容）";
 }
-function hideTurnRailTip() { if (el.turnRailTip) el.turnRailTip.classList.remove("show"); }
-// 悬浮窗贴点右侧显示；节点靠近视口上下边时整体回推，避免被裁掉
-function showTurnRailTip(dot, node) {
-  const tip = el.turnRailTip;
-  if (!tip) return;
-  tip.textContent = railTurnText(node);
-  tip.classList.add("show");
-  const rect = dot.getBoundingClientRect();
-  tip.style.left = Math.round(rect.right + 10) + "px";
-  const top = rect.top + rect.height / 2 - tip.offsetHeight / 2;
-  tip.style.top = Math.round(Math.min(Math.max(8, top), Math.max(8, window.innerHeight - tip.offsetHeight - 8))) + "px";
+function hideTurnRailPanel() {
+  clearTimeout(railPanelTimer);
+  if (el.turnRailPanel) el.turnRailPanel.classList.remove("show");
+}
+// 离开轨道/列表留一点延迟再收起：鼠标从白点移到右侧列表要跨过间隙，不能让面板闪退
+function scheduleHideTurnRailPanel() {
+  clearTimeout(railPanelTimer);
+  railPanelTimer = setTimeout(hideTurnRailPanel, 180);
+}
+function jumpToTurn(index) { const node = railNodes[index]; if (node) node.scrollIntoView({block: "start", behavior: "smooth"}); }
+// 面板贴在轨道右侧展开，纵向与轨道居中；视口上下越界时整体回推，避免被裁掉
+function showTurnRailPanel() {
+  const panel = el.turnRailPanel;
+  if (!panel || !railNodes.length) return;
+  clearTimeout(railPanelTimer);
+  panel.classList.add("show");
+  const railRect = el.turnRail.getBoundingClientRect();
+  panel.style.left = Math.round(railRect.right + 10) + "px";
+  const top = railRect.top + railRect.height / 2 - panel.offsetHeight / 2;
+  panel.style.top = Math.round(Math.min(Math.max(8, top), Math.max(8, window.innerHeight - panel.offsetHeight - 8))) + "px";
+  updateTurnRailActive();
 }
 function updateTurnRailActive() {
   if (!railDots.length) return;
@@ -703,6 +1003,11 @@ function updateTurnRailActive() {
   // 依次找「顶边还在中间线及以上」的最后一轮；一轮都够不着时停在第一轮
   railNodes.forEach((node, index) => { if (index < railDots.length && node.getBoundingClientRect().top <= mid) active = index; });
   railDots.forEach((dot, index) => dot.classList.toggle("active", index === active));
+  railRows.forEach((row, index) => {
+    const on = index === active;
+    row.classList.toggle("active", on);
+    if (on) row.setAttribute("aria-current", "true"); else row.removeAttribute("aria-current");
+  });
 }
 // 轮次节点集合未变就不重建，避免流式输出时反复刷 DOM 打断悬浮
 function renderTurnRail() {
@@ -711,24 +1016,45 @@ function renderTurnRail() {
     ? Array.prototype.slice.call(el.messages.querySelectorAll(".message.user")) : [];
   const same = turns.length === railNodes.length && turns.every((node, index) => node === railNodes[index]);
   if (!same) {
-    hideTurnRailTip();
+    hideTurnRailPanel();
     railNodes = turns;
+    railDots = [];
+    railRows = [];
     el.turnRail.innerHTML = "";
-    railDots = turns.map((node, index) => {
+    el.turnRailList.innerHTML = "";
+    el.turnRailCount.textContent = turns.length ? turns.length + " 轮" : "";
+    turns.forEach((node, index) => {
       const dot = document.createElement("button");
       dot.type = "button";
       dot.className = "turn-rail-dot";
       dot.setAttribute("aria-label", "第 " + (index + 1) + " 轮");
-      dot.onclick = () => node.scrollIntoView({block: "start", behavior: "smooth"});
-      dot.onmouseenter = () => showTurnRailTip(dot, node);
-      dot.onmouseleave = hideTurnRailTip;
+      dot.onclick = () => jumpToTurn(index);
       el.turnRail.append(dot);
-      return dot;
+      railDots.push(dot);
+
+      const text = railTurnText(node);
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "turn-rail-row";
+      row.title = text;
+      row.setAttribute("aria-label", "第 " + (index + 1) + " 轮：" + text);
+      row.innerHTML = '<i class="turn-rail-index">' + (index + 1) + '</i><span class="turn-rail-text"></span>';
+      row.querySelector(".turn-rail-text").textContent = text;
+      row.onclick = () => { jumpToTurn(index); hideTurnRailPanel(); };
+      el.turnRailList.append(row);
+      railRows.push(row);
     });
   }
-  el.turnRail.classList.toggle("hidden", !turns.length);
+  const empty = !turns.length;
+  el.turnRail.classList.toggle("hidden", empty);
+  if (empty) hideTurnRailPanel();
   updateTurnRailActive();
 }
+// 鼠标进入轨道区域展开列表；面板自身也算悬停区，移到列表上继续保留
+el.turnRail.addEventListener("mouseenter", showTurnRailPanel);
+el.turnRail.addEventListener("mouseleave", scheduleHideTurnRailPanel);
+el.turnRailPanel.addEventListener("mouseenter", () => clearTimeout(railPanelTimer));
+el.turnRailPanel.addEventListener("mouseleave", scheduleHideTurnRailPanel);
 // 消息区增删（发消息、切会话、历史重放、暂存/挂回）都走这里，统一按下一帧合并刷新
 function syncTurnRail() {
   if (railPending) return;
@@ -796,7 +1122,7 @@ function finishAssistant(message, deferred = false) {
   // 后台会话结束时它的 DOM 已摘进暂存片段，isConnected 为假，不能弹到当前会话头上
   if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);
   // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起，下一条 plan_updated 会自动再出现
-  if (visible && planComplete(state.phasePlan)) el.phasePanel.classList.add("hidden");
+  if (visible && planComplete(state.phasePlan)) hidePhasePanel();
   scrollMessages();
 }
 function appendReasoning(message, delta) {
@@ -1051,19 +1377,51 @@ function extractPhase(value) {
 }
 // 计划是否已跑完：所有阶段都进入终态。计划窗口只服务执行过程，跑完即收起
 const PHASE_DONE_STATUS = ["done", "succeeded", "completed", "skipped"];
+const PHASE_RUN_STATUS = ["active", "running", "in_progress"];
+const PHASE_FAIL_STATUS = ["failed", "error", "cancelled"];
 function planComplete(plan) {
   const phases = plan && plan.phases;
   return Boolean(phases && phases.length) && phases.every(item => PHASE_DONE_STATUS.includes(item && item.status));
 }
+// 标题后的统计串：已完成 / 进行中 / 待处理 / 失败 / 跳过，只列非零项
+function phaseStats(phases) {
+  const counts = {ok: 0, run: 0, wait: 0, fail: 0, skip: 0};
+  phases.forEach(item => {
+    const st = (item && item.status) || "pending";
+    if (st === "skipped") counts.skip++;
+    else if (PHASE_DONE_STATUS.includes(st)) counts.ok++;
+    else if (PHASE_RUN_STATUS.includes(st)) counts.run++;
+    else if (PHASE_FAIL_STATUS.includes(st)) counts.fail++;
+    else counts.wait++;
+  });
+  const segs = [];
+  if (counts.ok) segs.push(`<b class="st-ok">${counts.ok} 已完成</b>`);
+  if (counts.run) segs.push(`<b class="st-run">${counts.run} 进行中</b>`);
+  if (counts.wait) segs.push(`<b class="st-wait">${counts.wait} 待处理</b>`);
+  if (counts.fail) segs.push(`<b class="st-fail">${counts.fail} 失败</b>`);
+  if (counts.skip) segs.push(`<b class="st-skip">${counts.skip} 跳过</b>`);
+  return segs.join(" · ") || "0 已完成";
+}
+// 收起计划窗口：连 DOM 与 state 一起清掉。
+// 只加 hidden 会留下上一条会话的旧 DOM 与旧 state.phasePlan，切会话后再
+// 切回对话页签时会被"看起来还有计划"的判断重新亮出来。
+function hidePhasePanel() {
+  el.phasePanel.classList.add("hidden");
+  el.phasePanel.innerHTML = "";
+  state.phasePlan = null;
+}
 function renderPhase(value) {
   const phase = extractPhase(value) || value;
   if (!phase || !Array.isArray(phase.phases)) return;
+  // 计划窗口只服务执行过程：全部阶段进入终态就收起，下一条 plan_updated 会再次出现。
+  // 规则放在这里而不是各调用点，避免"实时渲染收起、切会话/回放历史又亮起"的不一致。
+  if (planComplete(phase)) { hidePhasePanel(); return; }
   state.phasePlan = phase;
   el.phasePanel.classList.remove("hidden");
   const completed = phase.phases.filter(item => PHASE_DONE_STATUS.includes(item.status)).length;
   const expanded = el.phasePanel.classList.contains("expanded");
   const pct = phase.phases.length ? Math.round(completed / phase.phases.length * 100) : 0;
-  el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${completed}/${phase.phases.length}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
+  el.phasePanel.innerHTML = `<div class="phase-head" role="button" tabindex="0" aria-expanded="${expanded}" title="点击展开/收起进度"><strong>${escapeHtml(phase.title || "阶段计划")}</strong><small>${phaseStats(phase.phases)}</small><span class="phase-chevron" aria-hidden="true">⌃</span><i class="phase-progress" style="width:${pct}%"></i></div><div class="phase-steps"></div>`;
   const head = $(".phase-head", el.phasePanel);
   head.addEventListener("keydown", event => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -1393,7 +1751,7 @@ async function loadSession(id) {
     state.session = await request(`/sessions/${encodeURIComponent(id)}`);
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
-    el.messages.innerHTML = ""; el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay();
+    el.messages.innerHTML = ""; hidePhasePanel(); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
     if (!restoreView(id)) {
       if (!state.session.messages.length) showWelcome();
@@ -1428,6 +1786,7 @@ function renderSessions() {
 }
 async function refreshSessions(selectId = null) {
   const data = await request("/sessions"); state.sessions = data.sessions || []; renderSessions();
+  warnStorageIssues(data.storage_issues);
   if (selectId) await loadSession(selectId);
 }
 async function createSession() {
@@ -1439,10 +1798,19 @@ async function renameSession(session) {
 }
 async function clearSession(session) {
   if (!(await showDialog({title:"清空会话", message:`将清空“${session.title}”的全部消息，此操作不可撤销。`, confirmText:"清空", danger:true}))) return;
-  try { await request(`/sessions/${encodeURIComponent(session.id)}/clear`, {method:"POST",body:"{}"}); if (state.session && state.session.meta.id === session.id) await loadSession(session.id); await refreshSessions(); } catch (error) { showToast(error.message); }
+  try {
+    await request(`/sessions/${encodeURIComponent(session.id)}/clear`, {method:"POST",body:"{}"});
+    // 清空同样要丢弃前端流状态：否则被切走会话的暂存 DOM 会在切回时覆盖清空结果
+    dropStreamState(session.id);
+    if (state.session && state.session.meta.id === session.id) await loadSession(session.id);
+    await refreshSessions();
+    // 放在最后：中断流会异步走一遍 catch 并写 stopped 徽标，这里把它抹掉
+    state.status.delete(session.id);
+    syncComposer();
+  } catch (error) { showToast(error.message); }
 }
 async function deleteSession(session) {
-  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); const controller = state.controllers.get(session.id); if (controller) controller.abort(); state.controllers.delete(session.id); state.streams.delete(session.id); state.stashed.delete(session.id); state.status.delete(session.id); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay(); } await refreshSessions(); syncComposer(); } catch (error) { showToast(error.message); }
+  try { await request(`/sessions/${encodeURIComponent(session.id)}`, {method:"DELETE"}); dropStreamState(session.id); state.status.delete(session.id); if (state.session && state.session.meta.id === session.id) { state.session = null; el.currentTitle.textContent = "选择会话"; showWelcome(); el.phasePanel.classList.add("hidden"); state.workflow = null; closeChoiceOverlay(); } await refreshSessions(); syncComposer(); } catch (error) { showToast(error.message); }
 }
 function openSessions() { el.sessionPanel.classList.remove("hidden"); el.sessionTrigger.setAttribute("aria-expanded","true"); el.sessionSearch.focus(); }
 function closeSessions() { el.sessionPanel.classList.add("hidden"); el.sessionTrigger.setAttribute("aria-expanded","false"); }
@@ -1500,7 +1868,13 @@ async function consumeSse(response, onEvent, controller) {
     while ((boundary = buffer.indexOf("\n\n")) >= 0) {
       const frame = buffer.slice(0,boundary); buffer = buffer.slice(boundary+2); let type = "message"; const dataLines = [];
       frame.split("\n").forEach(line => { if (line.startsWith("event:")) type = line.slice(6).trim(); else if (line.startsWith("data:")) dataLines.push(line.slice(5).replace(/^\s+/, "")); });
-      if (dataLines.length) { try { await onEvent(type, JSON.parse(dataLines.join("\n"))); } catch (error) { if (error instanceof SyntaxError) showToast(`忽略无效 SSE 数据：${type}`); else throw error; } }
+      if (dataLines.length) { try { await onEvent(type, JSON.parse(dataLines.join("\n"))); } catch (error) {
+        // error 事件会让 handleStreamEvent 抛出：这里必须主动断开，否则响应体不会被读完，
+        // 连接会一直挂到 GC（旧内核尤其明显）。SyntaxError 只是坏数据，忽略即可。
+        if (error instanceof SyntaxError) { showToast(`忽略无效 SSE 数据：${type}`); continue; }
+        if (controller) { try { controller.abort(); } catch (_) {} } else { try { reader.cancel(); } catch (_) {} }
+        throw error;
+      } }
     }
     if (done) break;
   }
@@ -1534,6 +1908,9 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   if (!state.session) { await createSession(); if (!state.session) return; }
   // 会话 id 立即锁定：后续任何 await 期间用户切走会话，消息也必须发进原会话
   const sessionId = state.session.meta.id;
+  // 会话 id 锁定后再确认一次空闲：等待 createSession/切会话期间可能刚接回后台流，
+  // 此时再发会开出第二条 SSE，同一轮被渲染进两个气泡
+  if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;
   const shown = displayContent != null ? displayContent : message;
   if (retryAttachments == null) clearAttachments();
   // 新一轮提问必须落底并恢复自动跟随，即使用户上一轮上滚停留在历史里
@@ -1588,6 +1965,8 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
 // 重连后台仍在运行的回复流：后端会把断开前的全部事件回放一遍，
 // 前端恢复停止按钮状态并继续实时渲染，用户离开前的进度原样接回
 async function reconnectStream(sessionId, info, turnTs) {
+  // 已有流在跑就不再重连：maybeReconnect 曾出现与发送动作交错的可能，二次确认避免同会话双流
+  if (state.controllers.has(sessionId) || state.streams.has(sessionId)) return;
   const assistant = createMessage("assistant", "", "");
   // 重连气泡时间/计时起点用本轮原始发送时间（落盘 ts），不是刷新时刻
   if (turnTs) setBubbleTime(assistant, turnTs);
@@ -1691,15 +2070,19 @@ function renderProviderList() {
 function renderProviderEditor() {
   const provider = draftProvider(); if (!provider) { el.providerEditor.innerHTML = '<div class="placeholder-panel"><strong>添加供应商以开始配置</strong></div>'; return; }
   const models = providerModels(); const discovered = state.settings.discoveredModels[provider.id] || [];
-  el.providerEditor.innerHTML = `<section class="provider-section"><div class="editor-title"><div><span class="eyebrow">PROVIDER</span><h3>${escapeHtml(provider.name)}</h3></div><label class="toggle"><input type="checkbox" data-provider-field="enabled" ${provider.enabled !== false ? "checked" : ""}><span>启用</span></label></div><div class="form-grid">${field("供应商名称","name",provider.name)}${field("供应商 ID","id",provider.id,"text","disabled")}<label class="settings-field"><span>供应商类型</span><select data-provider-field="discovery_api" ${models.length ? "disabled" : ""}><option value="openai">OpenAI / Compatible / Ollama</option><option value="anthropic">Anthropic</option><option value="none">不支持模型发现</option></select></label>${field("API 地址","base_url",provider.base_url || "","url")}${field("API Key 环境变量","api_key_env",provider.api_key_env || "")}${field("API Key","api_key",provider.api_key === "********" ? "" : provider.api_key || "","password",`placeholder="${provider.api_key === "********" ? "已安全保存" : "输入 API Key"}" ${provider.api_key_env ? "disabled" : ""}`)}<label class="settings-field"><span>默认 API 协议</span><select data-provider-field="default_api"><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label></div><div class="provider-actions"><button type="button" class="secondary" data-action="clear-key">清除 Key</button><button type="button" class="secondary" data-action="test-provider">${state.settings.testingProviderId === provider.id ? "测试中…" : "测试连接"}</button><span class="inline-result" data-result="test"></span><button type="button" class="danger-button" data-action="delete-provider">删除供应商</button></div></section><section class="provider-section models-section"><div class="section-head"><div><span class="eyebrow">MODELS</span><h3>已添加模型 <small>${models.length}</small></h3></div><button type="button" class="secondary" data-action="read-models">${state.settings.readingProviderId === provider.id ? "读取中…" : "读取模型"}</button></div><div class="model-settings-list"></div><div class="add-model"><label><span>添加模型 · 搜索候选</span><input type="search" id="model-candidate-search" placeholder="搜索模型 ID"></label><div id="model-candidates" class="model-candidates"></div><div class="manual-model"><input id="manual-model-id" placeholder="手动输入模型 ID"><button type="button" class="primary" data-action="add-manual-model">添加</button></div></div></section>`;
+  el.providerEditor.innerHTML = `<section class="provider-section"><div class="editor-title"><div><span class="eyebrow">PROVIDER</span><h3>${escapeHtml(provider.name)}</h3></div><label class="toggle"><input type="checkbox" data-provider-field="enabled" ${provider.enabled !== false ? "checked" : ""}><span>启用</span></label></div><div class="form-grid">${field("供应商名称","name",provider.name)}${field("供应商 ID","id",provider.id,"text","disabled")}<label class="settings-field"><span>供应商类型</span><select data-provider-field="discovery_api" ${models.length ? "disabled" : ""}><option value="openai">OpenAI / Compatible / Ollama</option><option value="anthropic">Anthropic</option><option value="none">不支持模型发现</option></select></label>${field("API 地址","base_url",provider.base_url || "","url")}${field("API Key 环境变量","api_key_env",provider.api_key_env || "")}${field("API Key","api_key",provider.api_key === "********" ? "" : provider.api_key || "","password",`placeholder="${provider.api_key === "********" ? "已安全保存" : "输入 API Key"}" ${provider.api_key_env ? "disabled" : ""}`)}<label class="settings-field"><span>默认 API 协议</span><select data-provider-field="default_api"><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label><label class="settings-field"><span>SSL 证书验证</span><select data-provider-field="ssl_verify"><option value="true">默认（系统证书）</option><option value="false">跳过验证</option><option value="custom">自定义 CA 证书路径</option></select></label>${provider.ssl_verify && provider.ssl_verify !== true && provider.ssl_verify !== false && provider.ssl_verify !== "true" && provider.ssl_verify !== "false" ? field("CA 证书路径","ssl_verify_path",provider.ssl_verify,"text",`placeholder="/path/to/ca.pem"`) : ""}</div><div class="provider-actions"><button type="button" class="secondary" data-action="clear-key">清除 Key</button><button type="button" class="secondary" data-action="test-provider">${state.settings.testingProviderId === provider.id ? "测试中…" : "测试连接"}</button><span class="inline-result" data-result="test"></span><button type="button" class="danger-button" data-action="delete-provider">删除供应商</button></div></section><section class="provider-section models-section"><div class="section-head"><div><span class="eyebrow">MODELS</span><h3>已添加模型 <small>${models.length}</small></h3></div><button type="button" class="secondary" data-action="read-models">${state.settings.readingProviderId === provider.id ? "读取中…" : "读取模型"}</button></div><div class="model-settings-list"></div><div class="add-model"><label><span>添加模型 · 搜索候选</span><input type="search" id="model-candidate-search" placeholder="搜索模型 ID"></label><div id="model-candidates" class="model-candidates"></div><div class="manual-model"><input id="manual-model-id" placeholder="手动输入模型 ID"><button type="button" class="primary" data-action="add-manual-model">添加</button></div></div></section>`;
   el.providerEditor.querySelector('[data-provider-field="default_api"]').value = provider.default_api;
   el.providerEditor.querySelector('[data-provider-field="discovery_api"]').value = provider.discovery_api || "openai";
-  el.providerEditor.querySelectorAll("[data-provider-field]").forEach(input => input.onchange = () => { const name = input.dataset.providerField; if (name !== "api_key" || input.value || provider.api_key !== "********") provider[name] = input.type === "checkbox" ? input.checked : input.value; markSettingsDirty(); renderProviderList(); });
+  const sslSelect = el.providerEditor.querySelector('[data-provider-field="ssl_verify"]');
+  if (sslSelect) { const sv = provider.ssl_verify; sslSelect.value = sv === false || sv === "false" ? "false" : (sv && sv !== true && sv !== "true" ? "custom" : "true"); }
+  el.providerEditor.querySelectorAll("[data-provider-field]").forEach(input => input.onchange = () => { const name = input.dataset.providerField; if (name === "ssl_verify") { const v = input.value; if (v === "true") provider.ssl_verify = true; else if (v === "false") provider.ssl_verify = false; else { const pathInput = el.providerEditor.querySelector('[data-provider-field="ssl_verify_path"]'); provider.ssl_verify = pathInput ? pathInput.value : ""; } markSettingsDirty(); renderProviderEditor(); return; } if (name === "ssl_verify_path") { provider.ssl_verify = input.value; markSettingsDirty(); return; } if (name !== "api_key" || input.value || provider.api_key !== "********") provider[name] = input.type === "checkbox" ? input.checked : input.value; markSettingsDirty(); renderProviderList(); });
   const list = $(".model-settings-list",el.providerEditor); models.forEach(model => renderModelCard(model,list));
   renderCandidates(discovered); $("#model-candidate-search",el.providerEditor).oninput = event => renderCandidates(discovered,event.target.value);
   $("[data-action='clear-key']",el.providerEditor).onclick = () => { provider.api_key = ""; markSettingsDirty(); renderProviderEditor(); };
   $("[data-action='test-provider']",el.providerEditor).onclick = testProvider; $("[data-action='read-models']",el.providerEditor).onclick = readProviderModels; $("[data-action='delete-provider']",el.providerEditor).onclick = deleteProvider; $("[data-action='add-manual-model']",el.providerEditor).onclick = () => addModel($("#manual-model-id",el.providerEditor).value);
 }
+// 模型设置里的上下文窗口/最大输出用 K/M 自适应：128K 这类约定俗成的写法换成 M 反而难读。
+// 用量面板一律用 M（见 Charts.formatMillions），两者口径不同是刻意的。
 function formatTokens(value) { return value >= 1048576 ? `${Math.round(value / 104857.6) / 10}M` : value >= 1024 ? `${Math.round(value / 102.4) / 10}K` : String(value); }
 function candidateLimits(model) { return ((state.settings.discoveredModels || {})[model.provider] || []).find(item => (item.id || item.model_id) === model.id) || null; }
 function autoLimit(model, name) { const limits = candidateLimits(model), value = limits && limits[name]; return value ? `自动 · ${formatTokens(value)}` : "保存时自动识别"; }
@@ -1710,7 +2093,7 @@ function renderModelCard(model, parent) {
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); const limits = [item.context_window ? `${formatTokens(item.context_window)} 输入` : "", item.max_output_tokens ? `${formatTokens(item.max_output_tokens)} 输出` : ""].filter(Boolean).join(" · "); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}${limits ? `<em>${escapeHtml(limits)}</em>` : ""}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
 function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
-function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); }
+function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); }
 function schemaParams(schema) {
   // 从 JSON Schema 提取入参摘要，用于工具列表展示每个工具的参数
   const props = (schema && schema.properties) || {}, required = new Set((schema && schema.required) || []);
@@ -1777,6 +2160,581 @@ function validateSettings() { const errors = []; for (const provider of state.se
 async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); state.configLoaded = true; el.warning.classList.add("hidden"); await refreshModels(null, data.config && data.config.default_model); updateSendState(); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
 async function refreshModels(models = null, defaultModel = null) { if (!models) { const data = await request("/config/models"); models = data.models || []; defaultModel = data.default_model || defaultModel; } const previous = el.model.value; state.models = models; const keys = visibleModels().map(modelKey); selectModel(keys.includes(previous) ? previous : (defaultModel && keys.includes(defaultModel) ? defaultModel : keys[0] || "")); }
 
+// --- 用量统计面板：按供应商/模型聚合历史 token 消耗 ---
+const USAGE_PRESETS = [
+  {id:"12h",label:"最近 12 小时",hours:12},
+  {id:"24h",label:"最近 24 小时",hours:24},
+  {id:"3d",label:"最近 3 天",days:3},
+  {id:"7d",label:"最近 7 天",days:7},
+  {id:"30d",label:"最近 30 天",days:30},
+];
+const USAGE_GROUPS = [{value:"model",label:"模型用量"},{value:"provider",label:"供应商用量"}];
+const USAGE_GRANULARITIES = [{value:"day",label:"按天"},{value:"hour",label:"按小时"}];
+// 结果缓存的条目上限。key 带时间窗且精确到分钟，跨分钟后旧条目再也不会命中，
+// 不设上限就会随反复切换一直堆积
+const USAGE_CACHE_LIMIT = 32;
+// tokens 标记哪些列是 token 用量，需要按 M 换算；轮次是一般计数，按原值显示。
+// 不加区分会把 33 轮写成 0.000033M。
+const USAGE_COLUMNS = [
+  {key:"name",label:"模型",numeric:false},
+  {key:"provider",label:"供应商",numeric:false},
+  {key:"total",label:"总量",numeric:true,tokens:true},
+  {key:"input",label:"输入",numeric:true,tokens:true},
+  {key:"output",label:"输出",numeric:true,tokens:true},
+  {key:"measured",label:"实测",numeric:true,tokens:true},
+  {key:"estimated",label:"估算",numeric:true,tokens:true},
+  {key:"turns",label:"轮次",numeric:true},
+];
+function usagePad(value) { return String(value).padStart(2, "0"); }
+function usageIsoLocal(date) { return `${date.getFullYear()}-${usagePad(date.getMonth()+1)}-${usagePad(date.getDate())}T${usagePad(date.getHours())}:${usagePad(date.getMinutes())}`; }
+function usageDayKey(date) { return `${date.getFullYear()}-${usagePad(date.getMonth()+1)}-${usagePad(date.getDate())}`; }
+function usageDayStart(date) { return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime(); }
+function usagePreset(id) { return USAGE_PRESETS.find(item => item.id === id) || USAGE_PRESETS[3]; }
+function usageWindow() {
+  // 自定义区间优先；预设区间按自然日回溯，"最近 N 天"含今天
+  const range = state.usage.range;
+  if (range.start && range.end) return {start: range.start, end: range.end};
+  const preset = usagePreset(range.preset), end = new Date(), start = new Date();
+  if (preset.hours) start.setHours(start.getHours() - preset.hours);
+  else { start.setDate(start.getDate() - preset.days + 1); start.setHours(0, 0, 0, 0); }
+  return {start: start, end: end};
+}
+function usageRangeText() {
+  const range = state.usage.range;
+  if (!range.start || !range.end) return usagePreset(range.preset).label;
+  const start = usageDayKey(range.start), end = usageDayKey(range.end);
+  return start === end ? start : `${start} ~ ${end}`;
+}
+function usageDomain() {
+  const data = state.usage.data;
+  if (!data) return null;
+  // 右端补满当前桶，保证日/小时两种粒度共用同一区间（下钻时视窗才不会跳）
+  return [Charts.parseBucket(data.range.start), Charts.parseBucket(data.range.end) + 3600000];
+}
+// 可见跨度不足 3 个桶时下钻到小时桶：按天桶只落在自然日零点，窄视窗里可能一个都落不进来，
+// 图会只剩空坐标系。这也是「缩放突破档位限制、放大到小时」的实现方式。
+function usageDrilled() {
+  const data = state.usage.data, view = state.usage.view;
+  if (!data || data.range.resolution !== "hour" || !view) return false;
+  if (state.usage.granularity === "hour") return false;
+  return (view.end - view.start) < 3 * 86400000;
+}
+function usageRollupDays(buckets) {
+  const groups = new Map();
+  buckets.forEach(row => {
+    const key = row.t.slice(0, 10);
+    let target = groups.get(key);
+    if (!target) { target = {t:key,input:0,output:0,total:0,measured:0,estimated:0,turns:0}; groups.set(key, target); }
+    target.input += row.input; target.output += row.output; target.total += row.total;
+    target.measured += row.measured; target.estimated += row.estimated; target.turns += row.turns;
+  });
+  return Array.from(groups.values());
+}
+function usageBuckets() {
+  const data = state.usage.data;
+  if (!data) return [];
+  if (data.range.resolution === "day") return data.buckets;
+  if (state.usage.granularity === "hour" || usageDrilled()) return data.buckets;
+  return usageRollupDays(data.buckets);
+}
+function usagePopoverOpen() {
+  return [el.usageGroupList, el.usageProviderList, el.usageModelList, el.usageGranularityList, el.usageRangePanel]
+    .some(panel => panel && !panel.classList.contains("hidden"));
+}
+function closeUsagePopovers() {
+  [[el.usageGroup, el.usageGroupList], [el.usageProvider, el.usageProviderList],
+   [el.usageModel, el.usageModelList],
+   [el.usageGranularity, el.usageGranularityList], [el.usageRange, el.usageRangePanel]]
+    .forEach(pair => {
+      if (!pair[0] || !pair[1]) return;
+      pair[1].classList.add("hidden");
+      pair[0].setAttribute("aria-expanded", "false");
+    });
+}
+function toggleUsagePopover(trigger, panel, onOpen) {
+  const willOpen = panel.classList.contains("hidden");
+  closeUsagePopovers();
+  if (!willOpen) return;
+  if (onOpen) onOpen();
+  panel.classList.remove("hidden");
+  trigger.setAttribute("aria-expanded", "true");
+}
+function renderUsageListbox(container, items, current, onPick) {
+  if (!container) return;
+  container.innerHTML = "";
+  items.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(item.value === current));
+    button.className = item.value === current ? "selected" : "";
+    button.disabled = Boolean(item.disabled);
+    button.innerHTML = `<span>${escapeHtml(item.label)}</span>${item.note ? `<small>${escapeHtml(item.note)}</small>` : ""}`;
+    button.onclick = () => { if (!item.disabled) onPick(item.value); };
+    container.append(button);
+  });
+}
+function renderUsageListboxes() {
+  const usage = state.usage, data = usage.data;
+  const hourDisabled = !data || data.range.resolution === "day";
+  renderUsageListbox(el.usageGroupList, USAGE_GROUPS, usage.groupBy, value => {
+    // 分组只决定饼图与明细表按什么拆，不改变筛选条件，因此不需要重新请求
+    usage.groupBy = value;
+    closeUsagePopovers();
+    renderUsage();
+  });
+  renderUsageListbox(el.usageProviderList, [{value:"",label:"全部供应商"}].concat(usage.providerOptions),
+    usage.provider, value => usagePickProvider(value));
+  renderUsageListbox(el.usageModelList, [{value:"",label:"全部模型"}].concat(usage.modelOptions),
+    usage.model, value => usagePickModel(value));
+  renderUsageListbox(el.usageGranularityList, USAGE_GRANULARITIES.map(item =>
+    hourDisabled && item.value === "hour" ? {value:item.value,label:item.label,disabled:true,note:"当前范围仅提供按天"} : item
+  ), usage.granularity, value => {
+    usage.granularity = value;
+    usage.view = null;
+    closeUsagePopovers();
+    renderUsage();
+  });
+}
+function renderUsageRangePresets() {
+  if (!el.usageRangePresets) return;
+  const usage = state.usage;
+  el.usageRangePresets.innerHTML = "";
+  USAGE_PRESETS.forEach(preset => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = !usage.range.start && usage.range.preset === preset.id ? "active" : "";
+    button.textContent = preset.label;
+    button.onclick = () => applyUsagePreset(preset.id);
+    el.usageRangePresets.append(button);
+  });
+  const confirm = document.createElement("button");
+  confirm.type = "button";
+  confirm.className = "usage-cal-confirm";
+  confirm.textContent = "确定";
+  confirm.disabled = !usage.pendingStart;
+  confirm.onclick = () => { if (usage.pendingStart) applyUsageCustom(usage.pendingStart, usage.pendingEnd || usage.pendingStart); };
+  el.usageRangePresets.append(confirm);
+}
+function usageDayState(day) {
+  const usage = state.usage;
+  const usingPending = Boolean(usage.pendingStart);
+  const start = usingPending ? usageDayStart(usage.pendingStart) : (usage.range.start ? usageDayStart(usage.range.start) : null);
+  const end = usingPending
+    ? usageDayStart(usage.pendingEnd || usage.pendingStart)
+    : (usage.range.end ? usageDayStart(usage.range.end) : null);
+  if (start === null || end === null) return "";
+  const ms = usageDayStart(day);
+  if (ms === start && ms === end) return "single";
+  if (ms === start) return "start";
+  if (ms === end) return "end";
+  return ms > start && ms < end ? "in" : "";
+}
+function usageMonthGrid(monthDate) {
+  const grid = document.createElement("div");
+  grid.className = "usage-cal-grid";
+  grid.innerHTML = `<div class="usage-cal-month">${monthDate.getFullYear()}-${usagePad(monthDate.getMonth() + 1)}</div>`
+    + `<div class="usage-cal-week">${["一","二","三","四","五","六","日"].map(name => `<span>${name}</span>`).join("")}</div>`;
+  const cells = document.createElement("div");
+  cells.className = "usage-cal-cells";
+  const first = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1);
+  const offset = (first.getDay() + 6) % 7;   // 周一开头
+  const cursor = new Date(monthDate.getFullYear(), monthDate.getMonth(), 1 - offset);
+  for (let index = 0; index < 42; index += 1) {
+    const day = new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate() + index);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `usage-cal-day${day.getMonth() === monthDate.getMonth() ? "" : " other"} ${usageDayState(day)}`.trim();
+    button.textContent = String(day.getDate());
+    button.onclick = () => pickUsageDay(day);
+    cells.append(button);
+  }
+  grid.append(cells);
+  return grid;
+}
+function renderUsageCalendar() {
+  if (!el.usageCalendar) return;
+  const usage = state.usage;
+  const anchor = usage.calendar || new Date();
+  el.usageCalendar.innerHTML = "";
+  const head = document.createElement("div");
+  head.className = "usage-cal-nav";
+  head.innerHTML = `<div class="usage-cal-title">${anchor.getFullYear()}-${usagePad(anchor.getMonth() + 1)} ~ ${new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).getFullYear()}-${usagePad(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1).getMonth() + 1)}</div>`
+    + `<div class="usage-cal-steps">`
+    + `<button type="button" data-usage-month="-12" aria-label="上一年">«</button>`
+    + `<button type="button" data-usage-month="-1" aria-label="上个月">‹</button>`
+    + `<button type="button" data-usage-month="1" aria-label="下个月">›</button>`
+    + `<button type="button" data-usage-month="12" aria-label="下一年">»</button>`
+    + `</div>`;
+  el.usageCalendar.append(head);
+  head.querySelectorAll("[data-usage-month]").forEach(button => button.onclick = () => {
+    usage.calendar = new Date(anchor.getFullYear(), anchor.getMonth() + Number(button.dataset.usageMonth), 1);
+    renderUsageCalendar();
+  });
+  const months = document.createElement("div");
+  months.className = "usage-cal-months";
+  months.append(usageMonthGrid(anchor), usageMonthGrid(new Date(anchor.getFullYear(), anchor.getMonth() + 1, 1)));
+  el.usageCalendar.append(months);
+}
+function pickUsageDay(day) {
+  const usage = state.usage;
+  if (!usage.pendingStart || usage.pendingEnd) {
+    usage.pendingStart = day;
+    usage.pendingEnd = null;
+    renderUsageCalendar();
+    renderUsageRangePresets();
+    return;
+  }
+  usage.pendingEnd = day;
+  applyUsageCustom(usage.pendingStart, day);
+}
+function applyUsagePreset(id) {
+  const usage = state.usage;
+  usage.range = {preset:id,start:null,end:null};
+  usage.pendingStart = usage.pendingEnd = null;
+  // 12/24 小时档在按天下只剩一两个点，强制切到按小时
+  if (usagePreset(id).hours) usage.granularity = "hour";
+  usage.view = null;
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function applyUsageCustom(startDay, endDay) {
+  const usage = state.usage;
+  const low = startDay <= endDay ? startDay : endDay;
+  const high = startDay <= endDay ? endDay : startDay;
+  const start = new Date(low.getFullYear(), low.getMonth(), low.getDate(), 0, 0, 0, 0);
+  const end = new Date(high.getFullYear(), high.getMonth(), high.getDate(), 23, 59, 0, 0);
+  usage.range = {preset:null,start:start,end:end};
+  usage.pendingStart = usage.pendingEnd = null;
+  if (end - start <= 86400000) usage.granularity = "hour";
+  usage.view = null;
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageModelName(key, fallback) {
+  // 显示名优先取配置里的 name；历史里出现过但已从配置移除的模型加标注，
+  // 否则用户会疑惑这个模型为什么在设置页里找不到
+  const entry = state.usage.catalog[key];
+  if (entry) return entry.name;
+  return `${fallback || key}（未在配置中）`;
+}
+function usageProviderName(id, fallback) {
+  const known = state.usage.configuredProviders[id];
+  if (known) return known;
+  // 与后端 UNKNOWN_PROVIDER 对应：早期记录里 usage.model 不含供应商前缀
+  if (id === "unknown") return "未知供应商";
+  return fallback || id || "未知供应商";
+}
+function usageSyncCatalog() {
+  // 配置目录只用来把历史记录里的键映射成设置页里显示的同一个名字
+  const usage = state.usage;
+  const configured = {};
+  const catalog = {};
+  (state.models || []).filter(item => item.enabled !== false).forEach(item => {
+    const key = modelKey(item);
+    const provider = item.provider || "";
+    catalog[key] = {
+      name: item.name || item.id || key,
+      provider: provider,
+      providerName: item.provider_name || provider,
+    };
+    if (!(provider in configured)) configured[provider] = item.provider_name || provider;
+  });
+  usage.catalog = catalog;
+  usage.configuredProviders = configured;
+
+  // 下拉选项只列「有调用记录」的模型与供应商：candidates 按时间窗算出，不随当前筛选缩水。
+  // 列出从没调用过的配置模型只会让用户选到空结果，所以不列。
+  const data = usage.data || {};
+  const candidates = data.candidates || {};
+  usage.providerOptions = (candidates.providers || [])
+    .map(row => ({value: row.provider, label: usageProviderName(row.provider, row.label)}));
+  usage.modelOptions = (candidates.models || [])
+    .filter(row => !usage.provider || row.provider === usage.provider)
+    .map(row => ({
+      value: row.model,
+      label: usageModelName(row.model, row.label),
+      note: usage.provider ? "" : usageProviderName(row.provider),
+    }));
+
+  // 当前时间窗内该模型没有记录时它不在候选里，但选中项要原样留着：
+  // 静默清空会让下拉和表格各说各话，用户也看不到自己到底筛了什么。
+  if (usage.model && !usage.modelOptions.some(item => item.value === usage.model)) {
+    usage.modelOptions.push({value: usage.model, label: usageModelName(usage.model), note: ""});
+  }
+  if (usage.provider && !usage.providerOptions.some(item => item.value === usage.provider)) {
+    usage.providerOptions.push({value: usage.provider, label: usageProviderName(usage.provider), count: 0});
+  }
+}
+function usagePickProvider(value) {
+  const usage = state.usage;
+  usage.provider = value;
+  // 已选模型若不属于新供应商，两个条件会自相矛盾查出空结果，直接回落到全部模型
+  if (usage.model) {
+    const row = usageCandidateModel(usage.model);
+    const owner = row ? row.provider : (usage.catalog[usage.model] || {}).provider;
+    if (owner && owner !== value) usage.model = "";
+  }
+  usage.view = null;
+  usageSyncCatalog();
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageCandidateModel(key) {
+  const candidates = (state.usage.data || {}).candidates || {};
+  return (candidates.models || []).find(item => item.model === key);
+}
+function usagePickModel(value) {
+  const usage = state.usage;
+  usage.model = value;
+  // 模型键自带供应商，选模型时把供应商一并对齐，否则会组成互相矛盾的条件查出空结果
+  const row = usageCandidateModel(value);
+  const owner = row ? row.provider : (usage.catalog[value] || {}).provider;
+  if (owner && owner !== usage.provider) usage.provider = owner;
+  usage.view = null;
+  usageSyncCatalog();
+  closeUsagePopovers();
+  loadUsageStats();
+}
+function usageAdoptData(data) {
+  const usage = state.usage;
+  usage.data = data;
+  // 跨度过大时服务端只给按天桶，粒度档位跟着回落，避免显示值与可用选项自相矛盾
+  if (data.range.resolution === "day") usage.granularity = "day";
+}
+function usageQueryKey(window_) {
+  const usage = state.usage;
+  return `${usageIsoLocal(window_.start)}|${usageIsoLocal(window_.end)}|${usage.provider}|${usage.model}`;
+}
+async function usageEnsureCatalog() {
+  // 配置目录现在只用于把历史里的键映射成设置页的显示名；缺失时显示名会退回原始键，
+  // 所以先补一次拉取，保证刚打开面板时名字就对得上
+  if ((state.models || []).length) return;
+  try {
+    const data = await request("/config/models");
+    state.models = data.models || [];
+  } catch (_) { /* 拉取失败就保持空列表，用量本身仍可查看 */ }
+}
+async function usageEnterTab() {
+  // 首次进入先备好配置目录（名称映射用），再取用量数据渲染
+  await usageEnsureCatalog();
+  usageSyncCatalog();
+  if (state.usage.loaded) renderUsage();
+  else await loadUsageStats();
+}
+async function loadUsageStats(force = false) {
+  const usage = state.usage;
+  const window_ = usageWindow();
+  const key = usageQueryKey(window_);
+  const cached = usage.cache[key];
+  if (!force && cached) {
+    // 命中缓存也要作废仍在飞的请求：否则它返回时令牌还对得上，
+    // 会把刚渲染出来的这份缓存结果覆盖成上一个筛选的数据
+    usage.token += 1;
+    usage.loading = false;
+    if (el.usageRefresh) el.usageRefresh.disabled = false;
+    usageAdoptData(cached);
+    usage.error = "";
+    usage.loaded = true;
+    renderUsage();
+    return;
+  }
+  // 令牌用于丢弃过期响应：区间/筛选可以连续切换，抢先返回的旧结果不能写进当前视图
+  const token = usage.token + 1;
+  usage.token = token;
+  usage.loading = true;
+  usage.error = "";
+  el.usageStatus.textContent = "正在统计用量…";
+  if (el.usageRefresh) el.usageRefresh.disabled = true;
+  try {
+    const query = `?start=${encodeURIComponent(usageIsoLocal(window_.start))}&end=${encodeURIComponent(usageIsoLocal(window_.end))}`
+      + (usage.provider ? `&provider=${encodeURIComponent(usage.provider)}` : "")
+      + (usage.model ? `&model=${encodeURIComponent(usage.model)}` : "");
+    const data = await request(`/usage/stats${query}`);
+    if (usage.token !== token) return;
+    if (Object.keys(usage.cache).length >= USAGE_CACHE_LIMIT) usage.cache = {};
+    usage.cache[key] = data;
+    usageAdoptData(data);
+    usage.loaded = true;
+  } catch (error) {
+    if (usage.token !== token) return;
+    usage.error = error.message;
+  } finally {
+    if (usage.token === token) {
+      usage.loading = false;
+      if (el.usageRefresh) el.usageRefresh.disabled = false;
+      renderUsage();
+    }
+  }
+}
+function renderUsageOverview(data) {
+  const totals = data.totals;
+  const base = totals.cache_read + totals.input;
+  const hitRate = base > 0 ? `${Math.round((totals.cache_read / base) * 100)}%` : "—";
+  const cards = [
+    ["总用量", Charts.formatMillions(totals.total)],
+    ["输入", Charts.formatMillions(totals.input)],
+    ["输出", Charts.formatMillions(totals.output)],
+    ["实测 / 估算", `${Charts.formatMillions(totals.measured)} / ${Charts.formatMillions(totals.estimated)}`],
+    ["缓存命中率", hitRate],
+    ["会话数", String(totals.sessions)],
+  ];
+  el.usageOverview.innerHTML = cards.map(pair => `<div class="usage-stat"><span>${pair[0]}</span><b>${pair[1]}</b></div>`).join("");
+}
+function usagePieGroups() {
+  const usage = state.usage, data = usage.data;
+  if (usage.groupBy === "provider") {
+    return (data.providers || []).map(row =>
+      ({label:usageProviderName(row.provider, row.label), value:row.total}));
+  }
+  if (usage.model) {
+    // 选定单个模型后仍按模型切分只剩一个满圆，改为看这个模型的 token 构成
+    const row = (data.models || []).find(item => item.model === usage.model);
+    if (!row) return [];
+    return [["输入",row.input],["输出",row.output],["缓存读",row.cache_read],["缓存写",row.cache_write]]
+      .filter(pair => pair[1] > 0).map(pair => ({label:pair[0],value:pair[1]}));
+  }
+  const models = data.models || [];
+  const groups = models.slice(0, 6).map(row =>
+    ({label:usageModelName(row.model, row.label), value:row.total}));
+  const rest = models.slice(6);
+  if (rest.length) groups.push({label:`其他 ${rest.length} 个`,value:rest.reduce((sum,row) => sum + row.total, 0)});
+  return groups;
+}
+function usageTableRows(isProvider) {
+  const data = state.usage.data;
+  if (isProvider) {
+    return (data.providers || []).map(row => ({
+      name: usageProviderName(row.provider, row.label), fullKey: row.provider,
+      total: row.total, input: row.input, output: row.output,
+      measured: row.measured, estimated: row.estimated, turns: row.turns,
+    }));
+  }
+  return (data.models || []).map(row => ({
+    name: usageModelName(row.model, row.label), fullKey: row.model,
+    provider: usageProviderName(row.provider),
+    total: row.total, input: row.input, output: row.output,
+    measured: row.measured, estimated: row.estimated, turns: row.turns,
+  }));
+}
+function renderUsageTable() {
+  const usage = state.usage, data = usage.data;
+  if (!data || !el.usageTable) return;
+  const isProvider = usage.groupBy === "provider";
+  const columns = USAGE_COLUMNS.filter(item => !(isProvider && item.key === "provider"))
+    .map(item => item.key === "name" ? {key:item.key,label:isProvider ? "供应商" : "模型",numeric:item.numeric} : item);
+  const rows = usageTableRows(isProvider);
+  const sort = usage.sort;
+  const column = USAGE_COLUMNS.find(item => item.key === sort.key) || USAGE_COLUMNS[2];
+  rows.sort((left, right) => {
+    const a = left[sort.key], b = right[sort.key];
+    const result = column.numeric ? (a - b) : String(a).localeCompare(String(b));
+    return sort.desc ? -result : result;
+  });
+  el.usageTableTitle.textContent = isProvider ? "供应商明细" : "模型明细";
+  if (!rows.length) { el.usageTable.innerHTML = '<div class="chart-empty">所选范围内没有用量记录</div>'; return; }
+  // 名称列显示配置里的显示名，完整 provider/model 键放在 title 里，便于与设置页对照
+  const cells = row => columns.map(item => {
+    if (item.key === "name") {
+      return `<td title="${escapeHtml(row.fullKey || row.name)}">${escapeHtml(row.name)}</td>`;
+    }
+    // 只有 token 列按 M 换算，轮次等计数列按原值显示
+    return `<td class="${item.numeric ? "num" : ""}">${escapeHtml(item.tokens ? Charts.formatMillions(row[item.key]) : row[item.key])}</td>`;
+  }).join("");
+  el.usageTable.innerHTML = `<table class="usage-table"><thead><tr>${columns.map(item =>
+    `<th class="${item.numeric ? "num" : ""}"><button type="button" data-usage-sort="${item.key}" class="${sort.key === item.key ? "active" : ""}">${item.label}${sort.key === item.key ? (sort.desc ? " ↓" : " ↑") : ""}</button></th>`
+  ).join("")}</tr></thead><tbody>${rows.map(row => `<tr>${cells(row)}</tr>`).join("")}</tbody></table>`;
+  el.usageTable.querySelectorAll("[data-usage-sort]").forEach(button => button.onclick = () => {
+    const key = button.dataset.usageSort;
+    const target = USAGE_COLUMNS.find(item => item.key === key) || USAGE_COLUMNS[2];
+    if (usage.sort.key === key) usage.sort.desc = !usage.sort.desc;
+    else usage.sort = {key:key,desc:target.numeric};
+    renderUsageTable();
+  });
+}
+function setUsageView(next) {
+  state.usage.view = next;
+  renderUsageCharts();
+}
+function announceUsageHover(row) {
+  if (!el.usageLive) return;
+  el.usageLive.textContent = row
+    ? `${row.t} 用量：总 ${Charts.formatMillions(row.total)}，输入 ${Charts.formatMillions(row.input)}，输出 ${Charts.formatMillions(row.output)}`
+    : "";
+}
+function renderUsageCharts() {
+  const usage = state.usage, data = usage.data;
+  if (!data) return;
+  const buckets = usageBuckets(), domain = usageDomain(), view = usage.view;
+  if (!buckets.length || !domain) return;
+  Charts.line(el.usageLine, {
+    buckets: buckets, domain: domain, view: view,
+    series: [{key:"input",label:"输入",color:"var(--cyan)"},{key:"output",label:"输出",color:"var(--green)"}],
+    onViewChange: setUsageView, onHover: announceUsageHover,
+  });
+  Charts.bar(el.usageBar, {
+    buckets: buckets, domain: domain, view: view,
+    onViewChange: setUsageView, onHover: announceUsageHover,
+  });
+}
+function renderUsage() {
+  const usage = state.usage, data = usage.data;
+  usageSyncCatalog();
+  // 标签直接由当前选中项反查，配置改名后不会留着旧值；查不到就退回原始键
+  const picked = usage.modelOptions.find(item => item.value === usage.model);
+  el.usageGroupLabel.textContent = usage.groupBy === "provider" ? "供应商用量" : "模型用量";
+  el.usageProviderLabel.textContent = usage.provider ? usageProviderName(usage.provider) : "全部供应商";
+  el.usageModelLabel.textContent = usage.model
+    ? (picked ? picked.label : usageModelName(usage.model))
+    : "全部模型";
+  el.usageGranularityLabel.textContent = usage.granularity === "hour" ? "按小时" : "按天";
+  el.usageRangeLabel.textContent = usageRangeText();
+  renderUsageListboxes();
+  if (!data) {
+    el.usageStatus.textContent = usage.error ? `用量统计失败：${usage.error}` : "正在统计用量…";
+    return;
+  }
+  el.usageStatus.textContent = usage.error
+    ? `用量统计失败：${usage.error}`
+    : `${data.range.start.replace("T", " ")} 至 ${data.range.end.replace("T", " ")}`
+      + ` · 可用最细粒度 ${data.range.resolution === "hour" ? "按小时" : "按天"}`
+      + (usage.loading ? " · 正在刷新…" : "");
+  renderUsageOverview(data);
+  renderUsageCharts();
+  el.usagePieTitle.textContent = usage.groupBy === "provider"
+    ? "供应商占比"
+    : (usage.model ? `${picked ? picked.label : usageModelName(usage.model)} 构成` : "模型占比");
+  Charts.pie(el.usagePie, {groups:usagePieGroups(),unit:"总量"});
+  renderUsageTable();
+}
+function bindUsagePanel() {
+  if (!el.usageGroup) return;
+  el.usageGroup.onclick = () => toggleUsagePopover(el.usageGroup, el.usageGroupList, renderUsageListboxes);
+  el.usageProvider.onclick = () => toggleUsagePopover(el.usageProvider, el.usageProviderList, renderUsageListboxes);
+  el.usageModel.onclick = () => toggleUsagePopover(el.usageModel, el.usageModelList, renderUsageListboxes);
+  el.usageGranularity.onclick = () => toggleUsagePopover(el.usageGranularity, el.usageGranularityList, renderUsageListboxes);
+  el.usageRange.onclick = () => toggleUsagePopover(el.usageRange, el.usageRangePanel, () => {
+    const usage = state.usage;
+    usage.pendingStart = usage.pendingEnd = null;
+    const anchor = usage.range.end || usage.range.start || new Date();
+    usage.calendar = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    renderUsageCalendar();
+    renderUsageRangePresets();
+  });
+  if (el.usageRefresh) el.usageRefresh.onclick = () => loadUsageStats(true);
+  document.addEventListener("click", event => {
+    if (!state.settings.open || state.settings.activeTab !== "usage") return;
+    if (event.target.closest(".usage-filter")) return;
+    closeUsagePopovers();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !state.settings.open || state.settings.activeTab !== "usage") return;
+    if (!usagePopoverOpen()) return;
+    event.preventDefault();
+    closeUsagePopovers();
+  });
+}
+
 async function bootstrap() {
   setConnection("checking","连接中");
   const results = await Promise.all([settle(request("/health")),settle(request("/config/models")),settle(request("/skills")),settle(request("/sessions"))]);
@@ -1791,24 +2749,41 @@ async function bootstrap() {
     state.skills = skills.value.skills || [];
     if (el.skill.value && !selectedSkill()) selectSkill("");
   }
-  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
+  if (sessions.status === "fulfilled") { state.sessions = sessions.value.sessions || []; renderSessions(); warnStorageIssues(sessions.value.storage_issues); if (state.sessions[0]) await loadSession(state.sessions[0].id); else showWelcome(); }
   const failures = results.filter(item => item.status === "rejected"); if (failures.length) showToast(failures[0].reason.message);
   el.warning.classList.toggle("hidden",state.configLoaded); updateSendState();
   checkVoiceHealth();
 }
 el.newSession.onclick = createSession;
 el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList(); el.modelTrigger.onkeydown = handleModelKeys;
-el.skillTrigger.onclick = () => state.skillListOpen ? closeSkillList() : openSkillList();
+// 清除技能后把焦点还回输入框，用户可以接着敲 "/" 或正文
+el.skillChip.onclick = () => { selectSkill(""); el.input.focus(); };
+el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();
+el.modeTrigger.onkeydown = handleModeKeys;
+bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);
+bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
+bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
+selectMode(state.mode);
+renderSkillChip();
 el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSettings(); el.cancelSettings.onclick = () => closeSettings(); el.saveSettings.onclick = saveSettings; el.addProvider.onclick = addProvider;
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
 if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
 if (el.refreshSkills) el.refreshSkills.onclick = () => loadSkills();
+bindUsagePanel();
+// 图表按像素宽度绘制，窗口尺寸变化后需要重画；用量页不可见时跳过
+let usageResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(usageResizeTimer);
+  usageResizeTimer = setTimeout(() => {
+    if (state.settings.open && state.settings.activeTab === "usage" && state.usage.loaded) renderUsage();
+  }, 160);
+});
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
 el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
-el.input.oninput = () => { autoGrowInput(); updateSendState(); };
-el.input.onkeydown = event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
+el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };
+el.input.onkeydown = event => { if (handleSlashKeys(event)) return; if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
 // 浮层高度会随卡片折叠/换提问而变，计划窗口得跟着重新贴合（变大顶开、变小落回）
@@ -1850,9 +2825,18 @@ document.addEventListener("drop", event => {
   event.preventDefault(); dragDepth = 0; showDropOverlay(false);
   if (event.dataTransfer && event.dataTransfer.files) addFiles(event.dataTransfer.files);
 });
-document.querySelectorAll("[data-mode]").forEach(button => button.onclick = () => { state.mode = button.dataset.mode; document.querySelectorAll("[data-mode]").forEach(item => item.classList.toggle("active",item === button)); });
-document.addEventListener("click", event => { if (state.modelListOpen && !event.target.closest(".model-control:not(.skill-control)")) closeModelList(); if (state.skillListOpen && !event.target.closest(".skill-control")) closeSkillList(); if (!el.sessionPanel.classList.contains("hidden") && !event.target.closest("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions(); });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSkillList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+// 点击落在哪个容器内，用事件派发时固定的 composedPath 判断：
+// 选项点击可能重建面板内容（如「模型」指令切到模型列表），此时被点的行已脱离 DOM，
+// 再用 event.target.closest 会判成"点在面板外"，把刚打开的面板当场关掉。
+document.addEventListener("click", event => {
+  const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+  const inside = selector => path.some(node => node.nodeType === 1 && node.matches && node.matches(selector));
+  if (state.modelListOpen && !inside(".model-control:not(.mode-control)")) closeModelList();
+  if (state.modeListOpen && !inside(".mode-control")) closeModeList();
+  if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();
+  if (!el.sessionPanel.classList.contains("hidden") && !inside("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions();
+});
+document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
 
 // --- 语音转文字（voice_asr）：点击录音 → 浏览器端编码 16kHz WAV → POST /asr → 回填输入框 ---
 const voice = {
@@ -2449,7 +3433,7 @@ function switchViewTab(tab) {
   el.messages.classList.toggle("hidden", traj);
   el.composer.classList.toggle("hidden", traj);
   if (traj) { el.phasePanel.classList.add("hidden"); loadTrajectory(); }
-  else { if (el.phasePanel.innerHTML.trim() && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
+  else { if (state.phasePlan && !planComplete(state.phasePlan)) el.phasePanel.classList.remove("hidden"); scrollMessages(); }
   syncTurnRail();
 }
 // 时间轴命中检测：优先取包含该点的最窄跨度，否则取投影上最近的跨度（deepseek-harness 式点击定位）

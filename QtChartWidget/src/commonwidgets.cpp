@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QIcon>
 #include <QImage>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QPainter>
@@ -35,6 +36,13 @@ FlowLayout::~FlowLayout()
 }
 
 void FlowLayout::addItem(QLayoutItem *item) { m_items.append(item); }
+
+void FlowLayout::setSpacings(int horizontal, int vertical)
+{
+    m_hSpace = horizontal;
+    m_vSpace = vertical;
+    invalidate();
+}
 
 int FlowLayout::horizontalSpacing() const
 {
@@ -140,13 +148,22 @@ void Chevron::setOpen(bool open)
     update();
 }
 
+void Chevron::setHovered(bool hovered)
+{
+    if (m_hovered == hovered)
+        return;
+    m_hovered = hovered;
+    update();
+}
+
 void Chevron::paintEvent(QPaintEvent *)
 {
     // CSS .tool-chevron：收起为 "›"，展开为 "⌄"，统一由 SVG 渲染并着色
     const int side = qRound(qMin(width(), height()) * 1.4);
+    const QColor color = m_hovered ? gs::palette().cyan : gs::palette().muted2;
     const QPixmap pm = iconPixmap(m_open ? QStringLiteral("chevron-down")
                                          : QStringLiteral("chevron-right"),
-                                  gs::palette().muted2, side);
+                                  color, side);
     QPainter p(this);
     p.drawPixmap((width() - pm.width()) / 2, (height() - pm.height()) / 2, pm);
 }
@@ -264,8 +281,9 @@ ComboTrigger::ComboTrigger(QWidget *parent) : QWidget(parent)
     m_chevron = new QLabel(this);
     setClass(m_chevron, QStringLiteral("comboText"));
     m_chevron->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    m_chevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"),
-                                    gs::palette().muted, scaledPx(10)));
+    // webui 撤掉了触发器里的箭头（.model-control 的 padding 也改成左右对称），
+    // 保留成员是为兼容 setOpen()/refreshZoom() 的调用点，但不再占位
+    m_chevron->setVisible(false);
 
     layout->addWidget(m_text, 1);
     layout->addWidget(m_chevron, 0);
@@ -282,9 +300,6 @@ void ComboTrigger::setRightAligned(bool right)
 void ComboTrigger::setOpen(bool open)
 {
     m_open = open;
-    m_chevron->setPixmap(iconPixmap(open ? QStringLiteral("chevron-up")
-                                         : QStringLiteral("chevron-down"),
-                                    gs::palette().muted, scaledPx(10)));
 }
 
 void ComboTrigger::setText(const QString &text)
@@ -295,7 +310,7 @@ void ComboTrigger::setText(const QString &text)
 
 void ComboTrigger::updateElided()
 {
-    const int available = qMax(10, width() - 10 - m_chevron->sizeHint().width() - 5);
+    const int available = qMax(10, width() - 10);
     QFont f = font();
     f.setPixelSize(scaledPx(10));
     m_text->setText(elidedText(m_full, QFontMetrics(f), available));
@@ -303,7 +318,6 @@ void ComboTrigger::updateElided()
 
 void ComboTrigger::refreshZoom()
 {
-    setOpen(m_open); // 按当前缩放重建 chevron（保持展开状态）
     updateElided();
 }
 
@@ -318,6 +332,21 @@ void ComboTrigger::mousePressEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton)
         emit clicked();
     QWidget::mousePressEvent(event);
+}
+
+void ComboTrigger::keyPressEvent(QKeyEvent *event)
+{
+    // webui：触发器是原生 button，Enter / Space 即激活（与点击等价）
+    switch (event->key()) {
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+    case Qt::Key_Space:
+        emit clicked();
+        return;
+    default:
+        break;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 bool ComboTrigger::event(QEvent *event)
@@ -404,7 +433,10 @@ QSize ElidedLabel::sizeHint() const
 
 QSize ElidedLabel::minimumSizeHint() const
 {
-    return QSize(0, QLabel::minimumSizeHint().height());
+    // 宽度下限 0：允许被压到任意窄，省略号自己处理。
+    // 高度下限必须留一行文字：文本要等首次 resize 才回填，此前 QLabel 的最小高度是 0，
+    // 会把宿主布局压塌（用量下拉的选项行就被挤成 14px、文字高度 0）。
+    return QSize(0, qMax(QLabel::minimumSizeHint().height(), fontMetrics().height()));
 }
 
 void ElidedLabel::resizeEvent(QResizeEvent *event)
@@ -472,10 +504,9 @@ AttachChip::AttachChip(const QVariantMap &item, QWidget *parent)
     }
 
     m_name = makeLabel(QStringLiteral("attachName"), name, this);
-    m_name->setMaximumWidth(140);
-    QFontMetrics fm(m_name->font());
-    m_name->setText(elidedText(name, fm, 140));
+    m_fullName = name;
     m_name->setToolTip(name);
+    updateNameElide();
     m_size = makeLabel(QStringLiteral("attachSize"),
                        uploading ? QStringLiteral("上传中…") : fileSizeLabel(m_bytes), this);
 
@@ -494,6 +525,23 @@ AttachChip::AttachChip(const QVariantMap &item, QWidget *parent)
     layout->addWidget(remove);
 
     setUploading(uploading);
+}
+
+void AttachChip::setCompact(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    updateNameElide();
+}
+
+void AttachChip::updateNameElide()
+{
+    if (!m_name)
+        return;
+    const int nameWidth = m_compact ? 64 : 140;
+    m_name->setMaximumWidth(nameWidth);
+    m_name->setText(elidedText(m_fullName, m_name->fontMetrics(), nameWidth));
 }
 
 void AttachChip::setUploading(bool uploading)
@@ -582,17 +630,33 @@ PulseDot::PulseDot(QWidget *parent) : QWidget(parent)
     setFixedSize(6, 6);
     m_timer = new QTimer(this);
     m_timer->setInterval(60);
-    connect(m_timer, &QTimer::timeout, this, [this] {
-        m_phase += 0.06;
-        if (m_phase > 1.0)
-            m_phase -= 1.0;
-        update();
-    });
+    connect(m_timer, &QTimer::timeout, this, &PulseDot::advance);
 }
 
 void PulseDot::setColor(const QColor &color)
 {
     m_color = color;
+    update();
+}
+
+void PulseDot::setStyle(Style style)
+{
+    if (m_style == style)
+        return;
+    m_style = style;
+    // .run-dot 是 8px 开口环，比 6px 的实心点大一档
+    setFixedSize(m_style == Spin ? m_ringSize : 6, m_style == Spin ? m_ringSize : 6);
+    updateGeometry();
+    update();
+}
+
+void PulseDot::setRing(int sizePx, qreal borderPx)
+{
+    m_ringSize = qMax(4, sizePx);
+    m_ringBorder = qMax(0.5, borderPx);
+    // 半径变了要重算窗口尺寸（也是让先 setStyle 后 setRing 的调用顺序生效）
+    setFixedSize(m_style == Spin ? m_ringSize : 6, m_style == Spin ? m_ringSize : 6);
+    updateGeometry();
     update();
 }
 
@@ -608,10 +672,37 @@ void PulseDot::setActive(bool active)
     update();
 }
 
+// 每 tick 推进的相位：脉冲走 1.4s 一轮，旋转环走 0.7s 一轮（CSS 两套 keyframes）
+void PulseDot::advance()
+{
+    m_phase += m_style == Spin ? 0.12 : 0.06;
+    if (m_phase > 1.0)
+        m_phase -= 1.0;
+    update();
+}
+
 void PulseDot::paintEvent(QPaintEvent *)
 {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, true);
+    if (m_style == Spin) {
+        // CSS：正方形边长 = 外径 - 描边（border 计入 box 内），青色 1.5px 开口环，0.7s 线性旋转
+        const qreal side = qMin(width(), height());
+        // 1.5px 这种半像素描边不经过 scaledPx（那个只吃整数），直接按缩放系数放大
+        const qreal pen = qMax<qreal>(1.0, m_ringBorder * gs::zoomFactor());
+        QRectF box(0, 0, side - pen, side - pen);
+        box.moveCenter(QRectF(rect()).center());
+        p.translate(QRectF(rect()).center());
+        p.rotate(m_phase * 360.0);
+        p.translate(-QRectF(rect()).center());
+        QPen ring(m_color);
+        ring.setWidthF(pen);
+        // 缺的一边就是"开口"：border-top-color:transparent 等价 3/4 圈
+        p.setBrush(Qt::NoBrush);
+        p.setPen(ring);
+        p.drawArc(box, 90 * 16, 270 * 16);
+        return;
+    }
     p.setPen(Qt::NoPen);
     QColor color = m_color;
     if (m_active) {
@@ -666,6 +757,7 @@ void ThemeSwatch::paintEvent(QPaintEvent *)
 
 TurnRailDot::TurnRailDot(int turn, QWidget *parent) : QWidget(parent), m_turn(turn)
 {
+    setClass(this, QStringLiteral("turnRailDot"));
     setFixedSize(12, 12);
     setCursor(Qt::PointingHandCursor);
     setAttribute(Qt::WA_Hover, true);
@@ -718,6 +810,81 @@ void TurnRailDot::paintEvent(QPaintEvent *)
     }
     p.setBrush(color);
     p.drawEllipse(QPointF(rect().center()), m_active ? 3.5 : 2.5, m_active ? 3.5 : 2.5);
+}
+
+// --------------------------------------------------------------- TurnRailRow
+
+TurnRailRow::TurnRailRow(int turn, const QString &text, QWidget *parent)
+    : QWidget(parent), m_turn(turn), m_text(text)
+{
+    setClass(this, QStringLiteral("turnRailRow"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setCursor(Qt::PointingHandCursor);
+    // webui 里这是一枚 <button>，键盘可达（Enter / Space 等价点击）
+    setFocusPolicy(Qt::TabFocus);
+    setAccessibleName(QStringLiteral("第 %1 轮：%2").arg(turn + 1).arg(text));
+    setToolTip(text);
+
+    auto *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(7, 6, 7, 6);
+    layout->setSpacing(8);
+
+    m_index = new QLabel(QString::number(turn + 1), this);
+    setClass(m_index, QStringLiteral("turnRailIndex"));
+    m_index->setAlignment(Qt::AlignCenter);
+    m_index->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_index->setMinimumWidth(20);
+    m_index->setFixedHeight(18);
+    layout->addWidget(m_index, 0, Qt::AlignVCenter);
+
+    m_label = new ElidedLabel(this);
+    setClass(m_label, QStringLiteral("turnRailText"));
+    m_label->setFullText(text);
+    // 省略后原文保留在 toolTip（与账本行同一口径）
+    m_label->setToolTip(text);
+    layout->addWidget(m_label, 1);
+}
+
+void TurnRailRow::setTurnText(const QString &text)
+{
+    if (m_text == text)
+        return;
+    m_text = text;
+    m_label->setFullText(text);
+    m_label->setToolTip(text);
+    setToolTip(text);
+    setAccessibleName(QStringLiteral("第 %1 轮：%2").arg(m_turn + 1).arg(text));
+}
+
+void TurnRailRow::setRowActive(bool active)
+{
+    if (m_active == active)
+        return;
+    m_active = active;
+    setProperty("active", active);
+    restyle(this);
+}
+
+QSize TurnRailRow::sizeHint() const
+{
+    return QSize(280, 30);
+}
+
+void TurnRailRow::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
+        emit activated(m_turn);
+    QWidget::mouseReleaseEvent(event);
+}
+
+void TurnRailRow::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter
+        || event->key() == Qt::Key_Space) {
+        emit activated(m_turn);
+        return;
+    }
+    QWidget::keyPressEvent(event);
 }
 
 // ------------------------------------------------------------------- MiniBar
@@ -809,6 +976,11 @@ QLabel *makeLabel(const QString &className, const QString &text, QWidget *parent
 {
     auto *label = new QLabel(text, parent);
     setClass(label, className);
+    // 顺带把首个类名落到 objectName：类名本身走 QSS 的 .class，objectName 只是让
+    // findChild<QLabel*>("attachName") 这类按名查找能命中（宿主与测试都在这么用）
+    const QString objectName = className.section(QLatin1Char(' '), 0, 0);
+    if (!objectName.isEmpty())
+        label->setObjectName(objectName);
     label->setAttribute(Qt::WA_StyledBackground, false);
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
     return label;

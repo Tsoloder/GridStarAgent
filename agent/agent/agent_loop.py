@@ -418,6 +418,102 @@ def _last_recorded_system_prompt(session: Session) -> str:
     return ""
 
 
+# 寒暄、致谢、收尾类用户消息：这类轮次没有决策点，强制结构化只会让模型在
+# 推理里反复权衡"格式要求是否适用"，白烧一次完整前缀输入。
+# 只做短句精确匹配，且刻意不收"好的/收到/OK"这类应答词：它们既可能是收尾，
+# 也可能是用户对某个提问的放行确认，一旦误判成寒暄，格式重试的纠偏就失效。
+_CONVERSATIONAL_MAX_CHARS = 12
+_CONVERSATIONAL_MESSAGES = frozenset({
+    "你好", "您好", "你好呀", "您好呀", "在吗", "在么", "在不在",
+    "hi", "hello", "hey",
+    "谢谢", "多谢", "感谢", "谢谢了", "thanks", "thankyou", "thx",
+    "再见", "拜拜", "bye", "goodbye",
+    "下次再说", "回头再说", "以后再说", "晚点再说", "先这样", "就这样", "先这样吧", "先到这",
+    "不用了", "暂时不用", "没有了", "没事了", "辛苦了",
+})
+
+
+def _is_conversational_message(text) -> bool:
+    """用户消息是否为纯寒暄 / 致谢 / 收尾（去除空白与句末标点后精确匹配）。"""
+    value = "".join(str(text or "").split()).strip("。.!！?？~～,，、;；")
+    if not value or len(value) > _CONVERSATIONAL_MAX_CHARS:
+        return False
+    return value.lower() in _CONVERSATIONAL_MESSAGES
+
+
+def _plan_in_flight(ledger) -> bool:
+    """台账里是否还有未收尾阶段（pending / in_progress）。
+
+    有计划在跑就说明工作未结束，此时任何回复都该继续给结构化出口。
+    """
+    plan = getattr(ledger, "plan", None) if ledger is not None else None
+    phases = plan.get("phases") if isinstance(plan, dict) else None
+    if not isinstance(phases, list):
+        return False
+    return any(
+        isinstance(item, dict) and str(item.get("status") or "pending") in ("pending", "in_progress")
+        for item in phases
+    )
+
+
+_STRUCTURED_INTERACTION_RE = re.compile(
+    r"<structured_interaction>(.*?)</structured_interaction>", re.S | re.I
+)
+_LEGACY_CONFIRM_RE = re.compile(
+    r"<tool_params_confirmed([^>]*)>(.*?)</tool_params_confirmed>", re.S | re.I
+)
+_LEGACY_ATTR_RE = re.compile(r"(\w+)\s*=\s*\"([^\"]*)\"")
+
+
+def parse_structured_interaction(message: str) -> dict:
+    """解析前端回填的 <structured_interaction> 载荷。
+
+    两种形态都要认：webui / Qt 现行的 JSON 形态
+    （type=tool_params_confirmed，带 confirmed 布尔值），以及历史与测试固件用的
+    XML 形态（<tool_params_confirmed tool=".."><params>{..}</params></...>）。
+    旧形态没有 confirmed 字段，按"已确认"处理以保持向后兼容。
+    返回 {} 表示这不是一条结构化交互消息。
+    """
+    if not message:
+        return {}
+    match = _STRUCTURED_INTERACTION_RE.search(message)
+    if not match:
+        return {}
+    state = {"type": "", "tool": "", "confirmed": True, "cancelled": False, "params": {}}
+    body = (match.group(1) or "").strip()
+    if body.startswith("{"):
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            state["type"] = str(payload.get("type") or "")
+            state["tool"] = str(payload.get("tool") or "")
+            params = payload.get("params")
+            state["params"] = params if isinstance(params, dict) else {}
+            if "confirmed" in payload:
+                state["confirmed"] = bool(payload.get("confirmed"))
+            state["cancelled"] = state["confirmed"] is False
+            return state
+    legacy = _LEGACY_CONFIRM_RE.search(body)
+    if legacy:
+        attrs = dict(_LEGACY_ATTR_RE.findall(legacy.group(1) or ""))
+        state["type"] = "tool_params_confirmed"
+        state["tool"] = str(attrs.get("tool") or "")
+        if "confirmed" in attrs:
+            state["confirmed"] = str(attrs["confirmed"]).strip().lower() not in {"false", "0", "no", "off"}
+        state["cancelled"] = state["confirmed"] is False
+        params_match = re.search(r"<params>(.*?)</params>", legacy.group(2) or "", re.S | re.I)
+        if params_match:
+            try:
+                params = json.loads(params_match.group(1).strip())
+            except (TypeError, ValueError):
+                params = None
+            if isinstance(params, dict):
+                state["params"] = params
+    return state
+
+
 async def run_agent_loop(
     session: Session,
     user_message: str,
@@ -455,9 +551,15 @@ async def run_agent_loop(
         params = item.get("params", {})
         selected_params[skill_id] = params if isinstance(params, dict) else {}
     attachments = attachments or []
-    is_structured_continuation = "<structured_interaction>" in user_message
+    structured_state = parse_structured_interaction(user_message)
+    is_structured_message = bool(structured_state)
+    # 用户点了"取消"：这不是确认延续，必须按普通 manual 流程处理，
+    # 否则"已确认"提示词和审批豁免会一起把工具推去执行。
+    is_param_cancelled = bool(structured_state.get("cancelled"))
+    cancelled_tool = str(structured_state.get("tool") or "")
+    is_structured_continuation = is_structured_message and not is_param_cancelled
     continued_skills = set()
-    if is_structured_continuation:
+    if is_structured_message:
         for previous in reversed(session.messages):
             if previous.get("role") == "assistant" and previous.get("active_skills"):
                 continued_skills.update(previous.get("active_skills", []))
@@ -497,7 +599,14 @@ async def run_agent_loop(
             "<interaction_mode>manual</interaction_mode>\n",
             "工具参数继续按基础 tool_params 协议逐次确认。",
         ]
-        if is_structured_continuation:
+        if is_param_cancelled:
+            manual_parts.append(
+                "\n当前消息是用户对 tool_params 的取消结果：用户没有确认这组参数。"
+                "禁止调用 %s，也不要把该工具描述为已执行。"
+                "请重新输出 tool_params JSON 块给出可修改的参数表，"
+                "或调用 ask_user_question 询问用户下一步意图。" % (cancelled_tool or "该工具")
+            )
+        elif is_structured_continuation:
             manual_parts.append(
                 "\n当前消息是用户对 tool_params 的确认结果。"
                 "请直接调用对应的 MCP 工具执行，不要再次输出 tool_params。"
@@ -525,14 +634,20 @@ async def run_agent_loop(
         )
     _fmt_parts = [
         "<output_format_reminder>\n",
-        "重要：需要用户确认或选择时，必须给出结构化结果（优先调用 ask_user_question 工具，"
-        "或用 ```json 代码块包裹），禁止用 Markdown 表格或列表替代。\n",
-        "- 需要用户拍板下一步时，优先调用 ask_user_question 工具：它会结束本轮并展示选择卡片，"
+        "重要：需要用户确认或选择时，必须给出结构化结果，禁止用 Markdown 表格或列表替代。\n",
+        "- 需要用户拍板下一步时，必须调用 ask_user_question 工具：它会结束本轮并展示选择卡片，"
         "每个选项都要给一句 description，调用时不要再同时调用其他工具。\n",
-        "- 未使用该工具时，仍要在回复末尾用 options JSON 块列出下一步选择作为兜底。\n",
+        "- 只有两种情况改用正文 ```json 代码块：①tool_params 参数确认（必须与 options 同块）；"
+        "②ask_user_question 调用失败或被拒绝，此时用 options 块兜底。\n",
     ]
     if interaction_mode != "auto":
-        if is_structured_continuation:
+        if is_param_cancelled:
+            _fmt_parts.append(
+                "- 当前是 tool_params 取消延续：%s 未被确认，禁止调用它，"
+                "也不得重复提交同一组参数；请重新给出可编辑的 tool_params JSON 块，"
+                "或用 ask_user_question / options 询问用户下一步。\n" % (cancelled_tool or "该工具")
+            )
+        elif is_structured_continuation:
             _fmt_parts.append(
                 "- 当前是 tool_params 确认延续，不再需要输出 tool_params JSON 块。\n"
                 "- 用户已确认参数，直接调用对应的 MCP 工具执行，禁止再次输出 tool_params。\n"
@@ -570,6 +685,8 @@ async def run_agent_loop(
     _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
+    # 本次用户消息内是否真的执行过工具：决定末尾那轮纯文本回复能不能免于格式重试
+    _turn_tool_executed = False
     # 已启用的工具分组：本次用户消息内跨请求累积；换消息后重置，
     # 由"直呼自动解锁"兜底，避免模型重复启用。
     enabled_tool_groups = set()
@@ -1004,6 +1121,7 @@ async def run_agent_loop(
                 continue
 
         if tool_calls:
+            _turn_tool_executed = True
             if interaction_mode == "auto" and text_acc:
                 yield {"type": "text_chunk", "delta": text_acc}
 
@@ -1091,7 +1209,13 @@ async def run_agent_loop(
                                 "tps": _tps,
                             }
                             return
-                    if tc["name"] == UPDATE_PLAN_TOOL_NAME:
+                    # 注意这里是 elif：询问工具在失败分支（参数非法 / auto 模式计划未收尾）
+                    # 只设置 result 就往下走，若用独立的 if 会继续落进下面的 MCP 执行分支，
+                    # 把本该交给模型的错误文案覆盖成一次不存在的 MCP 调用结果。
+                    # 注意这里是 elif：询问工具在失败分支（参数非法 / auto 模式计划未收尾）
+                    # 只设置 result 就往下走，若用独立的 if 会继续落进下面的 MCP 执行分支，
+                    # 把本该交给模型的错误文案覆盖成一次不存在的 MCP 调用结果。
+                    elif tc["name"] == UPDATE_PLAN_TOOL_NAME:
                         # 内置计划工具：不走 MCP、不走审批。写台账 + 发结构化事件
                         if ledger is None:
                             result = "update_plan 不可用：任务台账未初始化"
@@ -1152,7 +1276,15 @@ async def run_agent_loop(
                                                    "、".join(sorted(group_tools)))
                             )
                     else:
-                        if not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
+                        if is_param_cancelled and cancelled_tool and tc["name"] == cancelled_tool:
+                            # 用户已取消这组参数：即便模型仍然发起调用也拦下，不再兜底执行
+                            logger.info("[cancelled] 用户已取消工具 %s，拦截本轮调用", tc["name"])
+                            result = (
+                                "Tool execution cancelled by user: %s。"
+                                "用户没有确认这组参数，本次调用未执行。"
+                                "请重新给出可编辑的 tool_params，或询问用户下一步意图。" % tc["name"]
+                            )
+                        elif not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
                             result = "Tool blocked by active Skill policy: %s" % tc["name"]
                         elif interaction_mode != "auto" and request_tool_approval and not is_structured_continuation and not _is_query_tool(tc["name"]):
                             # manual mode: intercept tool call and ask user to
@@ -1238,9 +1370,25 @@ async def run_agent_loop(
             # 检查回复是否包含结构化 JSON 块
             _structured_keywords = ('"options"', '"tool_params"', '"toolparams"', '"workflow"')
             has_structured = any(keyword in text_acc for keyword in _structured_keywords)
-            if not has_structured and format_retry < MAX_FORMAT_RETRIES:
+            # 寒暄/致谢/收尾轮次没有决策点，强制结构化会制造"格式契约 vs 自然对话"
+            # 的指令冲突：实测模型为此在推理里来回权衡上千字符，最后仍不产出结构，
+            # 还多花一整轮前缀输入与一次往返延迟。这类轮次直接收尾。
+            # 判定必须窄：用户消息本身是短句寒暄、且本轮无任何在途工作时才豁免。
+            # display_content 非空 = 用户点的是选项卡片，其值可能恰好是"好的"这类
+            # 白名单词，但那是一次决策答复，必须继续给结构化出口。
+            _format_retry_exempt = (
+                not is_structured_message
+                and not is_structured_continuation
+                and not display_content
+                and not _turn_tool_executed
+                and not _plan_in_flight(ledger)
+                and _is_conversational_message(user_message)
+            )
+            if not has_structured and format_retry < MAX_FORMAT_RETRIES and not _format_retry_exempt:
                 # LLM 未输出结构化 JSON，注入格式提醒让其补充 options
                 format_retry += 1
+                logger.info("[format] 格式重试 #%d session=%s mode=%s",
+                            format_retry, session.id, interaction_mode)
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 if interaction_mode == "auto":
                     _reminder_types = "options、workflow（阶段计划请改用 update_plan 工具）"
@@ -1264,6 +1412,13 @@ async def run_agent_loop(
                     "</format_reminder>" % (_reminder_types, _reminder_example)
                 )
                 continue
+            if not has_structured:
+                # 重试过一轮仍不产出、或本轮命中豁免：都要留痕，否则线上无法
+                # 判断契约失败率，也看不出豁免究竟省了多少次请求。
+                logger.info(
+                    "[format] 无结构化结果直接收尾 session=%s exempt=%s retries=%d",
+                    session.id, _format_retry_exempt, format_retry,
+                )
             if interaction_mode == "auto" and _auto_plan_waits_for_choice(text_acc, ledger):
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
                 _pending_reminders.append(

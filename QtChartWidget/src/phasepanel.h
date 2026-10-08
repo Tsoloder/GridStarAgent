@@ -2,11 +2,11 @@
 #define GS_PHASEPANEL_H
 
 #include <QFrame>
+#include <QLabel>
 #include <QVariant>
 #include <QWidget>
 
 QT_BEGIN_NAMESPACE
-class QLabel;
 class QScrollArea;
 class QVBoxLayout;
 QT_END_NAMESPACE
@@ -16,8 +16,27 @@ namespace gs {
 class ProgressLine;
 class PulseDot;
 
-// 单个阶段步骤（.phase-step）：全自绘 —— 状态圆圈字形、连接线、标题/备注省略。
-// 当前执行项不再用左侧竖条，改为整行背景色 + 圆圈内的呼吸圆点。
+// 头部统计串（.phase-head small）：彩色分段，窄面板时按段丢尾（对应 CSS 的 ellipsis）
+class PhaseCountLabel : public QLabel
+{
+public:
+    explicit PhaseCountLabel(QWidget *parent = nullptr);
+    // 段由“文字 + 颜色”组成，在这里而非 QSS 里着色（CSS 用的是 <b class="st-ok">）
+    void setSegments(const QList<QPair<QString, QColor>> &segments);
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
+private:
+    void rebuild();
+
+    QList<QPair<QString, QColor>> m_segments;
+    QString m_rich;
+    QString m_plain;
+};
+
+// 单个阶段步骤（.phase-step）：全自绘 —— 状态圆点、连接线、标题/备注省略。
+// 当前执行项不再用左侧竖条，改为整行背景色 + 圆点位置上的旋转开口环。
 class PhaseStep : public QWidget
 {
 public:
@@ -47,7 +66,7 @@ private:
     PulseDot *m_pulse = nullptr;
 };
 
-// 阶段计划面板（.phase-panel）：标题 + completed/total 徽章 + 折叠箭头 + 底部渐变进度条
+// 阶段计划面板（.phase-panel）：标题 + 统计串 + 折叠箭头 + 底部渐变进度条
 class PhasePanel : public QFrame
 {
     Q_OBJECT
@@ -56,6 +75,8 @@ public:
 
     // plan: { title, phases: [ { id, title, status, note, desc } ] }
     void setPlan(const QVariantMap &plan);
+    // 收起时清空内容（对应 app.js hidePhasePanel 里 el.phasePanel.innerHTML = ""）
+    void clearPlan();
     void setExpanded(bool expanded);
     bool isExpanded() const { return m_expanded; }
 
@@ -63,11 +84,12 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void clearSteps();
     void layoutProgress();
 
     QWidget *m_head = nullptr;
     QLabel *m_title = nullptr;
-    QLabel *m_count = nullptr;
+    PhaseCountLabel *m_count = nullptr;
     QLabel *m_chevron = nullptr;
     ProgressLine *m_progress = nullptr;
     QScrollArea *m_steps = nullptr;

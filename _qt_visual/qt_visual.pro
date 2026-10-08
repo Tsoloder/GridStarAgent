@@ -1,0 +1,12 @@
+TEMPLATE = app
+TARGET   = qt_visual
+CONFIG  += c++17 console
+CONFIG  -= app_bundle
+QT      += core gui widgets svg testlib
+msvc: QMAKE_CXXFLAGS += /utf-8
+DESTDIR     = $$PWD/../QtChartWidget/bin
+OBJECTS_DIR = $$PWD/build/obj
+MOC_DIR     = $$PWD/build/moc
+INCLUDEPATH += $$PWD/../QtChartWidget/include
+LIBS        += -L$$PWD/../QtChartWidget/bin -lQtChartWidget
+SOURCES += main.cpp

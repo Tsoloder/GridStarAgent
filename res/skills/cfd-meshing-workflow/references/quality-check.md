@@ -2,7 +2,7 @@
 
 ## 1. 确认对象类型
 
-manual 模式使用 `options` 询问；auto 模式根据用户原始目标自动判断：
+manual 模式调用 `ask_user_question` 询问（工具不可用时退回 `options`）；auto 模式根据用户原始目标自动判断：
 
 - 网格线质量；
 - 网格面质量；

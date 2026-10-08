@@ -14,6 +14,7 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSet>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -60,6 +61,19 @@ QVariantList visibleModels(const QVariantList &models)
     return out;
 }
 
+QVariantList configuredModels(const QVariantList &models)
+{
+    // app.js configuredModels()：下拉只列配置里写过的模型，
+    // 供应商发现来的整份目录（status === "discovered"）不进选择范围
+    QVariantList out;
+    for (const QVariant &v : visibleModels(models)) {
+        if (v.toMap().value(QStringLiteral("status")).toString() == QLatin1String("discovered"))
+            continue;
+        out.append(v);
+    }
+    return out;
+}
+
 // ------------------------------------------------------------ ListOptionRow
 
 ListOptionRow::ListOptionRow(const QString &value, const QString &name, const QString &sub,
@@ -75,21 +89,22 @@ ListOptionRow::ListOptionRow(const QString &value, const QString &name, const QS
     layout->setContentsMargins(7, 7, 7, 7);
     layout->setSpacing(7);
 
-    // grid-template-columns: 18px minmax(0,1fr) auto
+    // grid-template-columns: minmax(0,1fr) auto auto（勾已挪到最右）
     // 行内标签关掉文本交互：makeLabel 默认允许选中文本，会吃掉点击导致 mouseReleaseEvent 收不到
-    m_check = makeLabel(QStringLiteral("modelCheck"), QString(), this);
-    m_check->setTextInteractionFlags(Qt::NoTextInteraction);
-    m_check->setFixedWidth(18);
-    m_check->setAlignment(Qt::AlignCenter);
     m_name = makeLabel(QStringLiteral("modelName"), name, this);
     m_name->setTextInteractionFlags(Qt::NoTextInteraction);
     m_name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_id = makeLabel(QStringLiteral("modelId"), sub, this);
     m_id->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_check = makeLabel(QStringLiteral("modelCheck"), QString(), this);
+    m_check->setTextInteractionFlags(Qt::NoTextInteraction);
+    // .model-check{min-width:12px;justify-self:end}：勾不占位时必须留出 12px，行宽才不会跳
+    m_check->setFixedWidth(12);
+    m_check->setAlignment(Qt::AlignCenter);
 
-    layout->addWidget(m_check);
     layout->addWidget(m_name, 1);
     layout->addWidget(m_id);
+    layout->addWidget(m_check);
 }
 
 void ListOptionRow::setSelected(bool selected)
@@ -109,6 +124,14 @@ void ListOptionRow::setFocusedRow(bool focused)
     restyle(this);
 }
 
+void ListOptionRow::setCompact(bool compact)
+{
+    if (m_compact == compact)
+        return;
+    m_compact = compact;
+    m_id->setVisible(!compact);
+}
+
 void ListOptionRow::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
@@ -123,6 +146,146 @@ void ListOptionRow::resizeEvent(QResizeEvent *event)
     m_name->setText(elidedText(m_full, m_name->fontMetrics(), m_name->width()));
 }
 
+// ------------------------------------------------------------ ModeOptionRow
+
+ModeOptionRow::ModeOptionRow(const QString &value, const QString &title, const QString &hint,
+                            QWidget *parent)
+    : QWidget(parent), m_value(value)
+{
+    setClass(this, QStringLiteral("modelOption modeOption"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setCursor(Qt::PointingHandCursor);
+
+    auto *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(7, 7, 7, 7);
+    layout->setSpacing(6);
+
+    // .mode-option-text：标题 + 说明两行，说明不参与省略（webui 是 white-space:normal）
+    m_text = new QWidget(this);
+    setClass(m_text, QStringLiteral("modeOptionText"));
+    auto *textLayout = new QVBoxLayout(m_text);
+    textLayout->setContentsMargins(0, 0, 0, 0);
+    textLayout->setSpacing(2);
+    QLabel *titleLabel = makeLabel(QStringLiteral("modeOptionTitle"), title, m_text);
+    titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    QLabel *hintLabel = makeLabel(QStringLiteral("modeOptionHint"), hint, m_text);
+    hintLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    hintLabel->setWordWrap(true);
+    textLayout->addWidget(titleLabel);
+    textLayout->addWidget(hintLabel);
+
+    m_check = makeLabel(QStringLiteral("modeCheck"), QStringLiteral("✓"), this);
+    m_check->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_check->setAlignment(Qt::AlignTop | Qt::AlignRight);
+    m_check->setFixedWidth(12);
+    // .mode-check{visibility:hidden} + 选中才可见：未选中不画勾但仍占位
+    m_check->setVisible(false);
+
+    layout->addWidget(m_text, 1);
+    layout->addWidget(m_check, 0);
+}
+
+void ModeOptionRow::setSelected(bool selected)
+{
+    if (m_check)
+        m_check->setVisible(selected);
+    setProperty("selected", selected);
+    restyle(this);
+}
+
+void ModeOptionRow::setFocusedRow(bool focused)
+{
+    setProperty("focused", focused);
+    restyle(this);
+}
+
+void ModeOptionRow::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
+        emit activated(m_value);
+    QWidget::mouseReleaseEvent(event);
+}
+
+// ------------------------------------------------------------ SlashRow
+
+SlashRow::SlashRow(const QString &kind, const QString &id, const QString &name, const QString &code,
+                   const QString &desc, bool withCheck, QWidget *parent)
+    : QWidget(parent), m_kind(kind), m_id(id), m_name(name), m_code(code), m_desc(desc)
+{
+    setClass(this, QStringLiteral("slashItem"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setCursor(Qt::PointingHandCursor);
+    if (!desc.isEmpty())
+        setToolTip(desc);
+
+    auto *layout = new QHBoxLayout(this);
+    layout->setContentsMargins(7, 7, 7, 7);
+    layout->setSpacing(8);
+    // .slash-item{align-items:baseline}：三行文本同基线，说明右对齐并单行省略
+    layout->setAlignment(Qt::AlignVCenter);
+
+    QLabel *nameLabel = makeLabel(QStringLiteral("slashName"), name, this);
+    nameLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    layout->addWidget(nameLabel, 0);
+    QLabel *codeLabel = makeLabel(QStringLiteral("slashCode"), code, this);
+    codeLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    layout->addWidget(codeLabel, 0);
+    // QLabel 没有 text-overflow：说明过长时按当前宽度省略（.slash-desc 的 ellipsis）
+    m_descLabel = makeLabel(QStringLiteral("slashDesc"), desc, this);
+    m_descLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_descLabel->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_descLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    layout->addWidget(m_descLabel, 1);
+    if (withCheck) {
+        m_check = makeLabel(QStringLiteral("modelCheck"), QString(), this);
+        m_check->setTextInteractionFlags(Qt::NoTextInteraction);
+        m_check->setFixedWidth(12);
+        m_check->setAlignment(Qt::AlignCenter);
+        layout->addWidget(m_check, 0);
+    }
+}
+
+void SlashRow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    if (m_descLabel)
+        m_descLabel->setText(elidedText(m_desc, m_descLabel->fontMetrics(), m_descLabel->width()));
+}
+
+bool SlashRow::matches(const QString &query) const
+{
+    if (query.isEmpty())
+        return true;
+    return m_name.toLower().contains(query) || m_code.toLower().contains(query)
+           || m_id.toLower().contains(query);
+}
+
+void SlashRow::setSelected(bool selected)
+{
+    if (m_check) {
+        if (selected)
+            m_check->setPixmap(iconPixmap(QStringLiteral("check"),
+                                          QColor(QStringLiteral("#50badf")), 11));
+        else
+            m_check->clear();
+    }
+    setProperty("selected", selected);
+    restyle(this);
+}
+
+void SlashRow::setFocusedRow(bool focused)
+{
+    setProperty("focused", focused);
+    restyle(this);
+}
+
+void SlashRow::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && rect().contains(event->pos()))
+        emit activated(m_kind, m_id);
+    QWidget::mouseReleaseEvent(event);
+}
+
 // ------------------------------------------------------------ ListBoxPopup
 
 ListBoxPopup::ListBoxPopup(QWidget *parent)
@@ -132,7 +295,6 @@ ListBoxPopup::ListBoxPopup(QWidget *parent)
     setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_StyledBackground, true);
     setFocusPolicy(Qt::StrongFocus);
-    setFixedWidth(250);
     setMaximumHeight(280);
 
     auto *outer = new QVBoxLayout(this);
@@ -163,6 +325,7 @@ ListBoxPopup::ListBoxPopup(QWidget *parent)
 void ListBoxPopup::reset()
 {
     m_rows.clear();
+    m_modeRows.clear();
     m_focusIndex = 0;
     m_typeAhead.clear();
     while (QLayoutItem *item = m_innerLayout->takeAt(0)) {
@@ -207,8 +370,11 @@ ListOptionRow *ListBoxPopup::addRow(const QString &value, const QString &name, c
 
 void ListBoxPopup::setModelOptions(const QVariantList &models, const QString &selectedKey)
 {
+    m_preferredWidth = 330;
+    setClass(this, QStringLiteral("listbox"));
     reset();
-    const QVariantList visible = visibleModels(models);
+    // 只列配置里写过的模型：供应商发现来的整份目录不进选择范围
+    const QVariantList visible = configuredModels(models);
     // groups: provider -> items（保持出现顺序）
     QStringList providers;
     QMap<QString, QVariantList> groups;
@@ -243,7 +409,7 @@ void ListBoxPopup::setModelOptions(const QVariantList &models, const QString &se
     }
     if (providers.isEmpty()) {
         QLabel *empty = makeLabel(QStringLiteral("listboxEmpty"),
-                                  QStringLiteral("未配置可用模型"), m_inner);
+                                  QStringLiteral("没有已配置的模型"), m_inner);
         empty->setAlignment(Qt::AlignCenter);
         m_innerLayout->addWidget(empty);
     }
@@ -259,6 +425,7 @@ void ListBoxPopup::setModelOptions(const QVariantList &models, const QString &se
 
 void ListBoxPopup::setSkillOptions(const QVariantList &skills, const QString &selectedId)
 {
+    m_preferredWidth = 250;
     reset();
     QVariantList all;
     QVariantMap none;
@@ -284,8 +451,45 @@ void ListBoxPopup::setSkillOptions(const QVariantList &skills, const QString &se
     applyFocus();
 }
 
+void ListBoxPopup::setModeOptions(const QString &selectedMode)
+{
+    // .mode-listbox{width:240px}：同一个 ListBoxPopup 换脸，样式靠类属性区分
+    m_preferredWidth = 240;
+    setClass(this, QStringLiteral("listbox modeListbox"));
+    reset();
+    // app.js MODE_OPTIONS：手动 / 自动两项，每项一行标题加一行说明
+    const struct {
+        const char *value;
+        const char *title;
+        const char *hint;
+    } options[] = {
+        {"manual", "手动", "每步操作先确认参数，由审批面板把关"},
+        {"auto", "自动", "按默认参数连续执行，不逐步确认"},
+    };
+    int selectedIndex = 0;
+    for (int i = 0; i < 2; ++i) {
+        auto *row = new ModeOptionRow(QString::fromLatin1(options[i].value),
+                                      QString::fromUtf8(options[i].title),
+                                      QString::fromUtf8(options[i].hint), m_inner);
+        const bool selected = QString::fromLatin1(options[i].value) == selectedMode;
+        row->setSelected(selected);
+        if (selected)
+            selectedIndex = i;
+        connect(row, &ModeOptionRow::activated, this, [this](const QString &v) {
+            hide();
+            emit chosen(v);
+        });
+        m_innerLayout->addWidget(row);
+        m_modeRows.append(row);
+    }
+    m_focusIndex = selectedIndex;
+    applyFocus();
+}
+
 void ListBoxPopup::applyFocus()
 {
+    for (int i = 0; i < m_modeRows.size(); ++i)
+        m_modeRows.at(i)->setFocusedRow(i == m_focusIndex);
     for (int i = 0; i < m_rows.size(); ++i)
         m_rows.at(i)->setFocusedRow(i == m_focusIndex);
     if (m_rows.isEmpty())
@@ -303,9 +507,10 @@ void ListBoxPopup::applyFocus()
 
 void ListBoxPopup::moveFocus(int delta)
 {
-    if (m_rows.isEmpty())
+    const int count = m_modeRows.isEmpty() ? m_rows.size() : m_modeRows.size();
+    if (count <= 0)
         return;
-    m_focusIndex = (m_focusIndex + delta + m_rows.size()) % m_rows.size();
+    m_focusIndex = (m_focusIndex + delta + count) % count;
     applyFocus();
 }
 
@@ -313,16 +518,40 @@ void ListBoxPopup::openAbove(QWidget *anchor)
 {
     if (!anchor)
         return;
+    // webui：下拉 left:0 贴外层 .model-control 左缘、bottom:calc(100% + 7px)，
+    // 宽度 calc(100vw - 18px) 再被 max-width 截断（模型 330px / Skill 250px）
+    QWidget *host = anchor->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QApplication::desktop()->availableGeometry(anchor);
+    const bool compact = hostRect.width() <= 640;
+    for (ListOptionRow *row : m_rows)
+        row->setCompact(compact);
     m_inner->layout()->activate();
-    const int height = qMin(m_inner->sizeHint().height() + 12, 280);
-    const QRect screen = QApplication::desktop()->availableGeometry(anchor);
-    QPoint topLeft = anchor->mapToGlobal(QPoint(0, 0));
-    int x = qBound(screen.left(), topLeft.x(), screen.right() - width());
-    int y = topLeft.y() - height - 4;
-    if (y < screen.top())
-        y = qMin(topLeft.y() + anchor->height() + 4, screen.bottom() - height);
-    setGeometry(x, y, width(), height);
+    const int width = qMax(0, qMin(m_preferredWidth, hostRect.width() - 18));
+    // 绝对定位的包含块是 .model-control 的 padding box（border-box 内缩 1px 边框）
+    const QPoint topLeft = anchor->mapToGlobal(anchor->contentsRect().topLeft());
+    const int minX = hostRect.left();
+    const int maxX = qMax(minX, hostRect.right() - width);
+    const int x = qBound(minX, topLeft.x(), maxX);
+
+    const auto anchoredY = [&](int popupHeight) {
+        // bottom:calc(100% + 7px)：底边贴着控件上方 7px
+        int y = topLeft.y() - popupHeight - 7;
+        // 上方空间不够时翻到下面（webui 没有这一支，属于兜底）
+        if (y < hostRect.top())
+            y = qMin(anchor->mapToGlobal(QPoint(0, 0)).y() + anchor->height() + 7,
+                     hostRect.bottom() - popupHeight);
+        return y;
+    };
+
+    const int estimated = qMin(m_inner->sizeHint().height() + 12, 280);
+    setGeometry(x, anchoredY(estimated), width, estimated);
     show();
+    // 样式表要等 show() 之后才 polish，隐藏状态下量到的 sizeHint 偏小，窗口会被布局的最小高度顶大；
+    // 按定稿高度重贴一次，保持底边贴着锚点（webui 的弹层底边固定、向上生长）。
+    const int settled = height();
+    if (settled != estimated)
+        setGeometry(x, anchoredY(settled), width, settled);
     raise();
     setFocus(Qt::PopupFocusReason);
     applyFocus();
@@ -342,7 +571,12 @@ void ListBoxPopup::keyPressEvent(QKeyEvent *event)
         return;
     case Qt::Key_Enter:
     case Qt::Key_Return:
-        if (!m_rows.isEmpty()) {
+        if (!m_modeRows.isEmpty()) {
+            const QString value =
+                m_modeRows.at(qBound(0, m_focusIndex, m_modeRows.size() - 1))->value();
+            hide();
+            emit chosen(value);
+        } else if (!m_rows.isEmpty()) {
             const QString value = m_rows.at(qBound(0, m_focusIndex, m_rows.size() - 1))->value();
             hide();
             emit chosen(value);
@@ -368,13 +602,321 @@ void ListBoxPopup::keyPressEvent(QKeyEvent *event)
     QFrame::keyPressEvent(event);
 }
 
-// ------------------------------------------------------------ SessionPanel
+// ------------------------------------------------------------ SlashPanel
+
+SlashPanel::SlashPanel(QWidget *parent)
+    : QFrame(parent)
+{
+    setObjectName(QStringLiteral("slashMenu"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    setFocusPolicy(Qt::NoFocus);
+
+    auto *outer = new QVBoxLayout(this);
+    // .slash-menu{padding:5px;max-height:264px;overflow:auto}
+    outer->setContentsMargins(5, 5, 5, 5);
+    outer->setSpacing(0);
+
+    m_scroll = new QScrollArea(this);
+    m_scroll->setObjectName(QStringLiteral("slashScroll"));
+    m_scroll->setWidgetResizable(true);
+    m_scroll->setFrameShape(QFrame::NoFrame);
+    m_scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scroll->viewport()->setAutoFillBackground(false);
+
+    m_inner = new QWidget(m_scroll);
+    setClass(m_inner, QStringLiteral("slashInner"));
+    m_innerLayout = new QVBoxLayout(m_inner);
+    m_innerLayout->setContentsMargins(0, 0, 0, 0);
+    m_innerLayout->setSpacing(0);
+    m_scroll->setWidget(m_inner);
+    outer->addWidget(m_scroll);
+
+    m_empty = makeLabel(QStringLiteral("listboxEmpty"), QStringLiteral("没有匹配的技能或指令"),
+                        m_inner);
+    m_empty->setAlignment(Qt::AlignCenter);
+    m_empty->setVisible(false);
+    m_innerLayout->addWidget(m_empty);
+}
+
+void SlashPanel::clearRows()
+{
+    m_rows.clear();
+    m_entries.clear();
+    m_focusIndex = -1;
+    // m_empty 是常驻子控件（全空才显示），重建时不能跟着删
+    while (QLayoutItem *item = m_innerLayout->takeAt(0)) {
+        if (QWidget *w = item->widget()) {
+            if (w == m_empty)
+                continue;
+            w->deleteLater();
+        }
+        delete item;
+    }
+    m_innerLayout->addWidget(m_empty);
+    if (m_search) {
+        m_search->deleteLater();
+        m_search = nullptr;
+    }
+}
+
+SlashRow *SlashPanel::addRow(const QString &groupLabel, const QString &kind, const QString &id,
+                             const QString &name, const QString &code, const QString &desc,
+                             bool withCheck)
+{
+    // .slash-group：整组没命中时连标题一起藏
+    QWidget *group = nullptr;
+    if (!groupLabel.isEmpty()) {
+        // 同一组的行共享一个 .slash-group 容器
+        if (!m_entries.isEmpty() && m_entries.last().group
+            && m_entries.last().group->property("groupLabel").toString() == groupLabel) {
+            group = m_entries.last().group;
+        } else {
+            group = new QWidget(m_inner);
+            setClass(group, QStringLiteral("slashGroup"));
+            group->setProperty("groupLabel", groupLabel);
+            auto *groupLayout = new QVBoxLayout(group);
+            groupLayout->setContentsMargins(0, 0, 0, 0);
+            groupLayout->setSpacing(0);
+            QLabel *label = makeLabel(QStringLiteral("slashGroupLabel"), groupLabel, group);
+            label->setTextInteractionFlags(Qt::NoTextInteraction);
+            groupLayout->addWidget(label);
+            m_innerLayout->addWidget(group);
+        }
+    }
+    auto *row = new SlashRow(kind, id, name, code, desc, withCheck, group ? group : m_inner);
+    if (group)
+        group->layout()->addWidget(row);
+    else
+        m_innerLayout->addWidget(row);
+    if (withCheck) {
+        const QString current = kind == QLatin1String("model")
+                                    ? property("selectedModel").toString()
+                                    : property("selectedSkill").toString();
+        row->setSelected(id == current);
+    }
+    connect(row, &SlashRow::activated, this, [this](const QString &k, const QString &rowId) {
+        emit itemChosen(k, rowId);
+    });
+    m_rows.append(row);
+    RowEntry entry;
+    entry.row = row;
+    entry.group = group;
+    entry.kind = kind;
+    entry.id = id;
+    m_entries.append(entry);
+    return row;
+}
+
+void SlashPanel::setRootOptions(const QVariantList &skills, const QString &selectedSkill,
+                                const QString &selectedModel)
+{
+    m_mode = QStringLiteral("root");
+    setProperty("selectedSkill", selectedSkill);
+    setProperty("selectedModel", selectedModel);
+    clearRows();
+    // 指令在前：模型、导出这类动作比技能更常用
+    addRow(QStringLiteral("指令"), QStringLiteral("command"), QStringLiteral("model"),
+           QStringLiteral("模型"), QStringLiteral("model"),
+           QStringLiteral("选择本次会话使用的模型"), false);
+    addRow(QStringLiteral("指令"), QStringLiteral("command"), QStringLiteral("export"),
+           QStringLiteral("导出对话"), QStringLiteral("export"),
+           QStringLiteral("把当前会话导出为 Markdown 文件"), false);
+    addRow(QStringLiteral("技能"), QStringLiteral("skill"), QString(), QStringLiteral("不启用技能"),
+           QStringLiteral("—"), QStringLiteral("默认：按消息内容自动匹配技能"), false);
+    for (const QVariant &v : skills) {
+        const QVariantMap item = v.toMap();
+        const QString id = item.value(QStringLiteral("id")).toString();
+        addRow(QStringLiteral("技能"), QStringLiteral("skill"), id,
+               item.value(QStringLiteral("name")).toString().isEmpty()
+                   ? id
+                   : item.value(QStringLiteral("name")).toString(),
+               id, item.value(QStringLiteral("description")).toString(), false);
+    }
+    m_inner->layout()->activate();
+}
+
+void SlashPanel::setModelOptions(const QVariantList &models, const QString &selectedModel)
+{
+    m_mode = QStringLiteral("model");
+    setProperty("selectedModel", selectedModel);
+    setProperty("selectedSkill", QString());
+    clearRows();
+    // 模型面板顶部多一个过滤输入框，过滤词与正文无关（模型面板里正文还是 "/"）
+    m_search = new QLineEdit(m_inner);
+    m_search->setObjectName(QStringLiteral("slashSearch"));
+    m_search->setPlaceholderText(QStringLiteral("搜索模型..."));
+    m_search->setAttribute(Qt::WA_MacShowFocusRect, false);
+    connect(m_search, &QLineEdit::textChanged, this, [this](const QString &text) {
+        setQuery(text);
+    });
+    m_search->installEventFilter(this);
+    m_innerLayout->addWidget(m_search);
+
+    for (const QVariant &v : configuredModels(models)) {
+        const QVariantMap item = v.toMap();
+        const QString key = modelKey(item);
+        const QString code = item.value(QStringLiteral("model_id")).toString().isEmpty()
+                                 ? item.value(QStringLiteral("id")).toString()
+                                 : item.value(QStringLiteral("model_id")).toString();
+        const QString provider = item.value(QStringLiteral("provider_name")).toString().isEmpty()
+                                     ? item.value(QStringLiteral("provider")).toString()
+                                     : item.value(QStringLiteral("provider_name")).toString();
+        addRow(QStringLiteral("模型"), QStringLiteral("model"), key, modelName(item),
+               code.isEmpty() ? key : code, provider, true);
+    }
+    m_inner->layout()->activate();
+}
+
+void SlashPanel::setQuery(const QString &query)
+{
+    m_query = query.trimmed().toLower();
+    applyFilter();
+}
+
+void SlashPanel::focusSearch()
+{
+    if (m_search)
+        m_search->setFocus(Qt::OtherFocusReason);
+}
+
+void SlashPanel::resetToRoot()
+{
+    m_mode = QStringLiteral("root");
+    m_query.clear();
+}
+
+void SlashPanel::applyFilter()
+{
+    if (m_entries.isEmpty())
+        return;
+    const QString previous = focusedRow() ? focusedRow()->id() : QString();
+    int shown = 0;
+    QSet<QWidget *> groupHits;
+    for (RowEntry &entry : m_entries) {
+        const bool hit = entry.row->matches(m_query);
+        // 过滤后只是隐藏，不重建：删字变宽时能重新出现，也不会每敲一个字丢掉一次按键
+        entry.shown = hit;
+        entry.row->setVisible(hit);
+        if (hit) {
+            ++shown;
+            if (entry.group)
+                groupHits.insert(entry.group);
+        }
+    }
+    for (const RowEntry &entry : m_entries) {
+        if (entry.group)
+            entry.group->setVisible(groupHits.contains(entry.group));
+    }
+    m_empty->setText(m_mode == QLatin1String("model") ? QStringLiteral("没有匹配的已配置模型")
+                                                      : QStringLiteral("没有匹配的技能或指令"));
+    m_empty->setVisible(shown == 0);
+    m_inner->layout()->activate();
+
+    const QList<SlashRow *> rows = visibleRows();
+    int index = 0;
+    for (int i = 0; i < rows.size(); ++i) {
+        if (rows.at(i)->id() == previous) {
+            index = i;
+            break;
+        }
+    }
+    focusRow(index);
+}
+
+void SlashPanel::focusRow(int index)
+{
+    for (int i = 0; i < m_rows.size(); ++i)
+        m_rows.at(i)->setFocusedRow(false);
+    m_focusIndex = index;
+    SlashRow *row = focusedRow();
+    if (row)
+        row->setFocusedRow(true);
+}
+
+void SlashPanel::moveFocus(int delta)
+{
+    const QList<SlashRow *> rows = visibleRows();
+    if (rows.isEmpty())
+        return;
+    const int current = qMax(0, rows.indexOf(focusedRow()));
+    focusRow((current + delta + rows.size()) % rows.size());
+}
+
+bool SlashPanel::chooseFocused()
+{
+    SlashRow *row = focusedRow();
+    if (!row)
+        return false;
+    emit itemChosen(row->kind(), row->id());
+    return true;
+}
+
+SlashRow *SlashPanel::focusedRow() const
+{
+    for (SlashRow *row : m_rows) {
+        if (row->property("focused").toBool())
+            return row;
+    }
+    return nullptr;
+}
+
+QList<SlashRow *> SlashPanel::visibleRows() const
+{
+    QList<SlashRow *> out;
+    for (const RowEntry &entry : m_entries) {
+        if (entry.shown)
+            out.append(entry.row);
+    }
+    return out;
+}
+
+int SlashPanel::heightForContent(int width)
+{
+    // 先按定稿宽度把内容重排一次：说明文字要按最终宽度省略，量到的才是真高度
+    const int contentWidth = qMax(0, width - 10);
+    m_inner->setFixedWidth(contentWidth);
+    m_inner->layout()->activate();
+    const int content = m_inner->sizeHint().height() + 10;
+    // .slash-menu{max-height:264px}
+    return qBound(0, content, 264);
+}
+
+bool SlashPanel::eventFilter(QObject *watched, QEvent *event)
+{
+    if (watched == m_search && event->type() == QEvent::KeyPress) {
+        auto *key = static_cast<QKeyEvent *>(event);
+        switch (key->key()) {
+        case Qt::Key_Down:
+            moveFocus(1);
+            return true;
+        case Qt::Key_Up:
+            moveFocus(-1);
+            return true;
+        case Qt::Key_Enter:
+        case Qt::Key_Return:
+            return chooseFocused();
+        case Qt::Key_Escape:
+            hide();
+            return true;
+        default:
+            break;
+        }
+    }
+    return QFrame::eventFilter(watched, event);
+}
+
+void SlashPanel::mouseReleaseEvent(QMouseEvent *event)
+{
+    // 空白处点击不关面板（webui 同理：只有选项或外部点击才收起）
+    QFrame::mouseReleaseEvent(event);
+}
 
 QRect SessionPanel::areaFor(const QSize &host)
 {
+    // webui .session-panel：top:126px;left/right:8px;max-height:calc(100% - 154px)
     const int width = qMax(0, host.width() - 16);
-    const int height = qMax(0, qMin(430, host.height() - 120));
-    return QRect(8, 92, width, height);
+    const int maxHeight = qMax(0, host.height() - 154);
+    return QRect(8, 126, width, maxHeight);
 }
 
 SessionPanel::SessionPanel(QWidget *parent)
@@ -389,6 +931,7 @@ SessionPanel::SessionPanel(QWidget *parent)
     outer->setSpacing(0);
 
     auto *head = new QWidget(this);
+    m_head = head;
     head->setObjectName(QStringLiteral("panelHead"));
     head->setAttribute(Qt::WA_StyledBackground, true);
     auto *headLayout = new QHBoxLayout(head);
@@ -417,6 +960,7 @@ SessionPanel::SessionPanel(QWidget *parent)
     scroll->viewport()->setAutoFillBackground(false);
     scroll->setStyleSheet(QStringLiteral("QScrollArea#sessionScroll{border:0;background:transparent;}"));
     auto *list = new QWidget(scroll);
+    m_list = list;
     list->setObjectName(QStringLiteral("sessionList"));
     list->setStyleSheet(QStringLiteral("QWidget#sessionList{background:transparent;}"));
     m_listLayout = new QVBoxLayout(list);
@@ -458,8 +1002,11 @@ void SessionPanel::render()
     if (shown.isEmpty()) {
         QLabel *empty = makeLabel(QStringLiteral("listboxEmpty"), QStringLiteral("没有会话"), this);
         empty->setAlignment(Qt::AlignCenter);
+        empty->ensurePolished(); // QSS 的边距要先落地，量出的空状态高度才是最终值
         m_listLayout->addWidget(empty);
+        empty->show();
         m_listLayout->addStretch(1);
+        syncHostLayout();
         return;
     }
 
@@ -483,17 +1030,22 @@ void SessionPanel::render()
         select->setCursor(Qt::PointingHandCursor);
         auto *selectLayout = new QVBoxLayout(select);
         selectLayout->setContentsMargins(7, 9, 7, 9);
-        selectLayout->setSpacing(2);
+        // webui 的 .session-text 里 strong/small 是紧邻的块，没有间隙（实测 18+16=34）
+        selectLayout->setSpacing(0);
         QLabel *titleLabel = makeLabel(QStringLiteral("sessionTitle"),
                                        title.isEmpty() ? QStringLiteral("未命名会话") : title, select);
         titleLabel->setTextInteractionFlags(Qt::NoTextInteraction);
         titleLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+        // QSS 没有 line-height：Chromium 的 normal 行盒是 1.38em（13px→18、11px→16），
+        // Qt 只有 1.23em（13px→16、11px→13），这里按 webui 实测行盒补足最小值（会话行 44→53）
+        titleLabel->setMinimumHeight(18);
         QString stamp = session.value(QStringLiteral("updated_at")).toString();
         if (stamp.isEmpty())
             stamp = session.value(QStringLiteral("created_at")).toString();
         stamp = stamp.left(16).replace(QLatin1Char('T'), QLatin1Char(' '));
         QLabel *meta = makeLabel(QStringLiteral("sessionMeta"), stamp, select);
         meta->setTextInteractionFlags(Qt::NoTextInteraction);
+        meta->setMinimumHeight(16); // .session-select small：11px / 行盒 16
 
         // 状态徽标（.session-badge）：前端实时状态优先，刷新后靠服务端 active/waiting 兜底
         QString status = session.value(QStringLiteral("status")).toString();
@@ -550,7 +1102,13 @@ void SessionPanel::render()
 
         rowLayout->addWidget(select, 1);
         rowLayout->addWidget(actions);
+        // QSS（.session-badge 的 padding 等）要先落地：行刚建出来还没显示过时
+        // sizeHint 偏小，面板按它收缩会把最后一行截掉
+        row->ensurePolished();
         m_listLayout->addWidget(row);
+        // 隐藏控件在布局里算「空项」（QWidgetItem::isEmpty），sizeHint/heightForWidth 会把它当 0：
+        // 面板打开期间过滤出的新行、面板打开前 setSessions() 建的行，都要显式 show 才量得到高度
+        row->show();
 
         select->installEventFilter(this);
         select->setProperty("sessionId", id);
@@ -562,6 +1120,17 @@ void SessionPanel::render()
         connect(buttons.at(2), &QPushButton::clicked, this, [this, id] { emit sessionDeleted(id); });
     }
     m_listLayout->addStretch(1);
+    syncHostLayout();
+}
+
+// 面板打开期间内容变换（搜索过滤、会话刷新）后要立刻跟着宿主重排：
+// webui 的 max-height 只是上限，内容变少时面板必须收缩，否则行会被旧高度留在半空/被底边截断。
+void SessionPanel::syncHostLayout()
+{
+    if (!m_open)
+        return;
+    if (QWidget *host = parentWidget())
+        layoutIn(host->size());
 }
 
 bool SessionPanel::eventFilter(QObject *watched, QEvent *event)
@@ -610,7 +1179,15 @@ bool SessionPanel::isOpen() const
 
 void SessionPanel::layoutIn(const QSize &host)
 {
-    setGeometry(areaFor(host));
+    const QRect area = areaFor(host);
+    // 行刚增删完时列表布局还没跑过，先定稿再量自然高度
+    if (m_listLayout)
+        m_listLayout->activate();
+    // webui 面板没有固定高度：内容少时收到内容高，内容多时被 max-height 截断并滚动
+    const int naturalHeight = (m_head ? m_head->sizeHint().height() : 0)
+                              + (m_list ? m_list->sizeHint().height() : 0);
+    const int height = qMin(area.height(), qMax(sizeHint().height(), naturalHeight));
+    setGeometry(area.x(), area.y(), area.width(), height);
 }
 
 // ------------------------------------------------------- ThemeListPopup
@@ -662,17 +1239,28 @@ void ThemeListPopup::openBelow(QWidget *anchor)
 {
     if (!anchor)
         return;
-    adjustSize();
+    // .theme-listbox{top:32px;right:0;width:132px}：28px 触发器 + 4px 间距，右缘与触发器对齐
+    QWidget *host = anchor->window();
+    const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                : QRect(anchor->mapToGlobal(QPoint(0, 0)), anchor->size());
     const QPoint below = anchor->mapToGlobal(QPoint(0, anchor->height() + 4));
-    int x = below.x() + anchor->width() - width();
-    int y = below.y();
-    if (QWidget *screenWidget = anchor->window()) {
-        const QRect host = screenWidget->geometry();
-        x = qBound(host.left() + 6, x, host.right() - width() - 6);
-        y = qMin(y, host.bottom() - height() - 6);
-    }
-    move(x, y);
+    const auto anchoredPos = [&](int popupHeight) {
+        const int minX = hostRect.left() + 6;
+        const int x = qBound(minX, below.x() + anchor->width() - width(),
+                             qMax(minX, hostRect.right() - width() - 6));
+        const int y = qMin(below.y(),
+                           qMax(hostRect.top() + 6, hostRect.bottom() - popupHeight - 6));
+        return QPoint(x, y);
+    };
+
+    adjustSize();
+    // 隐藏状态下量到的高度偏小，先落位，show() 之后按定稿高度重贴一次
+    const int estimated = height();
+    move(anchoredPos(estimated));
     show();
+    const int settled = height();
+    if (settled != estimated)
+        move(anchoredPos(settled));
     raise();
 }
 
@@ -752,7 +1340,10 @@ ConfirmDialog::ConfirmDialog(const QString &title, const QString &message, const
     setObjectName(QStringLiteral("confirmDialog"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setModal(true);
-    setFixedWidth(380);
+    // CSS .confirm-dialog{width:92vw;max-width:380px}：设置中心最小宽 360（<380），
+    // 固定 380 会在窄宿主下溢出，这里按父窗口宽度收窄
+    const int hostWidth = parent ? parent->window()->width() : 0;
+    setFixedWidth(hostWidth > 0 ? qMin(380, qRound(hostWidth * 0.92)) : 380);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(16, 16, 16, 16);

@@ -29,7 +29,7 @@
     ]
   },
   "options": [
-    {"label": "✅ 确认执行", "value": "confirm", "style": "primary"},
+    {"label": "确认执行", "value": "confirm", "style": "primary"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }
@@ -89,14 +89,14 @@
 
 ## 5. 后续操作
 
-分割完成后，manual 模式使用 `options` 询问用户是否需要基于分割结果做进一步操作；auto 模式根据用户原始目标自动判断下一步。标准链中本阶段的下一步固定为"按分组生成表面网格"，随后进入各向异性处理与后缘面处理。
+分割完成后，manual 模式调用 `ask_user_question` 询问用户是否需要基于分割结果做进一步操作（工具不可用时退回 `options`）；auto 模式根据用户原始目标自动判断下一步。标准链中本阶段的下一步固定为"按分组生成表面网格"，随后进入各向异性处理与后缘面处理。
 
 ```json
 {
   "options": [
-    {"label": "1️⃣ 按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
-    {"label": "2️⃣ 导出分割结果", "value": "export_result", "style": "default"},
-    {"label": "3️⃣ 查看分组详情", "value": "view_details", "style": "default"}
+    {"label": "按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
+    {"label": "导出分割结果", "value": "export_result", "style": "default"},
+    {"label": "查看分组详情", "value": "view_details", "style": "default"}
   ]
 }
 ```

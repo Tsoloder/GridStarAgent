@@ -9,6 +9,7 @@
 #include "settingsdialog.h"
 #include "theme.h"
 #include "trajectoryview.h"
+#include "usagepanel.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -26,12 +27,16 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QFontMetrics>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QShortcut>
+#include <QSpacerItem>
 #include <QStringList>
+#include <QTableWidget>
+#include <QTableWidgetItem>
 #include <QThread>
 #include <QTimer>
 #include <QUrl>
@@ -42,6 +47,38 @@ namespace {
 
 // app.js ASK_USER_TOOL：询问类工具调用不落成工具条目，改由输入框上方的浮层承担
 const char kAskUserTool[] = "ask_user_question";
+
+// QLayout treats negative margins as "unset". Keep the normal flow size and
+// overlap the phase dock with the composer when WebUI's lift is negative.
+class PhaseLiftLayout : public QVBoxLayout
+{
+public:
+    explicit PhaseLiftLayout(QWidget *parent) : QVBoxLayout(parent) {}
+
+    void setPhaseWidget(QWidget *widget) { m_phaseWidget = widget; }
+
+    void setPhaseOverlap(int overlap)
+    {
+        if (m_overlap == overlap)
+            return;
+        m_overlap = qMax(0, overlap);
+        invalidate();
+    }
+
+    void setGeometry(const QRect &rect) override
+    {
+        QVBoxLayout::setGeometry(rect);
+        if (!m_phaseWidget || m_overlap <= 0)
+            return;
+        const QRect geometry = m_phaseWidget->geometry();
+        m_phaseWidget->move(geometry.x(), geometry.y() + m_overlap);
+        m_phaseWidget->raise();
+    }
+
+private:
+    QWidget *m_phaseWidget = nullptr;
+    int m_overlap = 0;
+};
 
 // app.js usageModelLabel：后端回传的是 provider ID（如 custom），这里换成用户配置的供应商名称
 QString usageModelLabel(const QVariantList &models, const QString &raw)
@@ -98,6 +135,32 @@ bool hasClassOrAncestor(QWidget *widget, const char *cls)
             return true;
     }
     return false;
+}
+
+// app.js railTurnText：轮次摘要取该轮用户消息的正文，空则给占位。
+// copyText 由调用方在 createMessage 之后回填，所以再退到渲染用的正文
+QString turnText(MessageWidget *message)
+{
+    QString text = message->property("copyText").toString().simplified();
+    if (text.isEmpty() && message->body())
+        text = message->body()->text().simplified();
+    return text.isEmpty() ? QStringLiteral("（本轮无文本内容）") : text;
+}
+
+// 清空布局里的全部条目（含嵌套布局）
+void clearLayoutItems(QLayout *layout)
+{
+    if (!layout)
+        return;
+    while (QLayoutItem *item = layout->takeAt(0)) {
+        if (QWidget *w = item->widget())
+            w->deleteLater();
+        else if (QLayout *child = item->layout()) {
+            clearLayoutItems(child);
+            delete child;
+        }
+        delete item;
+    }
 }
 
 // app.js extractPhase
@@ -219,7 +282,8 @@ ChartWidget::ChartWidget(QWidget *parent)
     zoomResetShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(zoomResetShortcut, &QShortcut::activated, this, &ChartWidget::zoomReset);
 
-    m_root = new QVBoxLayout(this);
+    auto *rootLayout = new PhaseLiftLayout(this);
+    m_root = rootLayout;
     m_root->setContentsMargins(0, 0, 0, 0);
     m_root->setSpacing(0);
 
@@ -241,8 +305,11 @@ ChartWidget::ChartWidget(QWidget *parent)
     phaseLayout->setSpacing(0);
     m_phasePanel = new PhasePanel(m_phaseWrap);
     phaseLayout->addWidget(m_phasePanel);
+    m_phaseLiftSpacer = new QSpacerItem(0, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
+    phaseLayout->addSpacerItem(m_phaseLiftSpacer);
     m_phaseWrap->setVisible(false);
     m_root->addWidget(m_phaseWrap);
+    rootLayout->setPhaseWidget(m_phaseWrap);
 
     m_composer = new Composer(this);
     m_root->addWidget(m_composer);
@@ -282,6 +349,7 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_composer, &Composer::modeChanged, this, &ChartWidget::modeChanged);
     connect(m_composer, &Composer::modelSelected, this, &ChartWidget::modelSelected);
     connect(m_composer, &Composer::skillSelected, this, &ChartWidget::skillSelected);
+    connect(m_composer, &Composer::exportRequested, this, &ChartWidget::sessionExportRequested);
     connect(m_composer, &Composer::settingsRequested, this, [this] { openSettings(); });
     connect(m_composer, &Composer::attachRequested, this, &ChartWidget::attachRequested);
     connect(m_composer, &Composer::voiceRequested, this, &ChartWidget::voiceRequested);
@@ -306,6 +374,8 @@ ChartWidget::ChartWidget(QWidget *parent)
             &ChartWidget::refreshSkillsRequested);
     connect(m_settings, &SettingsDialog::refreshMcpRequested, this,
             &ChartWidget::refreshMcpRequested);
+    connect(m_settings, &SettingsDialog::usageStatsRequested, this,
+            &ChartWidget::usageStatsRequested);
 
     // 消息区滚动：贴底才跟随；离开底部即交出滚动控制权，同时刷新导航轨高亮
     connect(m_messages->verticalScrollBar(), &QScrollBar::valueChanged, this, [this] {
@@ -495,19 +565,57 @@ void ChartWidget::buildTurnRail()
     layout->setSpacing(6);
     layout->setAlignment(Qt::AlignHCenter);
     m_turnRail->setVisible(false);
+    // 鼠标进入轨道区域即展开右侧整轮列表（对应 app.js 的 mouseenter / mouseleave）
+    m_turnRail->installEventFilter(this);
 
-    m_turnRailTip = new QFrame(this);
-    m_turnRailTip->setObjectName(QStringLiteral("turnRailTip"));
-    m_turnRailTip->setAttribute(Qt::WA_StyledBackground, true);
-    m_turnRailTip->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    auto *tipLayout = new QVBoxLayout(m_turnRailTip);
-    tipLayout->setContentsMargins(9, 7, 9, 7);
-    m_turnRailTipText = new QLabel(m_turnRailTip);
-    m_turnRailTipText->setObjectName(QStringLiteral("turnRailTipText"));
-    m_turnRailTipText->setWordWrap(true);
-    m_turnRailTipText->setTextInteractionFlags(Qt::NoTextInteraction);
-    tipLayout->addWidget(m_turnRailTipText);
-    m_turnRailTip->setVisible(false);
+    // .turn-rail-panel：贴在轨道右侧展开，一轮一行（序号 + 提问摘要），点击行跳转
+    m_turnRailPanel = new QFrame(this);
+    m_turnRailPanel->setObjectName(QStringLiteral("turnRailPanel"));
+    setClass(m_turnRailPanel, QStringLiteral("turnRailPanel"));
+    m_turnRailPanel->setAttribute(Qt::WA_StyledBackground, true);
+    // webui：width:300px;max-width:min(300px,calc(100vw - 26px))，宽度随窗口收缩
+    m_turnRailPanel->setMaximumWidth(300);
+    auto *panelLayout = new QVBoxLayout(m_turnRailPanel);
+    panelLayout->setContentsMargins(0, 0, 0, 0);
+    panelLayout->setSpacing(0);
+
+    auto *head = new QWidget(m_turnRailPanel);
+    setClass(head, QStringLiteral("turnRailHead"));
+    head->setAttribute(Qt::WA_StyledBackground, true);
+    auto *headLayout = new QHBoxLayout(head);
+    headLayout->setContentsMargins(10, 7, 10, 7);
+    headLayout->setSpacing(8);
+    QLabel *headTitle = makeLabel(QStringLiteral("turnRailHeadTitle"), QStringLiteral("对话轮次"), head);
+    headTitle->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_turnRailCount = makeLabel(QStringLiteral("turnRailHeadCount"), QString(), head);
+    m_turnRailCount->setTextInteractionFlags(Qt::NoTextInteraction);
+    headLayout->addWidget(headTitle);
+    headLayout->addStretch(1);
+    headLayout->addWidget(m_turnRailCount);
+    panelLayout->addWidget(head);
+
+    m_turnRailScroll = new QScrollArea(m_turnRailPanel);
+    m_turnRailScroll->setObjectName(QStringLiteral("turnRailScroll"));
+    m_turnRailScroll->setFrameShape(QFrame::NoFrame);
+    m_turnRailScroll->setWidgetResizable(true);
+    m_turnRailScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_turnRailScroll->viewport()->setAutoFillBackground(false);
+    m_turnRailList = new QWidget(m_turnRailScroll);
+    m_turnRailList->setObjectName(QStringLiteral("turnRailList"));
+    m_turnRailListLayout = new QVBoxLayout(m_turnRailList);
+    m_turnRailListLayout->setContentsMargins(4, 4, 4, 4);
+    m_turnRailListLayout->setSpacing(0);
+    m_turnRailListLayout->addStretch(1);
+    m_turnRailScroll->setWidget(m_turnRailList);
+    panelLayout->addWidget(m_turnRailScroll, 1);
+
+    m_turnRailPanel->setVisible(false);
+    m_turnRailPanel->installEventFilter(this);
+    // 离开轨道 / 列表留一点延迟再收起：从白点移到右侧列表要跨过间隙，不能让面板闪退
+    m_turnRailHideTimer = new QTimer(this);
+    m_turnRailHideTimer->setSingleShot(true);
+    m_turnRailHideTimer->setInterval(180);
+    connect(m_turnRailHideTimer, &QTimer::timeout, this, &ChartWidget::hideTurnRailPanel);
 }
 
 QWidget *ChartWidget::createEmptyState()
@@ -536,8 +644,15 @@ QWidget *ChartWidget::createEmptyState()
     hint->setObjectName(QStringLiteral("emptyHint"));
     hint->setAlignment(Qt::AlignCenter);
     hint->setWordWrap(true);
-    hint->setMaximumWidth(270); // .empty-state p { max-width:270px; margin:7px 0 }
+    // .empty-state p { max-width:270px; margin:7px 0 }：只给 max-width 时 QLabel 的 sizeHint
+    // 会收到单行宽（实测 120px），两行文本被裁成一行且右侧截断；这里定宽再按字体度量给最小高
+    hint->setFixedWidth(270);
     hint->setContentsMargins(0, 7, 0, 7);
+    {
+        const QFontMetrics metrics(hint->font());
+        const QRect needed = metrics.boundingRect(QRect(0, 0, 270, 0), Qt::TextWordWrap, hint->text());
+        hint->setMinimumHeight(needed.height() + 14); // + margin:7px 上下
+    }
 
     layout->addStretch(1);
     layout->addWidget(symbol, 0, Qt::AlignHCenter);
@@ -609,8 +724,8 @@ void ChartWidget::layoutOverlays()
         const int top = qMax(0, (host.height() - railHeight) / 2);
         m_turnRail->setGeometry(0, top, 12, railHeight);
     }
-    if (m_turnRailTip && m_turnRailTip->isVisible())
-        showTurnRailTip(m_railActive);
+    if (m_turnRailPanel && m_turnRailPanel->isVisible())
+        layoutTurnRailPanel();
 }
 
 void ChartWidget::scrollToEnd(bool force)
@@ -622,7 +737,23 @@ void ChartWidget::scrollToEnd(bool force)
     else if (!m_followBottom)
         return; // 贴底才跟随
     QScrollBar *bar = m_messages->verticalScrollBar();
-    QTimer::singleShot(0, this, [bar] { bar->setValue(bar->maximum()); });
+    pinToBottom(3);
+}
+
+// 立刻跳到当前最大值，并在随后几轮事件循环里补跳：实时载入历史时消息控件是刚建出来的，
+// 布局/滚动条范围要等 LayoutRequest 处理完才生效，单次 singleShot(0) 会读到 maximum()==0
+// 而停在顶部（webui 载入历史后停在最新消息）。retries 次链式回调保证在范围定稿后贴底。
+void ChartWidget::pinToBottom(int retries)
+{
+    QScrollBar *bar = m_messages->verticalScrollBar();
+    bar->setValue(bar->maximum());
+    if (retries <= 0)
+        return;
+    QTimer::singleShot(0, this, [this, retries] {
+        if (!m_followBottom)
+            return; // 用户已经往上滚了，别再抢滚动条
+        pinToBottom(retries - 1);
+    });
 }
 
 bool ChartWidget::atBottom() const
@@ -657,29 +788,46 @@ void ChartWidget::rebuildTurnRail()
         }
     }
     if (!same) {
-        hideTurnRailTip();
+        hideTurnRailPanel();
         m_railTurns.clear();
         m_railDots.clear();
-        // 清空轨道上的旧点
-        if (QLayout *layout = m_turnRail->layout()) {
-            while (QLayoutItem *item = layout->takeAt(0)) {
-                if (QWidget *w = item->widget())
-                    w->deleteLater();
-                delete item;
-            }
+        m_railRows.clear();
+        // 清空轨道上的旧点与列表面板里的旧行
+        clearLayoutItems(m_turnRail->layout());
+        if (m_turnRailListLayout) {
+            clearLayoutItems(m_turnRailListLayout);
+            m_turnRailListLayout->addStretch(1); // 行按顺序插到弹簧之前
         }
+        m_turnRailCount->setText(turns.isEmpty() ? QString()
+                                                 : QStringLiteral("%1 轮").arg(turns.size()));
         for (int i = 0; i < turns.size(); ++i) {
+            const QString text = turnText(turns.at(i));
             auto *dot = new TurnRailDot(i, m_turnRail);
             connect(dot, &TurnRailDot::activated, this, &ChartWidget::focusTurn);
-            connect(dot, &TurnRailDot::hovered, this, &ChartWidget::showTurnRailTip);
-            connect(dot, &TurnRailDot::unhovered, this, &ChartWidget::hideTurnRailTip);
             if (auto *layout = qobject_cast<QVBoxLayout *>(m_turnRail->layout()))
                 layout->addWidget(dot, 0, Qt::AlignHCenter);
+
+            auto *row = new TurnRailRow(i, text, m_turnRailList);
+            connect(row, &TurnRailRow::activated, this, [this](int turn) {
+                focusTurn(turn);
+                // 点击行即跳转并收起面板（与 app.js 一致；点白点不收起）
+                hideTurnRailPanel();
+            });
+            m_turnRailListLayout->insertWidget(m_turnRailListLayout->count() - 1, row);
+
             m_railTurns.append(turns.at(i));
             m_railDots.append(dot);
+            m_railRows.append(row);
         }
     }
     m_turnRail->setVisible(!turns.isEmpty());
+    if (turns.isEmpty())
+        hideTurnRailPanel();
+    // 正文可能晚于行创建才回填（createMessage 收尾就会触发一次重建），就地刷新行文案
+    for (int i = 0; i < m_railRows.size() && i < m_railTurns.size(); ++i) {
+        if (MessageWidget *message = m_railTurns.at(i).data())
+            m_railRows.at(i)->setTurnText(turnText(message));
+    }
     if (m_turnRail->isVisible())
         layoutOverlays();
     updateTurnRailActive();
@@ -702,33 +850,65 @@ void ChartWidget::updateTurnRailActive()
     m_railActive = active;
     for (int i = 0; i < m_railDots.size(); ++i)
         m_railDots.at(i)->setActive(i == active);
+    // 轨道白点与列表行同步高亮（app.js updateTurnRailActive）
+    for (int i = 0; i < m_railRows.size(); ++i)
+        m_railRows.at(i)->setRowActive(i == active);
 }
 
-void ChartWidget::showTurnRailTip(int turn)
+void ChartWidget::showTurnRailPanel()
 {
-    if (!m_turnRailTip || turn < 0 || turn >= m_railTurns.size())
+    if (!m_turnRailPanel || m_railTurns.isEmpty())
         return;
-    MessageWidget *message = m_railTurns.at(turn).data();
-    if (!message)
-        return;
-    const QString text = message->property("copyText").toString().simplified();
-    m_turnRailTipText->setText(text.isEmpty() ? QStringLiteral("（本轮无文本内容）") : text);
-    m_turnRailTip->adjustSize();
-    const int maxWidth = qMax(120, width() / 3);
-    if (m_turnRailTip->width() > maxWidth)
-        m_turnRailTip->setFixedWidth(maxWidth);
-    const int dotY = m_turnRail->y() + 6 + turn * 18;
-    int top = dotY + 6 - m_turnRailTip->height() / 2;
-    top = qBound(8, top, qMax(8, height() - m_turnRailTip->height() - 8));
-    m_turnRailTip->move(22, top);
-    m_turnRailTip->raise();
-    m_turnRailTip->setVisible(true);
+    if (m_turnRailHideTimer)
+        m_turnRailHideTimer->stop();
+    layoutTurnRailPanel();
+    m_turnRailPanel->setVisible(true);
+    m_turnRailPanel->raise();
+    updateTurnRailActive();
 }
 
-void ChartWidget::hideTurnRailTip()
+void ChartWidget::scheduleHideTurnRailPanel()
 {
-    if (m_turnRailTip)
-        m_turnRailTip->setVisible(false);
+    if (!m_turnRailHideTimer)
+        return;
+    m_turnRailHideTimer->stop();
+    m_turnRailHideTimer->start();
+}
+
+void ChartWidget::hideTurnRailPanel()
+{
+    if (m_turnRailHideTimer)
+        m_turnRailHideTimer->stop();
+    if (m_turnRailPanel)
+        m_turnRailPanel->setVisible(false);
+}
+
+void ChartWidget::layoutTurnRailPanel()
+{
+    if (!m_turnRailPanel || !m_turnRail || !m_turnRailListLayout)
+        return;
+    // 面板贴在轨道右侧展开、纵向与轨道居中；越界时整体回推，避免被裁掉。
+    // 高度按行数直接算，不依赖 sizeHint（首次展开时列表还没布局过，量不到高度）
+    int headHeight = 30;
+    if (QLayout *layout = m_turnRailPanel->layout()) {
+        if (QLayoutItem *item = layout->itemAt(0)) {
+            if (QWidget *head = item->widget()) {
+                const int hint = head->sizeHint().height();
+                if (hint > 0)
+                    headHeight = hint;
+            }
+        }
+    }
+    const int listHeight = m_railRows.size() * 30 + 8;
+    const int maxHeight = qMin(qRound(height() * 0.62), 420);
+    // webui 只给 max-height：行数少时面板按内容收缩，行数多时截断并滚动
+    const int panelHeight = qMax(0, qMin(headHeight + listHeight, maxHeight));
+    const int panelWidth = qMin(300, qMax(0, width() - 26));
+    const int x = m_turnRail->x() + m_turnRail->width() + 10;
+    const int center = m_turnRail->y() + m_turnRail->height() / 2;
+    int y = center - panelHeight / 2;
+    y = qBound(8, y, qMax(8, height() - panelHeight - 8));
+    m_turnRailPanel->setGeometry(x, y, panelWidth, panelHeight);
 }
 
 void ChartWidget::focusTurn(int turn)
@@ -876,6 +1056,8 @@ void ChartWidget::setModels(const QVariantList &models)
 {
     m_models = models; // 用量弹层的「提供方 / 模型」按 provider_name 映射（app.js usageModelLabel）
     m_composer->setModels(models);
+    // 设置中心「用量」页的显示名映射也依赖这份目录（app.js usageSyncCatalog）
+    m_settings->setUsageCatalog(models);
 }
 void ChartWidget::setCurrentModel(const QString &key) { m_composer->setCurrentModel(key); }
 QString ChartWidget::currentModel() const { return m_composer->currentModel(); }
@@ -1050,6 +1232,14 @@ void ChartWidget::finishAssistant()
     finishAssistantInternal(false);
 }
 
+// 每轮收尾都要过一遍：计划窗口只服务执行过程，本轮结束时计划已全部完成就收起。
+// 放在空轮兜底之前——那一支会提前 return，否则空正文的那一轮会把计划窗口留在屏上
+void ChartWidget::settlePhasePlan()
+{
+    if (planComplete(m_phasePlanData))
+        hidePhasePanel();
+}
+
 void ChartWidget::finishAssistantInternal(bool deferred)
 {
     MessageWidget *message = m_current;
@@ -1059,6 +1249,9 @@ void ChartWidget::finishAssistantInternal(bool deferred)
 
     message->stopLiveTiming();
     message->settleProcess();
+
+    // 先结算计划窗口，后面的空轮兜底可能直接返回
+    settlePhasePlan();
 
     const StructuredBlocks parsed = structuredBlocks(m_currentText);
     message->body()->setText(parsed.visible);
@@ -1089,10 +1282,6 @@ void ChartWidget::finishAssistantInternal(bool deferred)
     // 历史重放要等整轮重放完再弹，否则中途那些旧询问会闪一下
     if (!deferred && !ask.isEmpty())
         m_composer->showChoice(ask);
-
-    // 计划窗口只服务执行过程：本轮结束时计划已全部完成就收起
-    if (planComplete(m_phasePlanData))
-        m_phaseWrap->setVisible(false);
 
     m_currentText.clear();
     updateEmptyState();
@@ -1312,10 +1501,24 @@ void ChartWidget::setPhasePlan(const QVariant &value)
     const QVariantList phases = phase.value(QStringLiteral("phases")).toList();
     if (phases.isEmpty())
         return;
+    // 计划窗口只服务执行过程：全部阶段进入终态就收起，下一条 plan_updated 会再次出现。
+    // 规则放在渲染口（app.js renderPhase 开头），实时 plan_updated、切会话加载、历史回放三条路都绕不过去
+    if (planComplete(phase)) {
+        hidePhasePanel();
+        return;
+    }
     m_phasePlanData = phase;
     m_phaseWrap->setVisible(true);
     m_phasePanel->setPlan(phase);
     syncPhaseLift();
+}
+
+// 收起计划窗口：面板内容与 state 一起清掉，避免切会话后残留旧计划（app.js hidePhasePanel）
+void ChartWidget::hidePhasePanel()
+{
+    m_phasePlanData.clear();
+    m_phaseWrap->setVisible(false);
+    m_phasePanel->clearPlan();
 }
 
 void ChartWidget::showToast(const QString &text)
@@ -1328,15 +1531,18 @@ void ChartWidget::showToast(const QString &text)
 void ChartWidget::syncPhaseLift()
 {
     // 选择浮层浮在输入框上方，会盖住紧贴其上的计划窗口：浮层出现/变高时把计划窗口顶开
-    if (!m_phaseWrap)
+    if (!m_phaseWrap || !m_phaseLiftSpacer)
         return;
     auto *layout = qobject_cast<QVBoxLayout *>(m_phaseWrap->layout());
     if (!layout)
         return;
     const int lift = m_composer->choiceOpen()
-                         ? qMax(0, m_composer->choiceHeight() + 8 + 12 - m_composer->height())
+                         ? m_composer->choiceHeight() + 12 - m_composer->height()
                          : 0;
-    layout->setContentsMargins(9, 0, 9, 8 + lift);
+    m_phaseLiftSpacer->changeSize(0, qMax(0, lift), QSizePolicy::Fixed,
+                                  QSizePolicy::Fixed);
+    layout->invalidate();
+    static_cast<PhaseLiftLayout *>(m_root)->setPhaseOverlap(qMax(0, -lift));
 }
 
 void ChartWidget::setTrajectoryEvents(const QVariantList &events)
@@ -1373,7 +1579,8 @@ void ChartWidget::clearMessages()
     m_workflowSteps.clear();
     m_lastTurnAwaiting = false;
     m_phasePlanData.clear();
-    m_phaseWrap->setVisible(false); // loadSession: el.phasePanel.classList.add("hidden")
+    m_phaseWrap->setVisible(false); // loadSession 走 hidePhasePanel()：收起要连面板内容一起清
+    m_phasePanel->clearPlan();
     m_composer->closeChoice();
     updateEmptyState();
     rebuildTurnRail();
@@ -1406,8 +1613,11 @@ void ChartWidget::setHistory(const QVariantList &messages)
                 if (!turnTiming.isEmpty())
                     turn->setTiming(turnTiming);
             }
-            if (turn && turn->property("awaiting").toBool())
-                lastAsk = turn->property("pendingAsk").toMap();
+            // 只有「最后一轮」停在未作答询问上才恢复浮层：后一轮结束时必须清掉，
+            // 否则历史里早期已作答的询问会一直粘着（对齐 app.js:1418 的 last.awaitingInput 判断）
+            lastAsk = (turn && turn->property("awaiting").toBool())
+                          ? turn->property("pendingAsk").toMap()
+                          : QVariantMap();
         }
         turn = nullptr;
         turnText.clear();
@@ -1585,8 +1795,24 @@ void ChartWidget::setSettingsStatus(const QString &text)
     m_settings->setStatus(text);
 }
 
+void ChartWidget::setUsageStats(const QString &requestId, const QVariantMap &data)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setUsageStats(requestId, data);
+}
+
+void ChartWidget::setUsageLoadFailed(const QString &requestId, const QString &error)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setUsageLoadFailed(requestId, error);
+}
+
 void ChartWidget::openSettings(const QString &tab)
 {
+    // 显示名映射依赖这份目录，进入用量页前先备好（app.js usageEnsureCatalog）
+    m_settings->setUsageCatalog(m_models);
     if (!tab.isEmpty())
         m_settings->switchTab(tab);
     m_settings->show();
@@ -1679,6 +1905,23 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
         layoutOverlays();
         return false;
     }
+    // 轮次面板：轨道与面板各自算悬停区，跨间隙留 180ms 延迟收起（app.js 同）
+    if (watched == m_turnRail) {
+        if (event->type() == QEvent::Enter)
+            showTurnRailPanel();
+        else if (event->type() == QEvent::Leave)
+            scheduleHideTurnRailPanel();
+        return false;
+    }
+    if (watched == m_turnRailPanel) {
+        if (event->type() == QEvent::Enter) {
+            if (m_turnRailHideTimer)
+                m_turnRailHideTimer->stop();
+        } else if (event->type() == QEvent::Leave) {
+            scheduleHideTurnRailPanel();
+        }
+        return false;
+    }
 
     auto *target = qobject_cast<QWidget *>(watched);
     switch (event->type()) {
@@ -1712,6 +1955,13 @@ bool ChartWidget::eventFilter(QObject *watched, QEvent *event)
         }
         break;
     case QEvent::MouseButtonPress:
+        // QWidget 默认会忽略按下事件并冒泡到父级；若不拦住，点击会话触发器时
+        // 父级会被误判为“面板外”，先关闭、松开又重开，表现为无法再次点击收起。
+        if (target && isSelfOrChildOf(target, m_sessionTrigger))
+            return true;
+        // 斜杠面板不是 Qt::Popup，点面板外得自己收（webui 的 document 点击处理）
+        if (target && m_composer && m_composer->slashOpen())
+            m_composer->dismissSlashForClick(target);
         if (m_sessionPanel->isOpen() && target
             && !isSelfOrChildOf(target, m_sessionTrigger)
             && !isSelfOrChildOf(target, m_sessionPanel)
@@ -1823,8 +2073,33 @@ void ChartWidget::applyZoom()
     const QList<ComboTrigger *> combos = findChildren<ComboTrigger *>();
     for (ComboTrigger *combo : combos)
         combo->refreshZoom();
+    // 输入框里的技能芯片：宽度是按名字字号实测的
+    if (m_composer)
+        m_composer->refreshZoom();
+    // 用量页的筛选触发器同理（chevron 与日历的小图标）
+    const QList<UsageSelect *> usageSelects = findChildren<UsageSelect *>();
+    for (UsageSelect *select : usageSelects)
+        select->refreshIcons();
 
-    // 5) 自绘控件（连接状态点、阶段项、导航轨…）paint 时取 scaledPx，重绘即可
+    // 5) 烘焙了等宽的明细表单元格（用量页 token / 轮次列）：按存好的基础字号重建
+    const QList<QTableWidget *> tables = findChildren<QTableWidget *>();
+    for (QTableWidget *table : tables) {
+        for (int row = 0; row < table->rowCount(); ++row) {
+            for (int column = 0; column < table->columnCount(); ++column) {
+                QTableWidgetItem *item = table->item(row, column);
+                if (!item)
+                    continue;
+                const QVariant base = item->data(Qt::UserRole + 1);
+                if (!base.isValid())
+                    continue;
+                QFont mono(monoFont());
+                mono.setPixelSize(scaledPx(base.toInt()));
+                item->setFont(mono);
+            }
+        }
+    }
+
+    // 6) 自绘控件（连接状态点、阶段项、导航轨…）paint 时取 scaledPx，重绘即可
     const QList<QWidget *> all = findChildren<QWidget *>();
     for (QWidget *w : all)
         w->update();
@@ -1840,6 +2115,6 @@ extern "C" QTCHARTWIDGET_EXPORT QWidget *qtchartwidget_create()
 
 extern "C" QTCHARTWIDGET_EXPORT const char *qtchartwidget_version()
 {
-    // 2.0.0：公开头有破坏性改动（见 CHANGELOG.md），改这里时同步改 CHANGELOG 与 README
-    return "2.0.0";
+    // 2.2.0：公开头只做加法（新增信号 sessionExportRequested），改这里时同步改 CHANGELOG 与 README
+    return "2.2.0";
 }

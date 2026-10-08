@@ -2,7 +2,6 @@ import json
 import os
 import re
 import shutil
-import tempfile
 import threading
 import uuid
 import logging
@@ -18,6 +17,8 @@ logger = logging.getLogger(__name__)
 _index_lock = threading.RLock()
 _session_locks = {}
 _session_locks_guard = threading.Lock()
+# 会话存储异常留痕，由 /sessions 与 /health 暴露
+_storage_issues = []
 
 
 class InvalidSessionId(ValueError):
@@ -62,10 +63,27 @@ def locked_session(session_id: str):
         lock.release()
 
 
+def _open_exclusive(directory: str, suffix: str = ".tmp"):
+    """在目标目录里独占创建一个临时文件，返回 (fd, 路径)。
+
+    刻意不用 ``tempfile.mkstemp``：目录存在但拒绝写入时（Deny ACE、父目录继承
+    限制），本机实测 mkstemp 会一直重试随机文件名而不返回，写会话就变成卡死而
+    不是报错；``os.open(O_CREAT|O_EXCL)`` 同一目录立刻抛 PermissionError。
+    探测逻辑在 data_dir_guard 里同理，两处保持一致。
+    """
+    for _ in range(10):
+        candidate = os.path.join(directory, ".%s%s" % (uuid.uuid4().hex, suffix))
+        try:
+            return os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY), candidate
+        except FileExistsError:
+            continue
+    raise OSError("无法在 %s 内创建临时文件（文件名连续冲突）" % directory)
+
+
 def atomic_write(path: str, data: str):
     dir_ = os.path.dirname(path)
     os.makedirs(dir_, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    fd, tmp = _open_exclusive(dir_)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(data)
@@ -125,7 +143,7 @@ def _write_jsonl(path: str, messages: list):
     """全量写入 JSONL 文件（用于原地修改后的重写）。"""
     dir_ = os.path.dirname(path)
     os.makedirs(dir_, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    fd, tmp = _open_exclusive(dir_)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             for msg in messages:
@@ -375,15 +393,46 @@ def load_session(sid: str):
         return None
 
 
+def _note_storage_issue(message: str) -> None:
+    """记录会话存储异常，供 /sessions 与 /health 暴露。
+
+    会话列表读不出来时旧行为是静默返回空列表，界面上看起来就是「一个会话都没
+    有」，使用者会以为历史被删了。这里把异常留痕，让调用方有机会说明真相。
+    """
+    if message not in _storage_issues:
+        _storage_issues.append(message)
+    logger.warning("[storage] %s", message)
+
+
+def storage_issues() -> list:
+    return list(_storage_issues)
+
+
 def _read_index() -> list:
     index_path = SESSIONS_DIR / "index.json"
+    try:
+        index_path.exists()
+    except OSError as exc:
+        _note_storage_issue("会话目录不可访问: %s (%s)" % (SESSIONS_DIR, exc))
+        return []
     if not index_path.exists():
+        # 索引不存在就是还没有会话，属于正常状态；但目录本身不可列时仍有问题
+        try:
+            next(os.scandir(str(SESSIONS_DIR)), None)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _note_storage_issue("会话目录不可读取: %s (%s)" % (SESSIONS_DIR, exc))
         return []
     try:
         data = json.loads(index_path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception:
+    except OSError as exc:
+        _note_storage_issue("会话索引不可读取: %s (%s)" % (index_path, exc))
         return []
+    except ValueError as exc:
+        _note_storage_issue("会话索引内容损坏: %s (%s)" % (index_path, exc))
+        return []
+    return data if isinstance(data, list) else []
 
 
 def list_sessions(query: str = "", archived: bool = False) -> list:

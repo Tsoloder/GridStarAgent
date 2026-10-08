@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 from urllib.parse import urlparse
 
 from paths import CONFIG_PATH
@@ -38,6 +38,7 @@ class ProviderConfig:
     api_key: str = field(default="", repr=False)
     api_key_env: str = ""
     headers: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    ssl_verify: Union[bool, str] = True
     discover_models: bool = True
     discovery_api: str = "openai"
     default_api: str = "openai-chat"
@@ -93,7 +94,7 @@ class ApiConfig:
 
 _PROVIDER_FIELDS = frozenset({
     "id", "name", "base_url", "api_key", "api_key_env", "headers",
-    "discover_models", "discovery_api", "default_api", "enabled",
+    "ssl_verify", "discover_models", "discovery_api", "default_api", "enabled",
 })
 _MODEL_FIELDS = frozenset({
     "id", "provider", "api", "name", "enabled", "context_window",
@@ -159,6 +160,15 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
         if not isinstance(key, str) or not isinstance(value, str):
             raise ConfigError(f"{path}.headers must contain string keys and values")
         headers[key] = value
+    ssl_verify_raw = data.get("ssl_verify", True)
+    if type(ssl_verify_raw) is bool:
+        ssl_verify: Union[bool, str] = ssl_verify_raw
+    elif isinstance(ssl_verify_raw, str):
+        ssl_verify = ssl_verify_raw.strip()
+        if not ssl_verify:
+            raise ConfigError(f"{path}.ssl_verify must not be empty when given as a string")
+    else:
+        raise ConfigError(f"{path}.ssl_verify must be a boolean or a CA certificate file path")
     return ProviderConfig(
         id=_string(data["id"], f"{path}.id", nonempty=True),
         name=_string(data["name"], f"{path}.name", nonempty=True),
@@ -166,6 +176,7 @@ def _parse_provider(raw: Any, index: int) -> ProviderConfig:
         api_key=_string(data.get("api_key", ""), f"{path}.api_key"),
         api_key_env=_string(data.get("api_key_env", ""), f"{path}.api_key_env"),
         headers=MappingProxyType(headers),
+        ssl_verify=ssl_verify,
         discover_models=_boolean(data.get("discover_models", True), f"{path}.discover_models"),
         discovery_api=discovery_api,
         default_api=default_api,

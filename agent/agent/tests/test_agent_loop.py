@@ -260,6 +260,148 @@ async def test_format_retry_flow():
     assert events[-1]["type"] == "done"
 
 
+def _text_events(text: str) -> list:
+    return [
+        SimpleNamespace(type="text_delta", delta=text),
+        SimpleNamespace(type="usage", input_tokens=100, output_tokens=20, total_tokens=120,
+                        cache_read_tokens=0, cache_write_tokens=0, reasoning_tokens=0),
+    ]
+
+
+def _tool_call_events(name: str, args: dict) -> list:
+    return [
+        SimpleNamespace(type="tool_call_end", call_id="call-1", name=name,
+                        arguments=args, parse_error=None),
+        SimpleNamespace(type="usage", input_tokens=100, output_tokens=20, total_tokens=120,
+                        cache_read_tokens=0, cache_write_tokens=0, reasoning_tokens=0),
+    ]
+
+
+async def _run_direct(runtime, message, ledger=None, mcp=None, display_content="",
+                      interaction_mode="manual"):
+    import agent_loop
+
+    return [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), message, "base", _make_config(), mcp or MockMcpBridge({}),
+        MockContextManager(), MockSkillRegistry(), model_runtime=runtime, ledger=ledger,
+        display_content=display_content, interaction_mode=interaction_mode,
+    )]
+
+
+@pytest.mark.asyncio
+async def test_conversational_turn_skips_format_retry(tmp_path, monkeypatch):
+    """寒暄轮没有决策点：不该为凑结构化输出再发一次请求（省一整轮前缀输入）。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([_text_events("好的，随时欢迎再来咨询。")])
+    events = await _run_direct(runtime, "下次再说")
+    assert len(runtime.exposed_tools) == 1
+    assert _event_types(events)[-1] == "done"
+    assert "随时欢迎" in _full_text(events)
+
+
+@pytest.mark.asyncio
+async def test_task_reply_without_structure_still_retries(tmp_path, monkeypatch):
+    """真实请求仍受格式契约约束：首答复缺结构化块时照旧重试一次。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([
+        _text_events("已为你加载当前模型。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "帮我查看当前模型")
+    assert len(runtime.exposed_tools) == 2
+    assert "options" in _full_text(events)
+
+
+@pytest.mark.asyncio
+async def test_tool_execution_blocks_format_exemption(tmp_path, monkeypatch):
+    """本轮执行过工具就仍有决策点：寒暄豁免不生效，缺结构化块照旧重试。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([
+        _tool_call_events("ImportCAD", {"file": "wing.step"}),
+        _text_events("导入完成，共 128 个数模面。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "谢谢", mcp=MockMcpBridge({"ImportCAD": "ok"}))
+    assert len(runtime.exposed_tools) == 3
+    assert any(event["type"] == "tool_result" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_active_plan_blocks_format_exemption(tmp_path, monkeypatch):
+    """台账里还有未收尾阶段时，寒暄轮也要给结构化出口。"""
+    import session as session_mod
+
+    import uuid
+
+    from task_ledger import TaskLedger
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    ledger = TaskLedger(str(uuid.uuid4()))
+    ledger.update_plan("cad-mesh", "CAD 到 CFD 网格生成",
+                       [{"id": "a", "title": "阶段A", "status": "in_progress"}])
+    runtime = _ScriptedRuntime([
+        _text_events("好的。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "谢谢", ledger=ledger)
+    assert len(runtime.exposed_tools) == 2
+    assert _event_types(events)[-1] == "done"
+
+
+@pytest.mark.asyncio
+async def test_card_answer_blocks_format_exemption(tmp_path, monkeypatch):
+    """卡片作答即使文本落在白名单里也不能豁免：那是一次决策答复。
+
+    前端把选项的 value 当消息、label 当 display_content 发过来，所以
+    display_content 非空即"这是卡片作答"，必须继续给结构化出口。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([
+        _text_events("好的。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "谢谢", display_content="谢谢你")
+    assert len(runtime.exposed_tools) == 2
+    assert _event_types(events)[-1] == "done"
+
+
+def test_conversational_message_matching():
+    """豁免判定必须窄：真实请求、应答词、稍长的寒暄扩展句都不能命中。"""
+    import agent_loop
+
+    assert agent_loop._is_conversational_message("你好")
+    assert agent_loop._is_conversational_message("  谢谢！ ")
+    assert agent_loop._is_conversational_message("下次再说。")
+    assert not agent_loop._is_conversational_message("导入模型")
+    assert not agent_loop._is_conversational_message("你好，帮我导入模型")
+    assert not agent_loop._is_conversational_message("")
+    assert not agent_loop._is_conversational_message("你好" * 10)
+    # 应答词可能是放行确认，不进白名单
+    for ack in ("好的", "好", "收到", "OK", "明白了"):
+        assert not agent_loop._is_conversational_message(ack)
+
+
+def test_plan_in_flight_detection():
+    import agent_loop
+
+    assert not agent_loop._plan_in_flight(None)
+    assert not agent_loop._plan_in_flight(SimpleNamespace(plan=None))
+    assert not agent_loop._plan_in_flight(SimpleNamespace(
+        plan={"phases": [{"status": "done"}, {"status": "skipped"}]}))
+    assert agent_loop._plan_in_flight(SimpleNamespace(
+        plan={"phases": [{"status": "in_progress"}]}))
+    # 缺省 status 视为 pending，同样算在途
+    assert agent_loop._plan_in_flight(SimpleNamespace(plan={"phases": [{"id": "x"}]}))
+
+
 @pytest.mark.asyncio
 async def test_structured_continuation():
     events = await _run_fixture("structured_continuation")
@@ -271,6 +413,51 @@ async def test_structured_continuation():
     assert len(chunks) >= 2
     assert "tool_params" in chunks[0]["delta"]
     assert "导入完成" in _full_text(events)
+
+
+def test_parse_structured_interaction_confirmed_flag():
+    """取消与确认必须解析成不同状态；旧 XML 形态无 confirmed 字段时按已确认处理。"""
+    import agent_loop
+
+    confirmed = agent_loop.parse_structured_interaction(
+        '<structured_interaction>{"type":"tool_params_confirmed","tool":"ImportCAD",'
+        '"confirmed":true,"params":{"file":"wing.txt"}}</structured_interaction>'
+    )
+    assert confirmed["confirmed"] is True
+    assert confirmed["cancelled"] is False
+    assert confirmed["tool"] == "ImportCAD"
+
+    cancelled = agent_loop.parse_structured_interaction(
+        '<structured_interaction>{"type":"tool_params_confirmed","tool":"ImportCAD",'
+        '"confirmed":false,"params":{"file":"wing.txt"}}</structured_interaction>'
+    )
+    assert cancelled["confirmed"] is False
+    assert cancelled["cancelled"] is True
+
+    legacy = agent_loop.parse_structured_interaction(
+        '<structured_interaction><tool_params_confirmed tool="ImportCAD">'
+        '<params>{"file":"wing.txt"}</params></tool_params_confirmed></structured_interaction>'
+    )
+    assert legacy["cancelled"] is False
+    assert legacy["tool"] == "ImportCAD"
+
+    assert agent_loop.parse_structured_interaction("导入模型并生成网格") == {}
+
+
+@pytest.mark.asyncio
+async def test_tool_params_cancelled_blocks_tool_execution(tmp_path, monkeypatch):
+    """用户点「取消」后模型仍调用同一工具：必须被拦截，不能落到 MCP 执行。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    events = await _run_fixture("tool_params_cancelled")
+    types = _event_types(events)
+    assert types == load_fixture("tool_params_cancelled")["expected_event_types"]
+
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    assert "cancelled by user" in tool_result["result"]
+    assert "成功导入" not in tool_result["result"]
+    assert types[-1] == "done"
 
 
 @pytest.mark.asyncio
@@ -731,4 +918,109 @@ def test_ask_user_tool_contract():
                 {"options": [{"label": "a", "value": "a"}, {"label": "b", "value": "b"}]}):
         payload, error = agent_loop.normalize_ask_user_args(bad)
         assert payload is None and error
+
+
+def test_base_prompt_puts_ask_user_tool_first():
+    """主提示词必须把询问工具立为主路径，正文 options 只作降级。
+
+    这两条是"少花一半输入"的前提：工具优先才能让格式重试保持沉默。
+    """
+    import agent_loop
+
+    prompt = agent_loop._load_base_prompt()
+    assert prompt.count("ask_user_question") >= 3
+    assert "优先调用 `ask_user_question`" in prompt
+    assert "降级路径" in prompt
+    # 降级的两个正当用途必须在文中写清，否则模型会随意退回正文 JSON
+    assert "tool_params" in prompt and "工具不可用" in prompt
+
+
+@pytest.mark.asyncio
+async def test_injected_format_reminder_requires_tool_first(tmp_path, monkeypatch):
+    """每轮注入的格式提醒必须与主提示词同口径：先工具，失败才兜底。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([_text_events("请确认下一步。")])
+    await _run_direct(runtime, "帮我查看当前模型")
+    system_prompt = runtime.system_prompts[0]
+    assert "必须调用 ask_user_question 工具" in system_prompt
+    assert "调用失败或被拒绝" in system_prompt
+    # 旧的"未使用该工具时…兜底"措辞会把降级说成常规路径，必须消失
+    assert "未使用该工具时" not in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_ask_user_tool_ends_turn_with_single_request(tmp_path, monkeypatch):
+    """模型走工具路径询问时：一次请求收尾，产出 options_offered 供前端渲染卡片。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([_tool_call_events("ask_user_question", {
+        "question": "后缘面处理已完成，接下来做什么？",
+        "title": "下一步",
+        "options": [
+            {"label": "继续体网格块创建", "value": "continue_volume"},
+            {"label": "导出当前网格", "value": "export", "style": "primary"},
+        ],
+    })])
+    events = await _run_direct(runtime, "继续")
+    types = _event_types(events)
+    assert len(runtime.exposed_tools) == 1          # 工具路径不该再多发一次请求
+    assert "options_offered" in types
+    assert types[-1] == "done"
+    offered = next(event for event in events if event["type"] == "options_offered")
+    assert offered["question"] == "后缘面处理已完成，接下来做什么？"
+    assert [item["label"] for item in offered["options"]] == ["继续体网格块创建", "导出当前网格"]
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    assert "已向用户发出选择" in tool_result["result"]
+
+
+@pytest.mark.asyncio
+async def test_ask_user_invalid_args_reach_the_model(tmp_path, monkeypatch):
+    """参数非法时错误文案必须回到模型手里，不能被一次 MCP 调用结果覆盖。
+
+    回归守卫：询问工具是内置工具，失败分支此前会继续落进 MCP 执行链，
+    模型拿到的是 "Mock result / 未知工具" 而不是"options 至少需要 2 项"。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([
+        _tool_call_events("ask_user_question", {
+            "question": "选一个",
+            "options": [{"label": "只有一个", "value": "a"}],
+        }),
+        _text_events("```json\n{\"options\": [{\"label\": \"重试\", \"value\": \"retry\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "继续", mcp=MockMcpBridge({}))
+    tool_result = next(event for event in events if event["type"] == "tool_result")
+    assert "options 至少需要 2 项" in tool_result["result"]
+    assert "Mock result" not in tool_result["result"]
+    assert "options_offered" not in _event_types(events)   # 没发出卡片，模型可以自纠
+    assert _event_types(events)[-1] == "done"
+    assert len(runtime.exposed_tools) == 2                 # 模型有机会重来一次
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_blocks_ask_user_while_plan_open(tmp_path, monkeypatch):
+    """auto 模式计划未收尾时不得停下问用户：工具必须被拒绝而不是挂起等待。"""
+    import session as session_mod
+
+    import uuid
+
+    from task_ledger import TaskLedger
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    ledger = TaskLedger(str(uuid.uuid4()))
+    ledger.update_plan("cad-mesh", "CAD 到 CFD 网格生成",
+                       [{"id": "a", "title": "阶段A", "status": "in_progress"}])
+    runtime = _ScriptedRuntime([_tool_call_events("ask_user_question", {
+        "question": "继续吗？",
+        "options": [{"label": "继续", "value": "go"}, {"label": "停止", "value": "stop"}],
+    })])
+    events = await _run_direct(runtime, "继续", ledger=ledger, interaction_mode="auto")
+    refused = next(event for event in events if event["type"] == "tool_result")
+    assert "ask_user_question 不可用" in refused["result"]
+    assert "options_offered" not in _event_types(events)
 

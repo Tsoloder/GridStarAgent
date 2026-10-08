@@ -6,6 +6,8 @@
 # 4. format_retry_flow — 格式重试
 # 5. structured_continuation — tool_params 确认后 LLM 重出拦截
 
+# 6. tool_params_cancelled — tool_params 取消后同工具调用被拦截
+
 import json
 import os
 
@@ -24,4 +26,5 @@ ALL_FIXTURES = [
     "auto_mode_flow",
     "format_retry_flow",
     "structured_continuation",
+    "tool_params_cancelled",
 ]

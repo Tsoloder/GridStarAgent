@@ -12,6 +12,7 @@ class QPlainTextEdit;
 class QPropertyAnimation;
 class QPushButton;
 class QResizeEvent;
+class QScrollArea;
 class QVBoxLayout;
 QT_END_NAMESPACE
 
@@ -43,6 +44,10 @@ public:
     // 折叠/展开（点标题行）
     void toggleCollapsed();
 
+    // 按目标宽度把卡片内容重排一次，返回这个宽度下的定稿高度。
+    // 静态量出来的 sizeHint 是旧宽度/隐藏态下的值，窄窗口上会偏小（底部内容被卡片底边裁掉）。
+    int heightForCardWidth(int width);
+
 signals:
     // 普通选项被点选（点一下即确认）
     void optionChosen(const QString &value, const QString &label);
@@ -58,6 +63,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    QSize sizeHint() const override;
 
 private:
     struct ParamEntry {
@@ -74,6 +80,9 @@ private:
     };
 
     void rebuild();
+    // 正文（问题/参数/选项）在可滚动区里：按当前宽度把它的自然高度定下来，
+    // 卡片放不下时出滚动条，而不是把内容压扁裁掉
+    void syncBodyHeight();
     void paintSelection(int index);
     void submit();
     void activate(int index);
@@ -92,6 +101,10 @@ private:
     QVBoxLayout *m_paramsLayout = nullptr;
     QWidget *m_list = nullptr;
     QVBoxLayout *m_listLayout = nullptr;
+    QScrollArea *m_scroll = nullptr;
+    QWidget *m_body = nullptr;
+    // 正文按当前宽度定稿后的自然高度（卡片放不下时正文靠滚动，不再压缩内容）
+    int m_bodyNatural = 0;
     QWidget *m_foot = nullptr;
     QLineEdit *m_input = nullptr;
     QPushButton *m_submit = nullptr;

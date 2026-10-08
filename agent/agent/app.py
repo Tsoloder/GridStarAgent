@@ -4,11 +4,19 @@ import json
 import logging
 import secrets
 import sys
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+# 在 Windows 上让 Python 使用系统证书存储，这样用户在系统中安装的内网 CA
+# 证书会被 httpx/requests/urllib 自动信任。非 Windows 或未安装时静默跳过。
+if sys.platform == "win32":
+    try:
+        import pip_system_certs  # noqa: F401
+    except ImportError:
+        pass
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -45,27 +53,64 @@ from llm_client.registry import ProviderRegistry, default_adapter_registry
 from llm_client.runtime import ModelCatalog as RuntimeCatalog, ModelRuntime
 from llm_client.types import ModelConfig as RuntimeModelConfig
 from llm_client.types import ProviderConfig as RuntimeProviderConfig
+from data_dir_guard import guard_data_dir
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
-from paths import UPLOADS_DIR
+from paths import DATA_DIR, UPLOADS_DIR, ensure_subdirs
 from session import (
     InvalidSessionId,
     clear_session,
     create_session,
     delete_session,
+    export_session_markdown,
     list_sessions,
     load_session,
     locked_session,
     save_session,
     set_archived,
+    storage_issues,
     update_index,
     validate_session_id,
 )
 from skill_runtime import SkillError, SkillRegistry, tool_is_allowed
+from usage_stats import collect_usage
 from workflow_runner import run_workflow
+
+
+def _ensure_data_dir(argv=None) -> Optional[dict]:
+    """数据目录守卫：实测可写性，不可写就地修权限，修不动才提权重启。
+
+    放在 setup_logging 之前：日志文件也在数据目录里，先修好目录才谈得上落盘。
+    需要提权重启时本进程结束，由提权实例继续（目标目录已钉给它，不会跑到提权
+    账号的用户目录下）。
+    """
+    result = guard_data_dir(DATA_DIR, argv)
+    for step in result.get("repair_steps", []):
+        sys.stderr.write("[data-dir] %s\n" % step)
+    if result.get("message"):
+        sys.stderr.write("[data-dir] %s\n" % result["message"])
+    # 子目录在 import 阶段建过一次，那时权限可能还没修好，这里补建
+    missing = ensure_subdirs()
+    if missing:
+        for item in missing:
+            sys.stderr.write("[data-dir] 子目录仍不可用: %s\n" % item)
+        result["error"] = result.get("error") or ("子目录不可用: %s" % "; ".join(missing))
+        result["writable"] = False
+    sys.stderr.flush()
+    if result.get("needs_relaunch"):
+        raise SystemExit(0)
+    return result
+
+
+_data_dir_state = _ensure_data_dir()
 
 setup_logging()
 logger = logging.getLogger(__name__)
+if _data_dir_state.get("repair_attempted"):
+    if _data_dir_state.get("writable"):
+        logger.warning("数据目录权限已自动修复: %s", DATA_DIR)
+    else:
+        logger.error("数据目录仍不可写: %s (%s)", DATA_DIR, _data_dir_state.get("error", ""))
 
 current_config: Optional[ApiConfig] = load_config()
 ctx_mgr = ContextManager()
@@ -76,7 +121,10 @@ _model_catalog: Optional[DiscoveryCatalog] = None
 _model_runtime: Optional[ModelRuntime] = None
 _config_lock: Optional[asyncio.Lock] = None
 _session_async_locks = {}
+_session_turn_locks = {}
 _pending_approvals = {}
+_runtime_refs = {}
+_retired_runtimes = set()
 
 # 需要落盘 trajectory.jsonl 的轨迹事件类型
 _TRAJ_EVENTS = {
@@ -93,6 +141,7 @@ def _runtime_provider_config(provider) -> RuntimeProviderConfig:
         api_key=provider.api_key,
         api_key_env=provider.api_key_env,
         headers=dict(provider.headers),
+        ssl_verify=provider.ssl_verify,
         enabled=provider.enabled,
     )
 
@@ -158,12 +207,51 @@ async def _close_runtime(runtime):
         await runtime.aclose()
 
 
+def _acquire_runtime(runtime):
+    if runtime is None:
+        return
+    key = id(runtime)
+    _runtime_refs[key] = _runtime_refs.get(key, 0) + 1
+
+
+async def _release_runtime(runtime):
+    if runtime is None:
+        return
+    key = id(runtime)
+    count = _runtime_refs.get(key, 0)
+    if count <= 1:
+        _runtime_refs.pop(key, None)
+        if runtime in _retired_runtimes:
+            _retired_runtimes.discard(runtime)
+            await _close_runtime(runtime)
+    else:
+        _runtime_refs[key] = count - 1
+
+
+async def _retire_runtime(runtime):
+    if runtime is None:
+        return
+    if _runtime_refs.get(id(runtime), 0):
+        _retired_runtimes.add(runtime)
+        return
+    await _close_runtime(runtime)
+
+
 def _session_async_lock(session_id: str):
     validate_session_id(session_id)
     lock = _session_async_locks.get(session_id)
     if lock is None:
         lock = asyncio.Lock()
         _session_async_locks[session_id] = lock
+    return lock
+
+
+def _session_turn_lock(session_id: str):
+    validate_session_id(session_id)
+    lock = _session_turn_locks.get(session_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _session_turn_locks[session_id] = lock
     return lock
 
 
@@ -200,7 +288,11 @@ async def lifespan(app: FastAPI):
     finally:
         if _mcp:
             await _mcp.disconnect()
-        await _close_runtime(_model_runtime)
+        await _retire_runtime(_model_runtime)
+        for runtime in tuple(_retired_runtimes):
+            if _runtime_refs.get(id(runtime), 0) == 0:
+                _retired_runtimes.discard(runtime)
+                await _close_runtime(runtime)
         _model_runtime = None
         _model_catalog = None
         _config_lock = None
@@ -209,7 +301,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:*", "http://127.0.0.1:*"],
+    allow_origin_regex=r"https?://(localhost|127\.0\.0\.1)(:\d+)?$",
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -237,7 +329,7 @@ class NoStoreStaticFiles(StaticFiles):
 
 
 app.mount("/ui", NoStoreStaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR)), name="uploads")
+app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR), check_dir=False), name="uploads")
 
 
 @app.post("/upload")
@@ -262,6 +354,8 @@ async def upload_file(request: Request, name: str = ""):
     )
     target = UPLOADS_DIR / stored_name
     try:
+        # 目录可能因为启动时权限不可写而没建出来，这里补建再写
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
     except OSError as exc:
         logger.error("upload write failed: %s", exc)
@@ -287,6 +381,13 @@ async def health():
         "catalog_generation": snapshot.generation if snapshot is not None else 0,
         "catalog_models": len(snapshot.models) if snapshot is not None else 0,
         "catalog_errors": dict(snapshot.errors) if snapshot is not None else {},
+        # 数据目录状态：起始不可写时前端与运维能一眼看到修没修好
+        "data_dir": _data_dir_state.get("directory", str(DATA_DIR)),
+        "data_dir_writable": bool(_data_dir_state.get("writable")),
+        "data_dir_repair_attempted": bool(_data_dir_state.get("repair_attempted")),
+        "data_dir_error": _data_dir_state.get("error", ""),
+        # 会话存储异常：读不出来时不能和「没有会话」混为一谈
+        "storage_issues": storage_issues(),
     }
 
 
@@ -415,7 +516,7 @@ async def update_config(body: dict):
         current_config = candidate
         _model_catalog = candidate_catalog
         _model_runtime = candidate_runtime
-        await _close_runtime(previous_runtime)
+        await _retire_runtime(previous_runtime)
         return {
             "ok": True,
             "revision": config_revision(candidate),
@@ -542,14 +643,44 @@ async def refresh_models():
     return await get_models()
 
 
+def _parse_local_dt(value):
+    """解析本地时间参数（YYYY-MM-DD[THH[:MM[:SS]]]），无法识别时返回 None。"""
+    text = str(value or "").strip().replace(" ", "T")
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+@app.get("/usage/stats")
+async def usage_stats_endpoint(request: Request):
+    """Token 用量统计：按时间窗聚合会话历史里的 usage 记录。"""
+    end = _parse_local_dt(request.query_params.get("end")) or datetime.now()
+    start = _parse_local_dt(request.query_params.get("start")) or (end - timedelta(days=7))
+    model = (request.query_params.get("model") or "").strip()
+    provider = (request.query_params.get("provider") or "").strip()
+    provider_names = {}
+    if current_config is not None:
+        provider_names = {item.id: item.name for item in current_config.providers}
+    try:
+        return collect_usage(start, end, model, provider, provider_names)
+    except Exception as exc:
+        logger.exception("usage stats failed")
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+
 @app.post("/chat/stream")
 async def chat_stream(body: dict):
     if current_config is None:
         return JSONResponse(
             {"error": "no config, POST /config first"}, status_code=400
         )
-    if _mcp is None:
-        return JSONResponse({"error": "mcp not ready"}, status_code=503)
+    if _mcp is None or not getattr(_mcp, "connected", False):
+        return JSONResponse({"error": "mcp not connected"}, status_code=503)
 
     session_id = body.get("session_id", "") or ""
     message = body.get("message", "") or ""
@@ -559,15 +690,15 @@ async def chat_stream(body: dict):
     writable_skill_root = body.get("writable_skill_root", "") or ""
     model_id = body.get("model_id", "") or ""
 
+    request_skill_registry = SkillRegistry(SkillRegistry.default_roots())
     if skill_roots:
-        # Qt sends authoritative local roots so deployed and development layouts work alike.
-        skill_registry.set_roots(
+        request_skill_registry.set_roots(
             [str(path) for path in SkillRegistry.default_roots()] +
             [str(path) for path in skill_roots],
             writable_skill_root,
         )
     else:
-        skill_registry.reload()
+        request_skill_registry.reload()
 
     if not isinstance(selected_skills, list):
         return JSONResponse({"error": "selected_skills must be an array"}, status_code=400)
@@ -595,7 +726,7 @@ async def chat_stream(body: dict):
 
     async def gen():
         bg = _get_or_create_background(session_id)
-        bg.subscriber_count += 1
+        subscriber_queue = bg.subscribe()
 
         # 取消待执行的清理定时器（有订阅者了）
         _cleanup_timer = getattr(bg, '_cleanup_timer', None)
@@ -613,45 +744,42 @@ async def chat_stream(body: dict):
             # 点「停止」只是给旧 task 递了取消请求，它要等当前 await（模型流/工具线程）
             # 返回才真正结束。新消息这时进来若直接复用 bg，旧 task 收尾写的事件和 done
             # 会灌进新一轮：前端新气泡刷出上一轮内容、或一闪就空。先等旧 task 落地。
-            if new_turn and bg.task is not None and not bg.task.done():
-                bg.task.cancel()
-                if isinstance(bg.task, asyncio.Task):
-                    await asyncio.wait({bg.task}, timeout=_BG_CANCEL_WAIT_SECONDS)
-                if not bg.task.done():
-                    busy = {
-                        "type": "error",
-                        "message": "上一轮任务还在停止中，请稍候再发送这条消息",
-                        "category": "busy",
-                        "retryable": True,
-                    }
-                    yield f"event: error\ndata: {json.dumps(busy, ensure_ascii=False)}\n\n"
-                    return
+            async with bg.start_lock:
+                if new_turn and bg.task is not None and not bg.task.done():
+                    bg.task.cancel()
+                    if isinstance(bg.task, asyncio.Task):
+                        await asyncio.wait({bg.task}, timeout=_BG_CANCEL_WAIT_SECONDS)
+                    if not bg.task.done():
+                        busy = {
+                            "type": "error",
+                            "message": "上一轮任务还在停止中，请稍候再发送这条消息",
+                            "category": "busy",
+                            "retryable": True,
+                        }
+                        yield f"event: error\ndata: {json.dumps(busy, ensure_ascii=False)}\n\n"
+                        return
 
-            # 启动后台 task（如果未运行或已结束）
-            if bg.task is None or bg.task.done():
-                if not new_turn:
-                    # 重连且本轮已经结束 — 只回放落盘的最终文本，不再跑一轮
-                    session = load_session(session_id)
-                    if session:
-                        for msg in reversed(session.messages):
-                            if msg.get("role") == "assistant":
-                                content = msg.get("content", "") or ""
-                                yield f"event: text_chunk\ndata: {json.dumps({'delta': content}, ensure_ascii=False)}\n\n"
-                                break
-                    yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
-                    return
+                if bg.task is None or bg.task.done():
+                    if not new_turn:
+                        session = load_session(session_id)
+                        if session:
+                            for msg in reversed(session.messages):
+                                if msg.get("role") == "assistant":
+                                    content = msg.get("content", "") or ""
+                                    yield f"event: text_chunk\ndata: {json.dumps({'delta': content}, ensure_ascii=False)}\n\n"
+                                    break
+                        yield f"event: done\ndata: {json.dumps({}, ensure_ascii=False)}\n\n"
+                        return
 
-                # 首次请求、新的用户消息、或上一轮被停止过 — 整轮状态清零再启动新 task
-                _reset_bg_turn(bg, turn_marker, display_content or message)
-
-                # 启动新的后台 task
-                async with _session_async_lock(session_id):
+                    _reset_bg_turn(bg, turn_marker, display_content or message)
                     bg.last_message = turn_marker
                     bg.task = asyncio.create_task(
-                        _run_background_loop(
+                        _run_background_locked(
                             bg, session_id, message, system_prompt,
                             selected_skills, attachments, display_content,
                             interaction_mode, model_id,
+                            request_skill_registry,
+                            runtime=_model_runtime,
                         )
                     )
 
@@ -669,9 +797,9 @@ async def chat_stream(body: dict):
                     return
 
             # 消费 queue 事件直到完成
-            while not bg.done_event.is_set() or not bg.queue.empty():
+            while not bg.done_event.is_set() or not subscriber_queue.empty():
                 try:
-                    event = await asyncio.wait_for(bg.queue.get(), timeout=0.5)
+                    event = await asyncio.wait_for(subscriber_queue.get(), timeout=0.5)
                     seq = event.get("_seq", 0)
                     if seq and seq <= last_sent:
                         continue  # 回放阶段已发过，跳过
@@ -685,7 +813,7 @@ async def chat_stream(body: dict):
                     continue
 
             # drain 剩余事件
-            async for event in _drain_queue(bg):
+            async for event in _drain_queue(subscriber_queue):
                 seq = event.get("_seq", 0)
                 if seq and seq <= last_sent:
                     continue
@@ -701,7 +829,7 @@ async def chat_stream(body: dict):
                 f"background task continues"
             )
         finally:
-            bg.subscriber_count -= 1
+            bg.unsubscribe(subscriber_queue)
             if bg.subscriber_count <= 0 and bg.done_event.is_set():
                 _schedule_cleanup(bg)
 
@@ -715,22 +843,23 @@ def _latest_active_skills(session) -> list:
     return []
 
 
-def _workflow_tool_policy(selected_skills: list):
+def _workflow_tool_policy(selected_skills: list, registry=None):
+    registry = registry or SkillRegistry(SkillRegistry.default_roots())
     selected_ids = []
     for item in selected_skills or []:
         skill_id = str(item.get("id", "") if isinstance(item, dict) else item).strip().lower()
         if not skill_id or skill_id in selected_ids:
             continue
         try:
-            skill_registry.get(skill_id)
+            registry.get(skill_id)
         except SkillError:
             continue
         selected_ids.append(skill_id)
 
     restrictive = [
-        skill_registry.get(skill_id).allowed_tools
+        registry.get(skill_id).allowed_tools
         for skill_id in selected_ids
-        if skill_registry.get(skill_id).allowed_tools
+        if registry.get(skill_id).allowed_tools
     ]
 
     def allowed(tool_name: str) -> bool:
@@ -741,8 +870,8 @@ def _workflow_tool_policy(selected_skills: list):
 
 @app.post("/workflows/run")
 async def workflow_stream(body: dict):
-    if _mcp is None:
-        return JSONResponse({"error": "mcp not ready"}, status_code=503)
+    if _mcp is None or not getattr(_mcp, "connected", False):
+        return JSONResponse({"error": "mcp not connected"}, status_code=503)
     body = body or {}
     try:
         session_id = validate_session_id(body.get("session_id", ""))
@@ -756,17 +885,17 @@ async def workflow_stream(body: dict):
         return JSONResponse({"error": "selected_skills must be an array"}, status_code=400)
     skill_roots = body.get("skill_roots", [])
     writable_skill_root = body.get("writable_skill_root", "")
+    request_skill_registry = SkillRegistry(SkillRegistry.default_roots())
     if skill_roots:
-        skill_registry.set_roots(
+        request_skill_registry.set_roots(
             [str(path) for path in SkillRegistry.default_roots()] +
-            [str(path) for path in skill_roots],
-            writable_skill_root,
+            [str(path) for path in skill_roots], writable_skill_root,
         )
     else:
-        skill_registry.reload()
+        request_skill_registry.reload()
 
     async def gen():
-        lock = _session_async_lock(session_id)
+        lock = _session_turn_lock(session_id)
         await lock.acquire()
         session = load_session(session_id)
         if session is None:
@@ -775,7 +904,7 @@ async def workflow_stream(body: dict):
             return
         try:
             policy_skills = list(selected_skills) + _latest_active_skills(session)
-            tool_allowed = _workflow_tool_policy(policy_skills)
+            tool_allowed = _workflow_tool_policy(policy_skills, request_skill_registry)
             async for event in run_workflow(
                 session, steps, _mcp, _request_tool_approval,
                 tool_allowed=tool_allowed,
@@ -823,7 +952,10 @@ async def get_sessions(query: str = "", archived: bool = False):
             and not bg.done_event.is_set()
         )
         item["waiting"] = any(key.startswith(sid + ":") for key in _pending_approvals)
-    return {"sessions": sessions}
+    # 空列表有两种含义：确实没有会话，或者会话存储读不出来。后者必须说出来，
+    # 否则界面上和「历史被清空」长得一模一样。
+    issues = storage_issues()
+    return {"sessions": sessions, "storage_issues": issues}
 
 
 @app.post("/sessions")
@@ -1010,12 +1142,25 @@ async def rename_session(session_id: str, body: dict = None):
     return {"ok": True, "id": s.id, "title": s.title}
 
 
+async def _stop_background(bg: "BackgroundSession"):
+    bg.invalidated = True
+    if bg.task is None or bg.task.done():
+        return
+    bg.task.cancel()
+    with suppress(asyncio.CancelledError):
+        await bg.task
+
+
 @app.delete("/sessions/{session_id}")
 async def remove_session(session_id: str):
     try:
         session_id = validate_session_id(session_id)
-        async with _session_async_lock(session_id):
-            deleted = delete_session(session_id)
+        bg = _get_or_create_background(session_id)
+        async with bg.start_lock:
+            await _stop_background(bg)
+            async with _session_turn_lock(session_id):
+                async with _session_async_lock(session_id):
+                    deleted = delete_session(session_id)
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": deleted}
@@ -1025,10 +1170,14 @@ async def remove_session(session_id: str):
 async def clear_session_endpoint(session_id: str):
     try:
         session_id = validate_session_id(session_id)
-        async with _session_async_lock(session_id):
-            cleared = clear_session(session_id)
-            if cleared:
-                TaskLedger(session_id).clear()
+        bg = _get_or_create_background(session_id)
+        async with bg.start_lock:
+            await _stop_background(bg)
+            async with _session_turn_lock(session_id):
+                async with _session_async_lock(session_id):
+                    cleared = clear_session(session_id)
+                    if cleared:
+                        TaskLedger(session_id).clear()
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": cleared}
@@ -1045,6 +1194,28 @@ async def archive_session(session_id: str, body: dict = None):
     if not changed:
         return JSONResponse({"error": "not found"}, status_code=404)
     return {"ok": True}
+
+
+@app.post("/sessions/{session_id}/export")
+async def export_session(session_id: str):
+    """把会话历史导出为 Markdown。
+
+    与模型侧的 export_session_markdown 工具共用同一实现，供输入框的
+    「/ 导出对话」指令直接触发，不必为此跑一整轮对话。
+    """
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    s = load_session(session_id)
+    if s is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    try:
+        path = export_session_markdown(s)
+    except OSError as exc:
+        logger.warning("session export failed: %s", exc)
+        return JSONResponse({"error": "导出失败：%s" % exc}, status_code=500)
+    return {"path": path}
 
 
 @app.post("/sessions/{session_id}/tool-approvals/{call_id}")
@@ -1080,17 +1251,29 @@ class BackgroundSession:
         self.session_id = session_id
         self.task = None
         self.queue = asyncio.Queue()
+        self.subscribers = set()
+        self.start_lock = asyncio.Lock()
         self.done_event = asyncio.Event()
         self.subscriber_count = 0
         self.started_at = None
         self.cancelled = False
-        self.last_message = None  # 记录上次处理的消息，用于区分 SSE 重连与新消息
-        self.last_display = None  # 本轮用户消息的展示文本，重连时供前端重建气泡
-        self.turn_msg_count = None  # 本轮开始前的历史消息条数，重连时供前端裁剪历史
-        # 本轮全部事件的存档（带 _seq 序号）：SSE 断开重连时整体回放，
-        # 消费端用 _seq 与已发送进度去重，保证不丢不重
+        self.invalidated = False
+        self.runtime = None
+        self.last_message = None
+        self.last_display = None
+        self.turn_msg_count = None
         self.history = []
         self.seq = 0
+
+    def subscribe(self):
+        queue = asyncio.Queue()
+        self.subscribers.add(queue)
+        self.subscriber_count = len(self.subscribers)
+        return queue
+
+    def unsubscribe(self, queue):
+        self.subscribers.discard(queue)
+        self.subscriber_count = len(self.subscribers)
 
 
 _background_sessions = {}
@@ -1110,12 +1293,19 @@ def _get_or_create_background(session_id: str) -> BackgroundSession:
 def _reset_bg_turn(bg: BackgroundSession, turn_marker: str, display: str):
     """新一轮开始前清空上一轮的全部状态。
 
-    queue / done_event 也必须换成新对象：上一轮收尾时 done_event 已置位、queue 里
-    还留着终态 done，沿用会让新一轮的消费循环立刻退出，前端气泡刚建出来就被清空。
+    done_event 必须换成新对象：上一轮收尾时 done_event 已置位，沿用会让新一轮的
+    消费循环立刻退出，前端气泡刚建出来就被清空。已连接的订阅者保留不动，只丢弃
+    它们队列里上一轮的残留事件，避免新一轮 SSE 刷出旧内容。
     """
-    bg.queue = asyncio.Queue()
+    for queue in bg.subscribers:
+        while not queue.empty():
+            queue.get_nowait()
+    bg.subscriber_count = len(bg.subscribers)
+    while not bg.queue.empty():
+        bg.queue.get_nowait()
     bg.done_event = asyncio.Event()
     bg.cancelled = False
+    bg.invalidated = False
     bg.started_at = None
     bg.last_message = turn_marker
     bg.last_display = display
@@ -1166,12 +1356,26 @@ async def _bg_put(bg: BackgroundSession, event: dict):
     stamped = dict(event)
     stamped["_seq"] = bg.seq
     bg.history.append(stamped)
-    await bg.queue.put(stamped)
+    if not bg.subscribers:
+        await bg.queue.put(stamped)
+    else:
+        for queue in tuple(bg.subscribers):
+            await queue.put(stamped)
 
 
 def _sse_payload(event: dict) -> dict:
     """发给前端前剥离内部去重序号 _seq。"""
     return {k: v for k, v in event.items() if k != "_seq"}
+
+
+async def _run_background_locked(*args, **kwargs):
+    runtime = kwargs.pop("runtime", None)
+    _acquire_runtime(runtime)
+    try:
+        async with _session_turn_lock(args[1]):
+            return await _run_background_loop(*args, model_runtime=runtime, **kwargs)
+    finally:
+        await _release_runtime(runtime)
 
 
 async def _run_background_loop(
@@ -1184,6 +1388,8 @@ async def _run_background_loop(
     display_content: str,
     interaction_mode: str,
     model_id: str,
+    request_skill_registry=None,
+    model_runtime=None,
 ):
     """后台独立运行 agent_loop，事件写入 queue。
 
@@ -1250,11 +1456,11 @@ async def _run_background_loop(
 
         async for event in run_agent_loop(
             session, message, system_prompt, current_config, _mcp, ctx_mgr,
-            skill_registry, selected_skills, _request_tool_approval,
+            request_skill_registry or SkillRegistry(SkillRegistry.default_roots()), selected_skills, _request_tool_approval,
             attachments=stored_attachments, display_content=display_content,
             interaction_mode=interaction_mode,
             model_override=model_id if model_id else None,
-            model_runtime=_model_runtime,
+            model_runtime=model_runtime if model_runtime is not None else _model_runtime,
             ledger=ledger,
         ):
             # 工具调用与返回值日志
@@ -1273,6 +1479,8 @@ async def _run_background_loop(
                 logger.info("[skill_loaded] session=%s skill_id=%s", session_id,
                             event.get("skill_id", ""))
 
+            if bg.invalidated:
+                return
             # 轨迹事件先落盘再入队，保证落盘集合 ⊇ 实时收到集合
             if event["type"] in _TRAJ_EVENTS:
                 session.append_trajectory(event)
@@ -1292,6 +1500,8 @@ async def _run_background_loop(
         bg.cancelled = True
         # 停止 = 本轮对话结束：补齐被中断的 tool_calls，让会话停在可直接续聊的状态
         _close_interrupted_turn(session)
+        if bg.invalidated:
+            return
         with locked_session(session_id):
             save_session(session)
             update_index(session)
@@ -1302,15 +1512,15 @@ async def _run_background_loop(
     finally:
         # agent_loop 正常收尾时已入队带统计字段的 done；再补一个空 done 会被
         # SSE 的 drain 阶段发给前端，导致已渲染的用量/用时按钮被清空。
-        if not _done_sent:
+        if not _done_sent and not bg.invalidated:
             await _bg_put(bg, {"type": "done"})
         bg.done_event.set()
 
 
-async def _drain_queue(bg: BackgroundSession):
-    """drain task 结束后 queue 中剩余的事件。"""
-    while not bg.queue.empty():
-        event = bg.queue.get_nowait()
+async def _drain_queue(queue):
+    """drain task 结束后消费者队列中剩余的事件。"""
+    while not queue.empty():
+        event = queue.get_nowait()
         yield event
         if event["type"] == "done":
             break

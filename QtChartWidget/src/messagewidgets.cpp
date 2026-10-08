@@ -230,6 +230,16 @@ static QLabel *headLabel(const QString &className, const QString &text, QWidget 
     return l;
 }
 
+static ElidedLabel *makeElidedLabel(const QString &className, const QString &text,
+                                    QWidget *parent)
+{
+    auto *label = new ElidedLabel(parent);
+    setClass(label, className);
+    label->setTextInteractionFlags(Qt::NoTextInteraction);
+    label->setFullText(text);
+    return label;
+}
+
 // ------------------------------------------------------- 气泡明细弹层（Popup）
 
 // .bubble-timing-pop / .bubble-usage-pop：挂在信息行按钮上方的小浮层。
@@ -253,12 +263,11 @@ public:
         auto *tl = new QHBoxLayout(titleRow);
         tl->setContentsMargins(0, 0, 0, 7);
         tl->setSpacing(6);
-        m_title = makeLabel(QStringLiteral("popTitle"), QString(), titleRow);
-        m_title->setTextInteractionFlags(Qt::NoTextInteraction);
-        m_total = makeLabel(QStringLiteral("popTotal"), QString(), titleRow);
-        m_total->setTextInteractionFlags(Qt::NoTextInteraction);
-        tl->addWidget(m_title, 1);
-        tl->addWidget(m_total, 0);
+        m_title = headLabel(QStringLiteral("popTitle"), QString(), titleRow);
+        m_total = makeElidedLabel(QStringLiteral("popTotal"), QString(), titleRow);
+        m_total->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        tl->addWidget(m_title, 0);
+        tl->addWidget(m_total, 1);
         m_layout->addWidget(titleRow);
         m_titleRow = titleRow;
     }
@@ -276,12 +285,13 @@ public:
             auto *hl = new QHBoxLayout(widget);
             hl->setContentsMargins(0, 3, 0, 3);
             hl->setSpacing(18);
-            QLabel *key = makeLabel(QStringLiteral("popRowLabel"), row.second, widget);
-            key->setTextInteractionFlags(Qt::NoTextInteraction);
-            QLabel *value = makeLabel(QStringLiteral("popRowValue"), QString(), widget);
-            value->setTextInteractionFlags(Qt::NoTextInteraction);
-            hl->addWidget(key, 1);
-            hl->addWidget(value, 0);
+            // 左列是固定短标签，保留自然宽度；右值占用剩余宽度并在其中省略。
+            // 若两端都按 stretch=0/1 分布，ElidedLabel 的最小宽度为 0，取值端会被压成 0px。
+            QLabel *key = headLabel(QStringLiteral("popRowLabel"), row.second, widget);
+            ElidedLabel *value = makeElidedLabel(QStringLiteral("popRowValue"), QString(), widget);
+            value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            hl->addWidget(key, 0);
+            hl->addWidget(value, 1);
             m_layout->addWidget(widget);
             m_rows.insert(row.first, qMakePair(widget, value));
         }
@@ -294,39 +304,57 @@ public:
             const QVariant value = values.value(it.key());
             const QString text = value.toString();
             it.value().first->setVisible(!text.isEmpty());
-            it.value().second->setText(text);
+            it.value().second->setFullText(text);
         }
         adjustSize();
     }
 
     void setTitleTotal(const QString &text)
     {
-        m_total->setText(text);
+        m_total->setFullText(text);
         m_total->setVisible(!text.isEmpty());
     }
 
     void popupAbove(QWidget *anchor)
     {
-        adjustSize();
+        if (!anchor)
+            return;
+        m_layout->invalidate();
+        m_layout->activate();
+        // .bubble-timing-pop/.bubble-usage-pop：left:0；bottom:calc(100% + 7px)；min-width:216px
+        QWidget *host = anchor->window();
         const QPoint topLeft = anchor->mapToGlobal(QPoint(0, 0));
-        int x = topLeft.x();
-        int y = topLeft.y() - height() - 7;
-        if (QWidget *host = anchor->window()) {
-            const QRect hostRect = host->geometry();
-            x = qBound(hostRect.left() + 6, x, hostRect.right() - width() - 6);
-            y = qMax(hostRect.top() + 6, y);
-        }
-        move(x, y);
+        const QRect hostRect = host ? QRect(host->mapToGlobal(QPoint(0, 0)), host->size())
+                                    : QRect(topLeft, anchor->size());
+        const int availableWidth = qMax(1, hostRect.width() - 12);
+        setMinimumWidth(qMin(216, availableWidth));
+        setMaximumWidth(availableWidth);
+        const auto anchoredPos = [&](int popupWidth, int popupHeight) {
+            const int minX = hostRect.left() + 6;
+            const int x = qBound(minX, topLeft.x(), qMax(minX, hostRect.right() - popupWidth - 6));
+            const int y = qMax(hostRect.top() + 6, topLeft.y() - popupHeight - 7);
+            return QPoint(x, y);
+        };
+
+        adjustSize();
+        // 样式表要等 show() 之后才 polish：隐藏状态下量到的尺寸偏小，会把弹层压到按钮上。
+        // 先按粗略尺寸上去，再按定稿内容高度重算；max-width 由宿主宽度兜底。
+        move(anchoredPos(width(), height()));
         show();
+        m_layout->invalidate();
+        m_layout->activate();
+        adjustSize();
+        move(anchoredPos(width(), height()));
+        raise();
     }
 
 private:
     QVBoxLayout *m_layout = nullptr;
     QWidget *m_titleRow = nullptr;
     QLabel *m_title = nullptr;
-    QLabel *m_total = nullptr;
+    ElidedLabel *m_total = nullptr;
     // key → (行容器, 值标签)
-    QHash<QString, QPair<QWidget *, QLabel *>> m_rows;
+    QHash<QString, QPair<QWidget *, ElidedLabel *>> m_rows;
 };
 
 // ------------------------------------------------------------------ ProcRow
@@ -353,6 +381,8 @@ ProcRow::ProcRow(const QString &key, const QString &label, QWidget *parent)
     m_chevron = new Chevron(m_head);
     m_chevron->setFixedSize(8, 8);
     m_dot = new PulseDot(m_head);
+    // .run-dot 已从呼吸实心点改为旋转开口环（spinRing .7s）
+    m_dot->setStyle(PulseDot::Spin);
     m_dot->setColor(key == QLatin1String("tools") ? gs::palette().orange : gs::palette().cyan);
     m_dot->setVisible(false);
     m_label = headLabel(QStringLiteral("procLabel"), label, m_head);
@@ -412,6 +442,8 @@ void ProcRow::setRunning(bool running)
         m_summary->setAlignment(running ? (Qt::AlignRight | Qt::AlignVCenter)
                                         : (Qt::AlignLeft | Qt::AlignVCenter));
     restyle(this);
+    restyle(m_label);
+    restyle(m_summary);
 }
 
 void ProcRow::setFailed(bool failed)
@@ -420,11 +452,20 @@ void ProcRow::setFailed(bool failed)
         return;
     setProperty("failed", failed);
     restyle(this);
+    restyle(m_summary);
 }
 
 bool ProcRow::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_head) {
+        if (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave) {
+            const bool hovered = event->type() == QEvent::HoverEnter;
+            setProperty("hovered", hovered);
+            m_chevron->setHovered(hovered);
+            // QSS 的父 :hover 不会驱动子选择器；重刷具体子标签才能让摘要继承行状态
+            restyle(this);
+            restyle(m_summary);
+        }
         if (event->type() == QEvent::MouseButtonRelease) {
             auto *me = static_cast<QMouseEvent *>(event);
             if (me->button() == Qt::LeftButton)
@@ -563,17 +604,18 @@ ToolItemWidget::ToolItemWidget(const QString &callId, const QString &name, const
     auto *summary = new QWidget(this);
     setClass(summary, QStringLiteral("toolItemSummary"));
     summary->setAttribute(Qt::WA_StyledBackground, true);
+    summary->setAttribute(Qt::WA_Hover, true);
     summary->setCursor(Qt::PointingHandCursor);
     auto *sl = new QHBoxLayout(summary);
     sl->setContentsMargins(0, 3, 0, 3);
     sl->setSpacing(8);
     m_dot = new StatusDot(summary);
     m_dot->setState(QStringLiteral("running"));
-    QLabel *nameLabel = headLabel(QStringLiteral("toolItemName"),
-                                  name.isEmpty() ? QStringLiteral("工具调用") : name, summary);
+    m_name = headLabel(QStringLiteral("toolItemName"),
+                       name.isEmpty() ? QStringLiteral("工具调用") : name, summary);
     m_status = headLabel(QStringLiteral("statusLabel"), QStringLiteral("执行中"), summary);
     sl->addWidget(m_dot, 0);
-    sl->addWidget(nameLabel, 1);
+    sl->addWidget(m_name, 1);
     sl->addWidget(m_status, 0);
     m_summary = summary;
     // 工具项标题行同样要能 Tab 到并用 Enter / Space 展开
@@ -644,6 +686,13 @@ void ToolItemWidget::setResult(const QString &result)
 bool ToolItemWidget::eventFilter(QObject *watched, QEvent *event)
 {
     if (watched == m_summary) {
+        if (event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave) {
+            const bool hovered = event->type() == QEvent::HoverEnter;
+            m_summary->setProperty("hovered", hovered);
+            // 状态标签保留自己的成功 / 失败配色，只提亮工具名称
+            restyle(this);
+            restyle(m_name);
+        }
         if (event->type() == QEvent::MouseButtonRelease) {
             auto *me = static_cast<QMouseEvent *>(event);
             if (me->button() == Qt::LeftButton)
@@ -979,11 +1028,10 @@ void MessageWidget::setAttachments(const QVariantList &attachments)
         if (kind == QLatin1String("image") && !url.isEmpty() && QFile::exists(url)) {
             auto *thumb = new QLabel(wrap);
             setClass(thumb, QStringLiteral("attachThumb"));
-            thumb->setFixedSize(84, 84);
             QPixmap pixmap(url);
-            if (!pixmap.isNull())
-                thumb->setPixmap(pixmap.scaled(84, 84, Qt::KeepAspectRatioByExpanding,
-                                               Qt::SmoothTransformation));
+            // 原图留一份，窗口跨过 640 断点时要重新缩放（webui 靠 CSS 换尺寸，Qt 只能手动跟）
+            thumb->setProperty("attachPixmap", QVariant::fromValue(pixmap));
+            m_attachThumbs.append(thumb);
             thumb->setToolTip(name);
             flow->addWidget(thumb);
             continue;
@@ -1004,7 +1052,25 @@ void MessageWidget::setAttachments(const QVariantList &attachments)
         cl->addWidget(nameLabel);
         flow->addWidget(chip);
     }
+    applyAttachmentMetrics();
     m_bubbleLayout->insertWidget(0, wrap);
+}
+
+void MessageWidget::applyAttachmentMetrics()
+{
+    if (m_attachThumbs.isEmpty())
+        return;
+    const QWidget *host = window();
+    const int side = (host && host->width() <= 640) ? 64 : 84;
+    for (QLabel *thumb : m_attachThumbs) {
+        if (!thumb)
+            continue;
+        thumb->setFixedSize(side, side);
+        const QPixmap pixmap = thumb->property("attachPixmap").value<QPixmap>();
+        if (!pixmap.isNull())
+            thumb->setPixmap(pixmap.scaled(side, side, Qt::KeepAspectRatioByExpanding,
+                                           Qt::SmoothTransformation));
+    }
 }
 
 // ---- 过程区
@@ -1247,6 +1313,7 @@ void MessageWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     applyMaxWidths();
+    applyAttachmentMetrics();
 }
 
 void MessageWidget::enterEvent(QEvent *event)

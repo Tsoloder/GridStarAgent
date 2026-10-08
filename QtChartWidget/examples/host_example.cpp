@@ -330,6 +330,26 @@ int main(int argc, char *argv[])
         chart->setMcpTools(QVariantList(), false, true, QString()); // loading 态
         QTimer::singleShot(600, chart, [] { /* 重连成功后 setMcpTools(tools, true, false, "") */ });
     });
+    // 设置中心「用量」页：宿主拉 GET /usage/stats 后回填；这里给零值结构演示空状态
+    QObject::connect(chart, &ChartWidget::usageStatsRequested, chart,
+                     [chart](const QString &requestId, const QString &start, const QString &end,
+                             const QString &provider, const QString &model) {
+                         Q_UNUSED(provider); // 非空时按 ?provider= 过滤
+                         Q_UNUSED(model);    // 非空时按 ?model= 过滤
+                         chart->setUsageStats(requestId, obj({
+                             { "range",
+                               obj({ { "start", start }, { "end", end }, { "resolution", "hour" } }) },
+                             { "totals",
+                               obj({ { "total", 0 }, { "input", 0 }, { "output", 0 },
+                                     { "measured", 0 }, { "estimated", 0 }, { "cache_read", 0 },
+                                     { "turns", 0 }, { "sessions", 0 } }) },
+                             { "buckets", QVariant(QVariantList()) },
+                             { "providers", QVariant(QVariantList()) },
+                             { "models", QVariant(QVariantList()) },
+                             { "candidates",
+                               obj({ { "providers", QVariant(QVariantList()) },
+                                     { "models", QVariant(QVariantList()) } }) } }));
+                     });
 
     // ---- 附件与语音 ----
     QObject::connect(chart, &ChartWidget::attachRequested, chart, [chart] {
