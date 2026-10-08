@@ -1,26 +1,26 @@
 ---
 name: missile-trailing-edge-processing
-description: 引导用户通过 MCP 工具完成导弹翼/舵后缘分部件网格面的碎边合并与结构网格面装配。导弹仅存在 Type1（梢部相邻型，2-4 条边）。适用于弹翼(wing)和舵(fin)两类部件。当用户提到翼后缘面处理、舵后缘面处理、trailing edge、后缘分布、梢部交线时必须使用。
-aliases: [翼后缘面处理, 舵后缘面处理, 后缘网格, trailing edge, 后缘分布, 梢部交线]
-tags: [CFD, 网格, 后缘面, 翼, 舵, 导弹]
+description: 引导用户通过 MCP 工具完成导弹弹翼后缘分部件网格面的碎边合并与结构网格面装配。导弹仅存在 Type1（梢部相邻型，2-4 条边）。适用于弹翼(wing)部件。当用户提到弹翼后缘面处理、trailing edge、后缘分布、梢部交线时必须使用。
+aliases: [翼后缘面处理, 后缘网格, trailing edge, 后缘分布, 梢部交线]
+tags: [CFD, 网格, 后缘面, 翼, 导弹]
 category: CFD
-version: 2.0.0
+version: 2.1.0
 author: Tsolodancer
 allowed-tools: []
 ---
 
-# 导弹翼/舵后缘面处理工作流
+# 导弹弹翼后缘面处理工作流
 
-本 Skill 独立处理导弹翼/舵后缘面的碎边合并与结构网格面装配。导弹后缘面仅有 **Type1（梢部相邻型）**一种类型，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。
+本 Skill 独立处理导弹弹翼后缘面的碎边合并与结构网格面装配。导弹后缘面仅有 **Type1（梢部相邻型）**一种类型，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。
 
 ## 部件分组名对照
 
 | 部件类型 | 后缘面分组 | 梢面分组 | 结合部件 |
 |---------|-----------|---------|---------|
 | 弹翼(wing) | `wingTrailingEdge` | `wingTip`（仅梯形翼存在；三角翼无，以翼侧面自由梢端为准） | `fuselage`（弹体） |
-| 舵(fin) | `finTrailingEdge` | `finTop` | `fuselage` 或 `finshaft`（舵轴） |
 
 > 按 需求文件 1.4：翼梢面只存在于梯形翼，三角翼没有 `wingTip`。三角翼后缘面的梢部端即翼侧面（`wingSideSurface`）自由梢端，Type1 的"梢部相邻"以该自由边为相邻对象。
+> 🔴 当前型号无舵、无舵轴（2026-10-08 确认）：不处理 `finTrailingEdge` / `finTop` / `finshaft`。
 
 ## 开始任务前
 
@@ -44,14 +44,14 @@ allowed-tools: []
 
 ## 前置条件
 
-1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在对应后缘面、结合部件分组（梢面分组 `wingTip` 仅梯形翼存在，三角翼缺失时不阻塞，按自由梢端处理）。🔴 **只有主组（`wing`/`fin`）而无 `wingTrailingEdge`/`finTrailingEdge` 子面分组 → 本阶段直接 `skipped` + `note`，不强行推理**：禁止为定位后缘面做几何反推、禁止对候选面逐个调 `MergeEdgesByDomain` 试探（那会把"没有子面"变成长时间探索）。**后端给了后缘子面分组才做；没给就跳过。**
+1. 调用 `GetAllSpitAssemblyGroupProperty`，已存在对应后缘面、结合部件分组（梢面分组 `wingTip` 仅梯形翼存在，三角翼缺失时不阻塞，按自由梢端处理）。🔴 **只有主组（`wing`）而无 `wingTrailingEdge` 子面分组 → 本阶段直接 `skipped` + `note`，不强行推理**：禁止为定位后缘面做几何反推、禁止对候选面逐个调 `MergeEdgesByDomain` 试探（那会把"没有子面"变成长时间探索）。**后端给了后缘子面分组才做；没给就跳过。**
 2. 通过 `GetAllObjectByType`(6)，返回值中有网格面。
-3. **当地弦长**：只认 `GetMissileDimensions`（弹翼 `wing_root_chord`/`wing_tip_chord`，舵 `fin_root_chord`/`fin_tip_chord`）**或用户直接输入**。⚠️ **禁止用分组属性 `targetSize` 反推**。该接口不可用（恒 `"true"`）时 → **向用户索取当地弦长**；用户亦无法提供 → 本阶段标记 `skipped` + `note`。
+3. **当地弦长**：只认 `GetMissileDimensions`（弹翼 `wing_root_chord`/`wing_tip_chord`）**或用户直接输入**。⚠️ **禁止用分组属性 `targetSize` 反推**。该接口不可用（恒 `"true"`）时 → **向用户索取当地弦长**；用户亦无法提供 → 本阶段标记 `skipped` + `note`。
 4. 上述任一条件不满足时停止。
 
 ## 默认参数
 
-- 当地弦长：**只认 `GetMissileDimensions` 的 `wing_*_chord` / `fin_*_chord`，或用户直接输入**。
+- 当地弦长：**只认 `GetMissileDimensions` 的 `wing_*_chord`，或用户直接输入**。
 - ⚠️ **禁用估算**：不得用分组 `targetSize`×10 或 `0.02×弹径` 反推当地弦长。据此推算的弹径 D 可能偏差 **2×**（`targetSize` 的系数与 需求文件 3.2 的 `0.05×D` / `1/10` 对不上），会直接带偏 `bodySpacing` / `rootSpacing`。
 - `GetMissileDimensions` 不可用 → 向用户索取；拿不到 → 阶段 `skipped` + `note`（**不得用估算值凑参数**）。
 
@@ -71,11 +71,11 @@ allowed-tools: []
 
 用 `GetAllSpitAssemblyGroupProperty` 按组名取 `domain[].ids`：
 
-- **后缘面**：`wingTrailingEdge` / `finTrailingEdge`
-- **梢部面**：`wingTip` / `finTop`（**`wingTip` 仅梯形翼存在**；三角翼没有，其"梢部相邻"以翼侧面的自由梢端为相邻对象）
-- **结合面**：`fuselage` / `finshaft`
+- **后缘面**：`wingTrailingEdge`
+- **梢部面**：`wingTip`（**仅梯形翼存在**；三角翼没有，其"梢部相邻"以翼侧面的自由梢端为相邻对象）
+- **结合面**：`fuselage`
 
-**翼(wing)和舵(fin)各执行一次**。
+> 🔴 当前型号无舵（2026-10-08 确认）：仅对弹翼（wing）执行一次。
 
 ### 处理 Type1
 

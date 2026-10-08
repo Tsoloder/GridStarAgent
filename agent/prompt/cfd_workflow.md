@@ -318,10 +318,10 @@ workflow 中的工具按顺序执行。当前步骤失败时停止后续步骤�
 
 导弹网格生成遵循以下 7 个模块的顺序流程（对齐 t.py 知识库）：
 
-1. **前置处理**：导入导弹 CAD 数模 → 水密性处理 → AI 部件分割（`ClassifyMissile`，后端 6 类 nose/fuselage/tail/wing/fin/finshaft）→ 查分组用 `GetMissilePartGroups`
-2. **几何尺寸**：获取导弹全部关键几何尺寸（弹径 D、全弹长、头部半径 R、翼/舵根梢弦长、半翼展、舵底间隙等）→ `GetMissileDimensions`
-3. **表面网格**：分部件生成表面网格，各部件网格参数遵循 t.py 公式（头部球头 min(0.01×D, 0.25×R)、尖角 0.005×D、翼/舵 0.02×当地弦长等）
-4. **翼/舵各向异性**：翼/舵的弦向/展向/结合处/后缘各向异性网格处理，加载对应 `fin-*` 子 Skill → `DetermineWingTEDirection` + `IdentifyWingLeadingEdge`
+1. **前置处理**：导入导弹 CAD 数模 → 水密性处理 → AI 部件分割（`ClassifyMissile`，后端 4 类 nose/fuselage/tail/wing；🔴 当前型号无舵/舵轴，2026-10-08 确认不再出现 fin/finshaft）→ 查分组用 `GetMissilePartGroups`
+2. **几何尺寸**：获取导弹全部关键几何尺寸（弹径 D、全弹长、头部半径 R、翼根梢弦长、半翼展；🔴 无舵故无 fin_* 字段）→ `GetMissileDimensions`
+3. **表面网格**：分部件生成表面网格，各部件网格参数遵循 t.py 公式（头部球头 min(0.01×D, 0.25×R)、尖角 0.005×D、翼 0.02×当地弦长等）
+4. **翼各向异性**：弹翼的弦向/展向/结合处/后缘各向异性网格处理，加载对应 `missile-*` 子 Skill → `DetermineWingTEDirection` + `IdentifyWingLeadingEdge`
 5. **空间网格**：导弹弓形外场创建（1×弹体长度，头部距离 1.5×头部半径）→ `CreateMissileFarField`
 6. **质量检查与输出**：导弹专属质量检查标准。首选 `CheckMissileMeshQuality`，若失败则回退到通用工具 `ExamineDomain(examType="MinmumAngle")` + `ExamineBlock(examType="ExamineMaximumIncludeAngle")`。
 
@@ -337,7 +337,7 @@ workflow 中的工具按顺序执行。当前步骤失败时停止后续步骤�
     {"id": "missile-segment", "title": "导弹 AI 分部件", "status": "pending", "note": ""},
     {"id": "missile-geoparam", "title": "几何参数获取", "status": "pending", "note": ""},
     {"id": "missile-surface", "title": "表面网格生成", "status": "pending", "note": ""},
-    {"id": "missile-aniso", "title": "翼/舵各向异性", "status": "pending", "note": ""},
+    {"id": "missile-aniso", "title": "翼各向异性", "status": "pending", "note": ""},
     {"id": "missile-farfield", "title": "外场创建与空间网格", "status": "pending", "note": ""},
     {"id": "missile-quality", "title": "质量检查与输出", "status": "pending", "note": ""}
   ]
@@ -350,15 +350,15 @@ workflow 中的工具按顺序执行。当前步骤失败时停止后续步骤�
 |--------|------|------|
 | `ClassifyMissile` | missile | 导弹 AI 部件分割：水密性处理→表面网格→点云导出→远程 AI 分割→几何法子部件分割→自动染色→清除网格。参数 serverHost/serverPort/outputDir（默认 7.31.130.92:9009）。导入用 `ImportCADFile`（复用飞机工具）。 |
 | `GetMissilePartGroups` | missile | 查询当前模型的导弹部件分组（组名 + 超面 ID）。需先 `ClassifyMissile`。 |
-| `GetMissileDimensions` | missile | 获取导弹全部关键几何尺寸（10 项：全弹长 `fuselage_length`、弹径 `body_diameter`、球头半径 `nose_radius`、翼根/梢弦长 `wing_root_chord`/`wing_tip_chord`、舵根/梢弦长 `fin_root_chord`/`fin_tip_chord`、半翼展、舵底间隙等）。 |
-| `DetermineWingTEDirection` | missile | 翼/舵后缘方向判定。仅处理 Type1。 |
-| `IdentifyWingLeadingEdge` | missile | 翼/舵前缘识别。 |
+| `GetMissileDimensions` | missile | 获取导弹全部关键几何尺寸（7 项：全弹长 `fuselage_length`、弹径 `body_diameter`、尾口径 `body_diameter_tail`、球头半径 `nose_radius`、翼根弦长 `wing_root_chord`、翼梢弦长 `wing_tip_chord`、半翼展 `wing_half_span`；🔴 当前型号无舵，无 `fin_*` 字段）。 |
+| `DetermineWingTEDirection` | missile | 弹翼后缘方向判定。仅处理 Type1。 |
+| `IdentifyWingLeadingEdge` | missile | 弹翼前缘识别。 |
 | `CreateMissileFarField` | missile | 导弹弓形外场创建。外场规则：1×弹体长度，头部距离 1.5×头部半径。 |
 | `CheckMissileMeshQuality` | missile | 导弹网格质量综合检查（一站式）。面最小角>10°，体最大角≤178°。失败时回退到 `ExamineDomain` + `ExamineBlock`。 |
 
 ### 6.3 导弹 Skill 路由
 
 - 主流程：`missile-cfd-meshing-workflow`（导弹版 CAD→网格完整链，唯一运行时主流程）
-- 各向异性子 Skill：`missile-chordwise-direction`、`missile-spanwise-direction`、`missile-root-junction`、`missile-trailing-edge-processing`（翼和舵通用，通过 `GetAllSpitAssemblyGroupProperty` 按组名取 `domain[].ids` 区分 wing 与 fin 分组）
+- 各向异性子 Skill：`missile-chordwise-direction`、`missile-spanwise-direction`、`missile-root-junction`、`missile-trailing-edge-processing`（🔴 当前型号只有弹翼，无舵；子 Skill 仅处理 wing 分组，不再区分 wing/fin）
 - 参考文档：导弹部件分割、几何参数、表面网格、各向异性、CAD→网格全流程、Type1 后缘处理
 - 注：`missile-meshing-workflow`（导航 Skill）仅为开发期辅助改代码的文档，不是网格生成运行时流程，勿在运行阶段加载

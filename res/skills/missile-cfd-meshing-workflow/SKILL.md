@@ -1,6 +1,6 @@
 ---
 name: missile-cfd-meshing-workflow
-description: 导弹 CFD 非结构网格生成全流程路由 — CAD 导入、水密性消除、导弹 AI 分部件、碎面合并、导弹几何参数 (D / R / 弦长)、表面网格、各向异性 (可选)、翼 / 舵后缘处理、弓形外场、空间网格、边界条件、质量检查、保存与导出。当用户提到导弹、导弹网格、弹翼、舵面、弹头 / 弹体 / 尾部, 各向异性, 后缘处理, 外场, 边界条件, 质量检查, 导出网格时必须使用。
+description: 导弹 CFD 非结构网格生成全流程路由 — CAD 导入、水密性消除、导弹 AI 分部件、碎面合并、导弹几何参数 (D / R / 弦长)、表面网格、各向异性 (可选)、弹翼后缘处理、弓形外场、空间网格、边界条件、质量检查、保存与导出。当用户提到导弹、导弹网格、弹翼、弹头 / 弹体 / 尾部, 各向异性, 后缘处理, 外场, 边界条件, 质量检查, 导出网格时必须使用。
 aliases: [导弹网格, 网格生成, 导弹部件分割, 表面网格, 空间网格, 边界条件, 后缘面处理, 各向异性, 弓形外场, 水密性, 继续生成网格]
 tags: [导弹, CFD, 网格, 工业软件, 各向异性, 弓形外场]
 category: CFD
@@ -17,7 +17,7 @@ allowed-tools: []
 
 ## 认定流程
 
-**开工即判：满足导弹部件体系即走导弹流程。** 导弹部件体系：`nose` / `fuselage` / `tail` / `wing` / `fin` / `finshaft` 六类，其中 **wing = 弹翼，fin = 舵，fuselage = 弹体**；中间态（子组归并/`rudder*` 等旧名混用）按 `references/missile-segmentation.md`「分组归并」规则统一。**不满足** 或是纯飞机、纯发动机模型 → **停止，提示用户先用飞机流程。**
+**开工即判：满足导弹部件体系即走导弹流程。** 导弹部件体系：`nose` / `fuselage` / `tail` / `wing` 四类（其中 **wing = 弹翼，fuselage = 弹体**；🔴 2026-10-08 确认当前型号无舵、无舵轴，不出现 `fin` / `finshaft`）；中间态（子组归并/旧名混用）按 `references/missile-segmentation.md`「分组归并」规则统一。**不满足** 或是纯飞机、纯发动机模型 → **停止，提示用户先用飞机流程。**
 
 ## 开始任务前
 
@@ -35,7 +35,7 @@ allowed-tools: []
 
 ## ~~ 流程 A：从 CAD 到网格导出（完整链） ~~
 
-阶段链： CAD 导入与单位设置 → 水密性处理与自由边检查 → 导弹 AI 分部件 (ClassifyMissile) → **分组归并（子 → 主）** → 碎面合并 → 导弹几何参数 → 表面网格生成 → 各向异性 (可选) → 翼 / 舵后缘处理 → 体网格块创建、外场生成 → 空间网格 → 边界条件设置 → 质量检查 → 保存与导出。
+阶段链： CAD 导入与单位设置 → 水密性处理与自由边检查 → 导弹 AI 分部件 (ClassifyMissile) → **分组归并（子 → 主）** → 碎面合并 → 导弹几何参数 → 表面网格生成 → 各向异性 (可选) → 弹翼后缘处理 → 体网格块创建、外场生成 → 空间网格 → 边界条件设置 → 质量检查 → 保存与导出。
 
 | #  | 阶段 / 触发意图 | 读取 |
 |---|---|---|
@@ -43,10 +43,10 @@ allowed-tools: []
 | 2 | 水密性处理、缝隙、自由边检查 | `references/missile-cad-to-mesh.md` §2 |
 | 3 | 导弹分部件、AI 分割、分组归并 → 主组 | `references/missile-segmentation.md` |
 | 4 | 碎面合并 | `references/missile-cad-to-mesh.md` §3.1 |
-| 5 | 弹径/弦长/球头半径/舵底间隙、尺寸测量 | `references/missile-geometry-parameters.md` |
+| 5 | 弹径/弦长/球头半径、尺寸测量 | `references/missile-geometry-parameters.md` |
 | 6 | 导弹表面网格生成 | `references/missile-surface-mesh.md` |
-| 7 | 各向异性（可选）：翼/舵 前缘・后缘狭长面・梢部・侧面・结合处 加密 | `references/missile-anisotropic-mesh.md`（适用位置、工具、参数总览；按位置路由：弦向→`missile-chordwise-direction`、展向→`missile-spanwise-direction`、结合处→`missile-root-junction`；后缘→阶段 8） |
-| 8 | 翼/舵后缘面处理 | 独立 Skill `missile-trailing-edge-processing` |
+| 7 | 各向异性（可选）：弹翼 前缘・后缘狭长面・梢部・侧面・结合处 加密（🔴 当前型号无舵，仅处理 wing） | `references/missile-anisotropic-mesh.md`（适用位置、工具、参数总览；按位置路由：弦向→`missile-chordwise-direction`、展向→`missile-spanwise-direction`、结合处→`missile-root-junction`；后缘→阶段 8） |
+| 8 | 弹翼后缘面处理 | 独立 Skill `missile-trailing-edge-processing` |
 | 9 | 体网格块创建、外场生成 | `references/missile-farfield-and-volume.md` §6.1–6.3 |
 | 10 | 空间网格 / 体网格 / 附面层 | `references/missile-farfield-and-volume.md` §6.4 |
 | 11 | 边界条件、BC、物面、远场、对称 | `references/missile-farfield-and-volume.md` §7.4 |
@@ -59,7 +59,7 @@ allowed-tools: []
 用户明确表示表面网格已生成时入此流程，跳过 1–6，按以下顺序自动推进：
 
 1. 各向异性 （可选：若用户对网格数量没有要求则跳过）〔流程 A 阶段 7〕
-2. 翼 / 舵后缘面处理 〔流程 A 阶段 8〕
+2. 弹翼后缘面处理 〔流程 A 阶段 8〕
 3. 体网格块创建、外场生成：按流程 A 表第 9 行执行；🔴 失败报不封闭线 = 转排查。 〔流程 A 阶段 9〕
 4. 空间网格 / 体网格 / 附面层 （`references/missile-farfield-and-volume.md` §6.4）〔流程 A 阶段 10〕
 5. 边界条件设置 （`references/missile-farfield-and-volume.md` §7.4）〔流程 A 阶段 11〕
@@ -68,7 +68,7 @@ allowed-tools: []
 
 ## 硬闸门 （任何流程都不得违反）
 
-1. **顺序闸门**： 表面网格生成后固定顺序 `各向异性处理（可选）→ 翼/舵后缘处理 → 体网格块创建、外场生成 → 空间网格 → 边界条件 → 质量检查 → 保存导出`，严禁跳级；各向异性为可选，跳过时须在 note 说明。
+1. **顺序闸门**： 表面网格生成后固定顺序 `各向异性处理（可选）→ 弹翼后缘处理 → 体网格块创建、外场生成 → 空间网格 → 边界条件 → 质量检查 → 保存导出`，严禁跳级；各向异性为可选，跳过时须在 note 说明。
 2. **水密闸门**： 表面网格生成前必须**实际调用 `DealWatertight` 并验证 `free_edge_count` 为 0**。🔴 **不得以"分组已存在 / ClassifyMissile 已运行过 / 记忆中有公差值"为由跳过**（分组存在 ≠ 水密性已完成，分组可来自手动导入或历史工程残留；过往内存中的公差值是参考值，不代表当前模型已水密）。若返回 `free_edge_count > 0`，公差加大 5 倍重试，最多 2 次；仍不通过则停止迭代，提示用户当前自由边数并建议检查模型几何。自由边全部位于半模线位置时可接受。
 3. **边界闸门**： 首次铺底必须统一置 `-10`（无 BC），后续逐组设置。
 4. **质量闸门**： 面网格除去各向异性单元处最小角 > 10°。
@@ -89,7 +89,7 @@ allowed-tools: []
 ## 依赖与可选性
 
 - 部件尺寸依赖几何接口 `GetMissileDimensions`；几何接口依赖产品分割（`ClassifyMissile`）或用户输入。
-- 导弹几何量为 10 项字段，无 `mac`；各向异性尺寸依赖当地弦长，不依赖 `mac`。
+- 导弹几何量为 7 项字段，无 `mac`；各向异性尺寸依赖当地弦长，不依赖 `mac`。
 - `GetMissileDimensions` 返回恒定 `"true"` 时向用户索取 D/R/ 弦长。
 - 各向异性为可选步骤，用户不提网格数量要求时可跳过，但必须在 note 说明。
 

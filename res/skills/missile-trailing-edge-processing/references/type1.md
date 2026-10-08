@@ -1,6 +1,6 @@
 # 类型一：梢部相邻后缘面处理
 
-类型一后缘面与梢部面（`{prefix}Tip`，`{prefix}` = `wing` 或 `fin`）相邻，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。弹翼(wing)和舵(fin)的后缘处理逻辑完全相同，区别仅在于分组名前缀。
+类型一后缘面与梢部面（`wingTip`）相邻，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。🔴 当前型号无舵（2026-10-08 确认）：仅弹翼（wing）有后缘处理，无 `finTrailingEdge`。
 
 > **弹翼梢部说明（按 需求文件 1.4）**：翼梢面 `wingTip` 只存在于梯形翼，三角翼没有。三角翼后缘面（`wingTrailingEdge`）的梢部端以翼侧面（`wingSideSurface`）的自由梢边为相邻对象，下文所有 `wingTip` 引用在三角翼上以该自由梢边代替；`wingTip` 分组存在时（梯形翼）直接用分组。
 
@@ -19,7 +19,7 @@
 - `rootSpacing` = 0.02 × 当地弦长（靠近根部端）
 - `params` = `"1.2,10,1.2,10"`
 
-> ⚠️ **当地弦长的来源只认 `GetMissileDimensions`（弹翼 `wing_root_chord`/`wing_tip_chord`，舵 `fin_root_chord`/`fin_tip_chord`）或用户直接输入**。**禁止**用分组属性 `targetSize` 反推。该接口不可用时向用户索取；拿不到 → 本阶段 `skipped` + `note`。
+> ⚠️ **当地弦长的来源只认 `GetMissileDimensions`（弹翼 `wing_root_chord`/`wing_tip_chord`）或用户直接输入**。**禁止**用分组属性 `targetSize` 反推。该接口不可用时向用户索取；拿不到 → 本阶段 `skipped` + `note`。
 
 ---
 
@@ -48,7 +48,7 @@
 
 4. **判定 L1、L2 的方向**：
    - 调用 `DetermineWingTEDirection`（后缘面 ID、梢部面 ID、longids），得到 `intersection_connector_id` 和 `longEdge_tip_end`（两条长边各自靠近梢部的端点）。
-   - ⚠️ 若 `DetermineWingTEDirection` 返回兜底值（不可用）：跳过该工具，按几何常识判定——梢部端 = 靠近翼梢/舵顶（`wingTip`/`finTop` 一侧）的端点，另一侧为根部端。
+   - ⚠️ 若 `DetermineWingTEDirection` 返回兜底值（不可用）：跳过该工具，按几何常识判定——梢部端 = 靠近翼梢（`wingTip` 一侧）的端点，另一侧为根部端。
    - `longEdge_tip_end[0]` = `"start"` → L1 的 start 端靠近梢部（headspace=`bodySpacing`, tailspace=`rootSpacing`）
    - `longEdge_tip_end[0]` = `"end"` → L1 的 end 端靠近梢部（headspace=`rootSpacing`, tailspace=`bodySpacing`）
    - L2 同理（`longEdge_tip_end[1]`）。

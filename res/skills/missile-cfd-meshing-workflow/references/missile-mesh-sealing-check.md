@@ -72,14 +72,14 @@ ratio = lines / max(faces, 1)                # 边/面比
 | 指标 | 取法（只读） | 正常 | 异常 |
 |---|---|---|---|
 | **边/面比** | `GetAllObjectByType(1)` 数模线 ÷ `GetAllObjectByType(2)` 数模面 | **≤3**（闭合面 E ≈ 1.5–2 F） | **>5** |
-| **面数 vs 部件数** | `GetAllObjectByType(2)` ÷ 实际部件数 | 每部件 1–5 面 | 单组远超（如 4 个舵却分出 76 个面） |
+| **面数 vs 部件数** | `GetAllObjectByType(2)` ÷ 实际部件数 | 每部件 1–5 面 | 单组远超（如某子部件却分出 76 个面） |
 | **分组面数分布** | `GetAllSpitAssemblyGroupProperty()` | 各组面数 ≈ 该部件实际片数 | 某组面数异常多 |
 
 > ⚠️ **边/面比偏高有两种完全不同的成因，处置也不同 —— 必须区分，否则会修错地方**：
 >
 > | 成因 | 特征 | 处置 |
 > |---|---|---|
-> | **A. 面被切碎** | `GetAllObjectByType(2)` 本身就大（4 个舵却 76 个面） | §3.1 的 `UGDamageRepari`（碎面修复）合并，必要时 `CreateCoons` 重建单面 |
+> | **A. 面被切碎** | `GetAllObjectByType(2)` 本身就大（某子部件却 76 个面） | §3.1 的 `UGDamageRepari`（碎面修复）合并，必要时 `CreateCoons` 重建单面 |
 > | **B. 游离线多** | 面数正常，但大量曲线**不属于任何面的边界** | `AutoExtractConnector` / `ManualExtractConnector` 重建共享边界；残留线本身是垃圾，可考虑 `DeleteFC` 清理（⚠️ 破坏性，先备份） |
 
 > 💡 `.spd` 是 **OpenCASCADE BREP 文本格式**，可直接读出 `Surfaces` / `Curves` / `TShapes` 计数乃至逐条边的端点坐标 —— 定位"碎在哪"时优先读它，比反复重生成网格快得多。

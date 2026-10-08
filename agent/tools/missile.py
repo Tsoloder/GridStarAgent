@@ -18,15 +18,13 @@ from client import send_post_request
 def ClassifyMissile(serverHost: str, serverPort: int, outputDir: str):
     """导弹 AI 部件分割（后端接口名 ClassifyMissile）：对当前已导入的导弹数模执行水密性处理 → 表面网格生成 → 点云导出 → 远程 AI 分割 → 几何法子部件分割 → 各部件自动染色 → 清除网格。
 
-    分割类别（主体 3 类 + 弹翼/舵子面 + 舵轴）：
+    分割类别（主体 3 类 + 弹翼子面）：
     - nose(弹头)：球头 / 尖锐头部
     - fuselage(弹体)
     - tail(尾部)：尾部收段
     - 弹翼(wing)无主组，按 需求文件 1.4 拆分为（3 个基本子面 + 1 条件性子面）：
       wingLeadingEdge / wingTrailingEdge / wingSideSurface（+ wingTip 仅梯形翼存在，三角翼无）
-    - 舵(fin)无主组，按 需求文件 1.4 拆分为（5 子面）：
-      finLeadingEdge / finTrailingEdge / finTop / finSideSurface / finRoot
-    - finshaft（舵轴，独立分组，不属于上述子面）
+    - 🔴 当前型号无舵、无舵轴（2026-10-08 确认）：不产出 fin* 子面、finshaft 分组
 
     使用场景：导弹数模文件已通过 ImportCADFile 导入到 GridStar 中。
     执行后返回 JSON 格式的部件分割结果（含翼面子部件）。
@@ -37,24 +35,18 @@ def ClassifyMissile(serverHost: str, serverPort: int, outputDir: str):
         outputDir: 点云文件和分割结果 JSON 的输出目录（默认 "D:/A_GridStarCode/output"）。
 
     Returns:
-        成功时返回 status="success"，result 为以下格式的列表（共 12 个分组：nose/fuselage/tail 3 主体类 + 舵轴 + 3 个弹翼基本子面 + 5 个舵子面；wingTip 仅梯形翼时才额外返回）：
+        成功时返回 status="success"，result 为以下格式的列表（共 7 个分组：nose/fuselage/tail 3 主体类 + 3 个弹翼基本子面 + 1 个条件性子面；wingTip 仅梯形翼时才额外返回）：
 
         [  # ===== 主体类 =====
           {"group_name": "nose",      "faces": [...]},   # 弹头（球头或尖头）
           {"group_name": "fuselage",  "faces": [...]},   # 弹体
           {"group_name": "tail",      "faces": [...]},   # 尾部
-          {"group_name": "finshaft",  "faces": [...]},   # 舵轴（独立分组）
           # ===== 弹翼子面（无 wing 主组；需求文件 1.4：前缘面、后缘面、翼侧面；翼梢面仅梯形翼）=====
           {"group_name": "wingLeadingEdge",  "faces": [...]},  # 翼前缘面
           {"group_name": "wingTrailingEdge", "faces": [...]},  # 翼后缘面
           {"group_name": "wingSideSurface",  "faces": [...]},  # 翼侧面
           {"group_name": "wingTip",          "faces": [...]},  # 翼梢面（仅梯形翼存在，三角翼无）
-          # ===== 舵子面（无 fin 主组；需求文件 1.4：前缘面、舵顶面、根部面、后缘面、侧面）=====
-          {"group_name": "finLeadingEdge",  "faces": [...]},  # 舵前缘面
-          {"group_name": "finTrailingEdge", "faces": [...]},  # 舵后缘面
-          {"group_name": "finTop",          "faces": [...]},  # 舵顶面
-          {"group_name": "finSideSurface",  "faces": [...]},  # 舵侧面
-          {"group_name": "finRoot",         "faces": [...]},  # 舵根部面
+          # ===== 注：当前型号无舵(fin*)、无舵轴(finshaft) =====
         ]
 
         faces 为整数 face_id 列表，对应数模原始面。该结果直接用于后续 UGSpitAssembly 分组操作。
@@ -213,7 +205,7 @@ def GetMissileDimensions():
 
     需先运行 AI 分割（ClassifyMissile）方能获取有效值。
 
-    返回参数（10 项，后端 snake_case 字段）：
+    返回参数（7 项，后端 snake_case 字段；🔴 2026-10-08 起当前型号无舵，已移除 fin_* 3 项）：
     - fuselage_length: 全弹长（外场基准，弓形外场 = 1× 全弹长）
     - body_diameter: 弹径（主体口径，弹体/尾部/头部网格尺寸基准 D）
     - body_diameter_tail: 弹尾口径
@@ -221,11 +213,8 @@ def GetMissileDimensions():
     - wing_root_chord: 翼根弦长（弹翼网格尺寸基准）
     - wing_tip_chord: 翼梢弦长（弹翼梢部网格尺寸）
     - wing_half_span: 半翼展（展向分布用）
-    - fin_root_chord: 舵根弦长（舵网格尺寸基准）
-    - fin_tip_chord: 舵梢弦长
-    - fin_clearance_height: 舵底间隙高度（舵底到弹体距离 H）
 
-    > 命名提示：本模块函数名与参数名统一使用现行命名 —— `wing` = 弹翼、`fin` = 舵、`fuselage` = 弹体、`finshaft` = 舵轴；分组名与参数名同此口径。
+    > 命名提示：本模块函数名与参数名统一使用现行命名 —— `wing` = 弹翼、`fuselage` = 弹体；当前型号无舵(`fin`)、无舵轴(`finshaft`)，相关分组/字段不再出现。
 
     Returns:
         成功时返回 status="success"，result 为 JSON 字符串：
@@ -236,10 +225,7 @@ def GetMissileDimensions():
           "nose_radius": 50.0,
           "wing_root_chord": 1200.0,
           "wing_tip_chord": 800.0,
-          "wing_half_span": 2500.0,
-          "fin_root_chord": 600.0,
-          "fin_tip_chord": 400.0,
-          "fin_clearance_height": 50.0
+          "wing_half_span": 2500.0
         }
         失败时返回 status="error"。
     """
@@ -263,7 +249,7 @@ def GetMissilePartGroups():
           {"group_name": "wing",  "face_count": 6, "face_ids": [...]},
           ...
         ]
-        - group_name: 组名（后端 6 类：nose / fuselage / tail / wing / fin / finshaft）
+        - group_name: 组名（后端 4 类：nose / fuselage / tail / wing；🔴 2026-10-08 起当前型号无舵( fin )无舵轴( finshaft)，已移除）
         - face_count: 该组包含的超面数量
         - face_ids: 该组包含的超面 ID 列表
         失败时返回 status="error"。
