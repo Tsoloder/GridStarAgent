@@ -163,7 +163,7 @@ def main():
     print("=" * 72)
     print("⑥ 截图：拍到的是不是真界面")
     print("=" * 72)
-    cap = load(sa.CaptureGridStarWindow(activate=True, clean=True))
+    cap = load(sa._capture_gridstar(activate=True, clean=True))
     if cap.get("status") != "success":
         check("CaptureGridStarWindow 成功", False, str(cap.get("result"))[:300])
         return summary()
@@ -247,7 +247,7 @@ def main():
         time.sleep(0.6)
         facts = sa._window_facts(hwnd)
         print("最小化后 is_iconic:", facts.get("is_iconic"))
-        cap2 = load(sa.CaptureGridStarWindow(activate=True))
+        cap2 = load(sa._capture_gridstar(activate=True))
         after = sa._window_facts(hwnd)
         print("截图 status       :", cap2.get("status"))
         print("截图后 is_iconic  :", after.get("is_iconic"),

@@ -23,6 +23,46 @@ def test_base_prompt_path_points_to_agent_prompt():
     assert "CFD" in agent_loop._load_base_prompt()
 
 
+def test_screen_readonly_tools_skip_plan_and_approval_gates():
+    """截图/切前台只读：auto 模式不必先建计划，manual 模式不弹审批卡。
+
+    这两道门禁都靠 _is_query_tool 分流（auto 模式见 _only_readonly_calls，
+    manual 模式见工具执行分支），而它原先只认 Get/Query/... 前缀，
+    CaptureGridStarWindow 因此被当成操作类工具拦下过。
+    """
+    import agent_loop
+
+    for name in ("CaptureGridStarWindow", "ActivateGridStarWindow",
+                 "FindGridStarWindow", "GetUIElementInfo"):
+        assert agent_loop._is_query_tool(name), name
+    for name in ("ClickAtPoint", "DragAtPoint", "ScrollAtPoint", "ClickUIElement",
+                 "TypeTextInUIElement", "SendKeyboardShortcut"):
+        assert not agent_loop._is_query_tool(name), name
+    assert agent_loop._only_readonly_calls([{"name": "CaptureGridStarWindow"}])
+    assert not agent_loop._only_readonly_calls(
+        [{"name": "CaptureGridStarWindow"}, {"name": "ClickAtPoint"}])
+
+
+def test_capture_tool_is_declared_without_arguments():
+    """模型侧零参数：截图不该为参数确认多花一轮，也不该有机会传错参数。
+
+    实现体 _capture_gridstar 仍保留 window_title / activate / clean 三个开关，
+    脚本与自测要验 PrintWindow 回退路径时用得上。
+    """
+    import inspect
+    import sys
+
+    tools_dir = Path(__file__).resolve().parents[2] / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    sa = pytest.importorskip("screen_automation",
+                             reason="桌面依赖（mss/uiautomation）未安装")
+
+    assert list(inspect.signature(sa.CaptureGridStarWindow).parameters) == []
+    inner = inspect.signature(sa._capture_gridstar).parameters
+    assert {"window_title", "activate", "clean"} <= set(inner)
+
+
 def _make_config():
     return config_from_dict({
         "version": 1,

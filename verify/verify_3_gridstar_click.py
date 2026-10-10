@@ -64,7 +64,7 @@ def load(raw):
 
 def grab(tag, clean=True):
     """截一张图，落盘并返回 (payload, ndarray)。"""
-    out = load(sa.CaptureGridStarWindow(activate=True, clean=clean))
+    out = load(sa._capture_gridstar(activate=True, clean=clean))
     if out.get("status") != "success":
         raise RuntimeError("截图失败：%s" % str(out.get("result"))[:300])
     r = out["result"]

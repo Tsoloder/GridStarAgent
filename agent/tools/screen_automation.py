@@ -713,6 +713,22 @@ def _find_gridstar_window(window_title: Optional[str] = None,
     return chosen
 
 
+def _find_gridstar_window_any(window_title: Optional[str] = None) -> Optional[dict]:
+    """定位 GridStar 主窗口：先找可见的，一个可见的都没有时才退回隐藏候选。
+
+    隐藏候选只给「把窗口叫回来」的场景用（ActivateGridStarWindow /
+    CaptureGridStarWindow）。返回值里带 was_hidden=True，调用方据此如实说明
+    这次是先唤醒再操作，而不是装作窗口本来就在那儿。
+    """
+    info = _find_gridstar_window(window_title)
+    if info is not None:
+        return info
+    info = _find_gridstar_window(window_title, include_hidden=True)
+    if info is not None:
+        info["was_hidden"] = True
+    return info
+
+
 def _input_gate(info: dict) -> tuple:
     """输入前的 UIPI 闸门，返回 (允许?, 拒绝原因)。"""
     rid = info.get("integrity_rid")
@@ -874,6 +890,37 @@ def _restore_window(hwnd: int, settle_s: float = _UI_SETTLE_S) -> bool:
     if not restored:
         logger.info("还原窗口 %s 失败：已尝试 WM_SYSCOMMAND/SC_RESTORE 与 ShowWindow", hwnd)
     return restored
+
+
+def _show_window(hwnd: int, settle_s: float = _UI_SETTLE_S) -> bool:
+    """把被隐藏或最小化的窗口叫回可见状态，返回它现在是否可见且不最小化。
+
+    这是比 _restore_window 更宽的一步：IsIconic 为假时 _restore_window 直接
+    返回 True 什么也不做，而 Qt 程序最小化到托盘、或被 ShowWindow(SW_HIDE)
+    收起来的窗口 IsWindowVisible 是 False、IsIconic 也是 False，那种窗口用
+    最小化的还原手法碰不到。截一个隐藏窗口只会拿到它上次留下的陈画面，
+    所以「叫回来」是截图的前提。
+    """
+    try:
+        if win32gui.IsWindowVisible(hwnd) and not win32gui.IsIconic(hwnd):
+            return True
+    except Exception as exc:
+        logger.debug("读取窗口 %s 可见状态失败: %s", hwnd, exc)
+        return False
+    if win32gui.IsIconic(hwnd):
+        _restore_window(hwnd, settle_s=settle_s)
+    try:
+        if not win32gui.IsWindowVisible(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+        if win32gui.IsIconic(hwnd):
+            win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+    except Exception as exc:
+        logger.debug("显示窗口 %s 失败: %s", hwnd, exc)
+    time.sleep(settle_s)
+    try:
+        return bool(win32gui.IsWindowVisible(hwnd)) and not bool(win32gui.IsIconic(hwnd))
+    except Exception:
+        return False
 
 
 def _force_foreground(hwnd: int) -> bool:
@@ -1811,15 +1858,22 @@ def ActivateGridStarWindow(window_title: str = "") -> str:
     missing = _pywin32_error("ActivateGridStarWindow")
     if missing:
         return missing
-    info = _find_gridstar_window(window_title or None)
+    info = _find_gridstar_window_any(window_title or None)
     if info is None:
         return _no_window_error(window_title)
     hwnd = info["hwnd"]
+    was_hidden = bool(info.pop("was_hidden", False))
+    if was_hidden or not info["is_visible"]:
+        # 隐藏窗口也是前台限制的一部分：先把它叫回可见，再谈切前台
+        _show_window(hwnd)
     activated = _bring_to_foreground(hwnd)
-    refreshed = _find_gridstar_window(window_title or None) or info
+    refreshed = _find_gridstar_window_any(window_title or None) or info
     refreshed.pop("transient_windows", None)
+    refreshed.pop("was_hidden", None)
     payload = {
         "action": "activate",
+        "was_hidden": was_hidden,
+        "restored_from_hidden": bool(was_hidden and refreshed.get("is_visible")),
         "is_foreground": bool(activated),
         "window": refreshed,
     }
@@ -1832,15 +1886,31 @@ def ActivateGridStarWindow(window_title: str = "") -> str:
     return _ok(payload)
 
 
-def CaptureGridStarWindow(window_title: str = "", activate: bool = True,
-                          clean: bool = False) -> str:
-    """截取 GridStar 窗口的可见区域截图。
+def CaptureGridStarWindow() -> str:
+    """截取 GridStar 窗口的可见区域截图。无需任何参数，直接调用。
 
     截图矩形取自 DWM 的实际可见边框（DWMWA_EXTENDED_FRAME_BOUNDS），并裁剪到
     虚拟屏幕范围内：GetWindowRect 含一圈 DWM 隐形边框，直接用会多出黑边，
     窗口部分移出屏幕时又会让抓图越界。
-    默认先把窗口切到前台再截图（activate=True），否则截到的可能是压在 GridStar
-    上面的别的窗口；结果里的 is_foreground 会如实反映这一点。
+    先按进程（gridstar.exe）定位主窗口，必要时还原并切到前台再截图，否则截到的
+    可能是压在 GridStar 上面的别的窗口；结果里的 is_foreground 会如实反映这一点。
+
+    Returns:
+        JSON 字符串。成功时 result 含 image（base64 PNG）、width、height、format、
+        method（region=区域抓屏 / printwindow=窗口自绘）、capture_rect（坐标工具的
+        基准矩形），以及窗口身份与 is_foreground 等现场信息。
+        图片部分会被 Agent 侧转成附件图片发送给模型，不会以 base64 文本进上下文。
+
+    三个内部开关（标题过滤 / 是否切前台 / 是否用 PrintWindow 自绘）保留在
+    _capture_gridstar() 里供脚本与自测直接调用，模型侧不暴露：拍一张图不该为
+    参数确认多花一轮，也不该让模型有机会传错参数。
+    """
+    return _capture_gridstar()
+
+
+def _capture_gridstar(window_title: str = "", activate: bool = True,
+                      clean: bool = False) -> str:
+    """CaptureGridStarWindow 的实现体，保留三个开关给脚本与自测用。
 
     Args:
         window_title: 可选，进程匹配之后的标题过滤关键字。
@@ -1849,30 +1919,26 @@ def CaptureGridStarWindow(window_title: str = "", activate: bool = True,
             把压在 GridStar 上面的窗口拍进来，但若视口是 OpenGL 直出，PrintWindow
             可能画不出内容；那些情况会自动回退到区域抓取，并在结果的 method /
             clean_fallback 里说明实际用了哪种方式。
-
-    Returns:
-        JSON 字符串。成功时 result 含 image（base64 PNG）、width、height、format、
-        method（region=区域抓屏 / printwindow=窗口自绘）、capture_rect（坐标工具的
-        基准矩形），以及窗口身份与 is_foreground 等现场信息。
-        图片部分会被 Agent 侧转成附件图片发送给模型，不会以 base64 文本进上下文。
     """
     missing = _missing_deps_error("CaptureGridStarWindow", needs=("mss",))
     if missing:
         return missing
-    info = _find_gridstar_window(window_title or None)
+    info = _find_gridstar_window_any(window_title or None)
     if info is None:
         return _no_window_error(window_title)
 
+    was_hidden = bool(info.get("was_hidden")) or not info["is_visible"]
     activated = False
-    if info["is_iconic"]:
-        # 最小化窗口没有可截的矩形（rect 全是 -32000），还原是截图的前提，
-        # 与「要不要切前台」无关，所以放在 activate 判断之前无条件尝试。
-        _restore_window(info["hwnd"])
-        info = _find_gridstar_window(window_title or None) or info
+    if info["is_iconic"] or was_hidden:
+        # 没有可见矩形的窗口（最小化 / 被隐藏）必须先叫回来：最小化的窗口 rect
+        # 全是 -32000，隐藏的窗口只会留下上次的陈画面。这是截图的前提，与
+        # 「要不要切前台」无关，所以放在 activate 判断之前无条件尝试。
+        _show_window(info["hwnd"])
+        info = _find_gridstar_window_any(window_title or None) or info
     if activate:
         activated = _bring_to_foreground(info["hwnd"])
         # 还原/切前台可能改变窗口位置，重新采集一次事实再截图
-        info = _find_gridstar_window(window_title or None) or info
+        info = _find_gridstar_window_any(window_title or None) or info
 
     if info["is_iconic"]:
         return _err(
@@ -1880,6 +1946,13 @@ def CaptureGridStarWindow(window_title: str = "", activate: bool = True,
             "已尝试 WM_SYSCOMMAND/SC_RESTORE 与 ShowWindow；"
             "若 GridStar 以管理员权限运行而本服务不是，请以相同权限运行本服务后重试。"
             % info["hwnd"]
+        )
+    if not info["is_visible"]:
+        return _err(
+            "GridStar 窗口处于隐藏状态（IsWindowVisible=False）且无法把它叫回可见：hwnd=%s。"
+            "最小化到托盘的窗口需要先恢复显示；截图隐藏窗口只会拿到它上次留下的陈画面。"
+            "已尝试 ShowWindow(SW_SHOW/SW_RESTORE)；若 GridStar 以管理员权限运行而本服务不是，"
+            "请以相同权限运行本服务后重试。" % info["hwnd"]
         )
 
     region = _clamp_to_virtual_screen(info["frame_rect"])
@@ -1923,11 +1996,20 @@ def CaptureGridStarWindow(window_title: str = "", activate: bool = True,
             "hwnd": info["hwnd"], "pid": info["pid"], "exe": info["exe"],
             "title": info["title"], "class_name": info["class_name"],
             "frame_rect": info["frame_rect"],
+            "is_visible": bool(info["is_visible"]),
+            "is_iconic": bool(info["is_iconic"]),
         },
         "is_foreground": bool(info["is_foreground"]),
         "activated": bool(activated),
+        "was_hidden": bool(was_hidden),
+        "restored_from_hidden": bool(was_hidden and info["is_visible"]),
         "dpi_aware": bool(_DPI_AWARE),
     }
+    if was_hidden:
+        payload["restore_note"] = (
+            "截图前 GridStar 窗口是隐藏/最小化的（IsWindowVisible=False 或 IsIconic=True），"
+            "已先把它叫回可见状态再截图；这是截图的前提，不是用户主动切的前台。"
+        )
     if clean_fallback:
         payload["clean_fallback"] = (
             "clean=True 的窗口自绘（PrintWindow）路径拿不到可用画面，已回退区域抓取：%s"

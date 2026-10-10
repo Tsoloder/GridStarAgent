@@ -155,8 +155,22 @@ def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegi
     return all(tool_is_allowed(name, patterns) for patterns in restrictive)
 
 
+# 只读、但名字不落在 Get/Query/... 前缀里的工具：桌面感知类。
+# CaptureGridStarWindow 会顺带把窗口切到前台（看清界面本来就是它的目的），
+# ActivateGridStarWindow 只切前台，两者都不改任何数据，因此按只读对待：
+# 不该被 auto 模式的建计划门禁暂缓，也不该在 manual 模式弹审批卡。
+# 真正注入输入的六个（ClickAtPoint / DragAtPoint / ScrollAtPoint / ClickUIElement /
+# TypeTextInUIElement / SendKeyboardShortcut）仍然算操作类，照旧走门禁。
+_READONLY_EXTRA_TOOLS = frozenset({
+    "CaptureGridStarWindow",
+    "ActivateGridStarWindow",
+})
+
+
 def _is_query_tool(name: str) -> bool:
     """Query/read-only tools that don't modify data and don't need user confirmation."""
+    if name in _READONLY_EXTRA_TOOLS:
+        return True
     return bool(re.match(r"^(Get|Query|List|Find|Check|Read|Is|Has|Examine)", name, re.I))
 
 
@@ -676,9 +690,9 @@ async def run_agent_loop(
         "但未明确指定模型类型时：\n"
         "0. 若当前工具列表里还没有 CaptureGridStarWindow，先调用 enable_tool_group，"
         "group_id 传 \"screen\"，把桌面截图分组打开\n"
-        "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（它按进程 gridstar.exe "
-        "定位窗口，不看标题；返回结果里的 is_foreground 说明画面是不是 GridStar 本身，"
-        "不是则先调用 ActivateGridStarWindow）\n"
+        "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（无参数，直接调用即可；"
+        "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
+        "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）\n"
         "2. 通过视觉分析主视口的模型是飞机还是导弹\n"
         "（若截图结果的 note 说「不会送达模型」，说明当前模型不支持图片输入，"
         "不要再重复截图：改用工程数据判断，或请用户在设置里切换到带 Vision 的模型）\n"
