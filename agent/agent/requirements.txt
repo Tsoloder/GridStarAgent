@@ -8,3 +8,6 @@ openpyxl>=3.1
 requests>=2.31
 pywin32>=306; platform_system == "Windows"
 pip-system-certs>=4.0; platform_system == "Windows"
+# 桌面屏幕自动化（screen 工具分组）：窗口截图与 UI 控件识别
+mss>=9,<11; platform_system == "Windows"
+uiautomation>=2.0,<3; platform_system == "Windows"

@@ -4,6 +4,7 @@
 """
 
 import json
+import logging
 
 from tools import project
 from tools import query
@@ -14,8 +15,19 @@ from tools import boundary
 from tools import quality
 from tools import advanced
 
+logger = logging.getLogger(__name__)
+
+# 桌面自动化依赖 pywin32 / mss / uiautomation 这些只在带桌面的 Windows 上才成立的包。
+# 守卫式导入：缺依赖时只丢 screen 分组，不能让整个 MCP Server 起不来（原先的无条件导入
+# 会让一个可选依赖缺失连带全部 GridStar 工具下线）。
+try:
+    from tools import screen_automation
+except Exception as exc:  # noqa: BLE001 - 任何导入期错误都不该拖垮其它工具
+    screen_automation = None
+    _SCREEN_IMPORT_ERROR = exc
+
 # 分组 id 需保持稳定：客户端会缓存并按 id 启用分组。
-TOOL_GROUPS = (
+_CORE_TOOL_GROUPS = (
     {
         "id": "project",
         "description": "工程文件管理：打开/保存/另存 SPD、导入导出 CAD 与网格文件、清空数据、撤销重做、导出求解器格式（CFX/FTS）。",
@@ -138,6 +150,9 @@ TOOL_GROUPS = (
             generation.GenerateSurMeshBySpitAssemblyGroupProperty,
             generation.GenerateLongAndNarrowFaceGrid,
             generation.WingAnisoProcessWingAnisotropy,
+            generation.NacelleAnisoProcessNacelleAnisotropy,
+            generation.TailAnisoProcessTailAnisotropy,
+            generation.RemainingAnisoProcessRemainingAnisotropy,
         ),
     },
     {
@@ -173,7 +188,33 @@ TOOL_GROUPS = (
             advanced.ProcessAllTrailingEdges,
         ),
     },
-)
+    )
+
+if screen_automation is not None:
+    _SCREEN_GROUP = {
+        "id": "screen",
+        "description": "桌面屏幕自动化：通过进程（gridstar.exe）定位 GridStar 窗口，截取窗口截图、读取 UI 控件信息、按画面坐标点击/拖动/滚轮、模拟控件点击与键盘输入、发送快捷键。用于让智能体感知界面状态并在界面上操作。GridStar 不暴露 UI 自动化控件（控件树为空），实际可用的是「截图 → 看图 → 坐标操作」这条路线。",
+        "tools": (
+            screen_automation.FindGridStarWindow,
+            screen_automation.ActivateGridStarWindow,
+            screen_automation.CaptureGridStarWindow,
+            screen_automation.GetUIElementInfo,
+            screen_automation.ClickAtPoint,
+            screen_automation.DragAtPoint,
+            screen_automation.ScrollAtPoint,
+            screen_automation.ClickUIElement,
+            screen_automation.TypeTextInUIElement,
+            screen_automation.SendKeyboardShortcut,
+        ),
+    }
+    TOOL_GROUPS = _CORE_TOOL_GROUPS + (_SCREEN_GROUP,)
+else:
+    logger.warning(
+        "screen 工具分组未启用：screen_automation 导入失败（%s）。"
+        "安装桌面依赖后可恢复：pip install -r requirements.txt",
+        _SCREEN_IMPORT_ERROR,
+    )
+    TOOL_GROUPS = _CORE_TOOL_GROUPS
 
 TOOLS = tuple(tool for group in TOOL_GROUPS for tool in group["tools"])
 

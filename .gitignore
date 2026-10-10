@@ -34,3 +34,6 @@ _qt_verify/main.cpp
 _qt_verify/shot_release.png
 _qt_verify/shot.png
 _qt_verify/verify.pro
+
+# 现场验证脚本的运行产物（截图等，每次运行重新生成）
+verify/out/

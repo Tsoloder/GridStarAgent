@@ -16,6 +16,12 @@ from client import headers, send_post_request, url
 from registry import register_tools
 from tools import advanced, boundary, cad, generation, mesh, project, quality, query
 
+# 桌面自动化工具依赖可选包（mss / uiautomation），导入失败时只丢这一组工具。
+try:
+    from tools import screen_automation
+except Exception:  # noqa: BLE001 - 可选依赖缺失不应影响服务启动
+    screen_automation = None
+
 MCP_HOST = "127.0.0.1"
 MCP_PORT = 5656
 
@@ -127,11 +133,26 @@ GetConnectorsByDomains = query.GetConnectorsByDomains
 MergeEdgesByDomain = mesh.MergeEdgesByDomain
 GenerateLongAndNarrowFaceGrid = generation.GenerateLongAndNarrowFaceGrid
 WingAnisoProcessWingAnisotropy = generation.WingAnisoProcessWingAnisotropy
+NacelleAnisoProcessNacelleAnisotropy = generation.NacelleAnisoProcessNacelleAnisotropy
+TailAnisoProcessTailAnisotropy = generation.TailAnisoProcessTailAnisotropy
+RemainingAnisoProcessRemainingAnisotropy = generation.RemainingAnisoProcessRemainingAnisotropy
 GetConnectorsStartAndEndUnitLenth = query.GetConnectorsStartAndEndUnitLenth
 GetPointCount = query.GetPointCount
 GetNewConnectorId = query.GetNewConnectorId
 GetDomainsByType = query.GetDomainsByType
 GetRecentMessages = query.GetRecentMessages
+
+if screen_automation is not None:
+    FindGridStarWindow = screen_automation.FindGridStarWindow
+    ActivateGridStarWindow = screen_automation.ActivateGridStarWindow
+    CaptureGridStarWindow = screen_automation.CaptureGridStarWindow
+    GetUIElementInfo = screen_automation.GetUIElementInfo
+    ClickAtPoint = screen_automation.ClickAtPoint
+    DragAtPoint = screen_automation.DragAtPoint
+    ScrollAtPoint = screen_automation.ScrollAtPoint
+    ClickUIElement = screen_automation.ClickUIElement
+    TypeTextInUIElement = screen_automation.TypeTextInUIElement
+    SendKeyboardShortcut = screen_automation.SendKeyboardShortcut
 
 if __name__ == "__main__":
     mcp.run(transport="sse", host=MCP_HOST, port=MCP_PORT)
