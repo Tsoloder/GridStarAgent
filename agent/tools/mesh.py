@@ -298,6 +298,18 @@ def UGReDimensionSmoothDistribution(ids: str, headspace: float, tailspace: float
     """
     return send_post_request("UGReDimensionSmoothDistribution", {"ids":ids,"headspace":headspace,"tailspace":tailspace,"params":params,"mindValue":mindValue})
 
+def UGReDimensionSHyperbolicTangent(ids: str, headspace: float, tailspace: float):
+    """点数分布：双曲正切.
+
+    Args:
+        ids: 选择的网格线 ID,例如"5,6,7".
+        headspace: 首端间距.
+        tailspace: 尾端间距.
+    Returns:
+        工具调用结果,"true"代表成功,"false"代表失败.
+    """
+    return send_post_request("UGReDimensionSHyperbolicTangent", {"ids":ids,"headspace":headspace,"tailspace":tailspace})
+
 
 def UGSplitConnector(ids: str, splitWay: int, value: float):
     """网格线分割.

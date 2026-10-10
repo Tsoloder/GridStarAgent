@@ -3,7 +3,7 @@ name: skill-creator
 description: Guide users to create new SKILL.md files with proper frontmatter and body.
 aliases: [skill, new-skill, create-skill]
 tags: [skill, create, meta]
-category: Meta
+category: Common
 version: 1.0.0
 author: Builtin
 ---

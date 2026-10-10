@@ -1,0 +1,118 @@
+---
+name: missile-root-junction
+description: 弹翼与弹体结合处各向异性网格线分布处理。该位置不修改两端分布，使用增长分布（增长率 1.2，层数 50），中间值与翼面尺寸一致。适用于弹翼(wing)连弹体(fuselage)的结合场景。当导弹总 Skill 路由到结合处处理时加载本 Skill。
+aliases: [翼身结合, 翼体结合, wing-fuselage, wing-junction]
+tags: [CFD, 网格, 各向异性, 结合处, 导弹, 翼]
+category: Missile
+version: 2.1.0
+author: Tsolodancer
+allowed-tools: []
+---
+
+# 弹翼与弹体结合处各向异性网格线分布
+
+## 适用位置
+
+- 弹翼（wing）与弹体的结合处
+- 根部附近曲率变化较大、需要局部加密的结合区域
+
+## 结合类型
+
+| 部件 | 结合对象 | 分组名 |
+|------|---------|--------|
+| 弹翼(wing) | 弹体 | `fuselage` |
+
+> 弹翼的**子面前缀**为 `wing`（如 `wingSideSurface`）；结合处通过子面分组与结合对象（`fuselage`）取公共边。
+> ⚠️ 归并后**子面组名消失**——定位靠台账/子面分组二择一（见「前置条件」）。
+
+## 前置条件
+
+- 已获取**当地弦长**（🔴 **C_root 固定取 `3225`，事实中心 §2 无条件固定、不以接口为准；C_tip 取 `wing_tip_chord`**）
+- 已获取翼面尺寸（中间值用，0.02 × 当地弦长）
+- 表面网格已完成
+- `UGReDimensionConfigDistribution` 系列工具参数已就绪
+- **链路接口可用**：`GetConnectorsByDomains` 能返回真实网格线 ID（若返回兜底值，整个各向异性阶段按主 Skill「工具可用性判定」标记 `skipped`）
+- 🔴 **定位方式（台账优先，事实中心 G1）**：归并前已记录子面台账 → **按台账面 ID 驱动**（`wingSideSurface` 与 `fuselage` 的面 ID 从台账取共享边）；无台账但有子面分组 → 按分组名取。无台账且无子面分组 → `skipped` + `note`。
+
+## 尺寸参数
+
+| 参数 | 值 |
+|---|---|
+| 首端间距 | 不修改两端分布 |
+| 尾端间距 | 不修改两端分布 |
+| 增长率（headRate / tailRate） | 1.2（默认） |
+| 层数（headLayer / tailLayer） | 50（默认） |
+| 分布类型（disFunc） | 0（双曲正切） |
+| 中间值（mindValue） | 翼面尺寸一致（0.02 × 当地弦长） |
+| 根部段 | 保证平滑分布 |
+
+## 网格线分布设置
+
+### 设置步骤
+
+1. **获取结合处的网格线 ID**（弹翼与结合对象的共享边）：
+
+```
+# 例：弹翼(wing)与弹体(fuselage)的结合处
+# 分组 domain ID 从 GetAllSpitAssemblyGroupProperty 解析（返回 list[{组名:{line:[...], domain:[{ids:[...]}]}}]）
+wingSideDomains = GetGroupDomainIds("wingSideSurface")   # 解析 helper → [101, 102, ...]
+fuselageDomains = GetGroupDomainIds("fuselage")                # → [3, 28, 29, 30]
+
+wingSideConnectors = set()
+for id in wingSideDomains:
+    result = GetConnectorsByDomains([id])                    # → {"domains":[{"domain_id":id,"connector_ids":[...]}]}
+    wingSideConnectors.update(result["domains"][0]["connector_ids"])
+
+fuselageConnectors = set()
+for id in fuselageDomains:
+    result = GetConnectorsByDomains([id])
+    fuselageConnectors.update(result["domains"][0]["connector_ids"])
+
+junctionConnectors = wingSideConnectors & fuselageConnectors     # 取交集 = 结合处共享边
+```
+
+2. **获取每条共享边的原分布值**（不修改两端间距）：
+
+```
+# 对每条结合处网格线，读取当前 headSpace 和 tailSpace
+for cid in junctionConnectors:
+    spacing = GetConnectorsStartAndEndUnitLenth(cid)      # → {"start": s0, "end": e0}
+    # 保留原有间距值传入步骤 3
+```
+
+3. 调用 `UGReDimensionConfigDistribution(ids, headspace, tailspace, params, mindValue)` 设置分布参数（只修改中间值，两端保持原分布）：
+
+| 参数 | 值 |
+|---|---|
+| `ids` | 结合处共享边 ID（逗号分隔） |
+| `headspace` | **不修改**（传原分布值） |
+| `tailspace` | **不修改**（传原分布值） |
+| `params` | `"1.2,50,1.2,50"`（严格格式 `"headRate,headLayer,tailRate,tailLayer"`） |
+| `mindValue` | 翼面尺寸（0.02 × 当地弦长） |
+
+> ⚠️ 该工具只有上述 5 个参数；没有 `disFunc`、`headRate` 等独立参数。
+
+4. 如需平滑过渡到相邻区域，调用 `UGReDimensionSmoothDistribution(ids, headspace, tailspace, params, mindValue)`（参数格式同 `UGReDimensionConfigDistribution`）。
+
+5. 对于根部段（若存在），参照 `missile-chordwise-direction` Skill 的弦向分布做平滑衔接。
+
+### 工具调用表
+
+| 序号 | 工具 | 参数 | 说明 |
+|------|------|------|------|
+| 1 | `GetAllSpitAssemblyGroupProperty` | 无（解析 `["wingSideSurface"]` 及 `["fuselage"]` 的 `domain[].ids`） | 获取结合处涉及的分组网格面 ID |
+| 2 | `GetConnectorsByDomains` | `domain_ids`: 每个网格面 ID | 获取面的网格线集合 |
+| 3 | `GetConnectorsStartAndEndUnitLenth` | `connector_ids`: 每条共享边 ID | 获取原有两端间距（保留不修改） |
+| 4 | `UGReDimensionConfigDistribution` | `ids`: 结合边 ID; `headspace`: 原值; `tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: 0.02 × 当地弦长 | 设置增长分布（不修改两端） |
+| 5 | `UGReDimensionSmoothDistribution` | `ids`: 结合边 ID; `headspace`/`tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: 0.02 × 当地弦长 | 平滑过渡到相邻区域 |
+
+### 注意事项
+
+- **严禁修改两端分布**——本位置的核心约束。
+- **双曲正切分布参数统一**：增长率 1.2、层数最大 50、分布类型 0。
+
+## 完成标准
+
+- `UGReDimensionConfigDistribution` 调用返回 `success` 为 `true`，且两端分布未被修改。
+- 根部段（若存在）平滑过渡无误。
+- 任一步骤失败时停止，不继续后续步骤。

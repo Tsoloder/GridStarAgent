@@ -3,9 +3,9 @@
 阶段计划通过内置工具 `update_plan` 维护，通用参数格式与调用规则参见系统提示词第 5.1 节（**不再输出 `phase_plan` 文本块**）。本流程的默认阶段计划如下：
 
 - `id`: `cad-mesh-main`
-- 默认阶段：CAD 导入、水密性处理、自动部件分割、表面网格生成、各向异性处理、后缘面处理、体网格块创建、空间网格生成
-- 表面网格生成后的固定顺序：各向异性处理 → 后缘面处理 → 体网格块创建 → 空间网格生成，不得跳过后缘面处理或体网格块创建直接生成空间网格
-- 各向异性处理与后缘面处理依赖自动部件分割产生的机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）；分组存在时必须执行，分组缺失时才标记为 `skipped` 并在 `note` 中说明原因
+- 默认阶段：CAD 导入、水密性处理、自动部件分割、表面网格生成、机翼各向异性处理、吊舱各向异性处理、尾翼各向异性处理、其余面各向异性处理、体网格块创建、空间网格生成
+- 表面网格生成后的固定顺序：机翼各向异性处理 → 吊舱各向异性处理 → 尾翼各向异性处理 → 其余面各向异性处理 → 体网格块创建 → 空间网格生成，不得跳过后缘面处理或体网格块创建直接生成空间网格
+- 各向异性处理与后缘面处理依赖自动部件分割产生的机翼子组（`wingUpper`、`wingLower`、`wingTip`、`wingTrailingEdge`）；分组存在时必须执行，分组缺失时才标记为 `skipped` 并在 `note` 中说明原因
 - 其他可选阶段未采用时标记为 `skipped`
 
 
@@ -19,8 +19,8 @@
 4. 手动模式使用基础 `tool_params` 协议确认参数；自动模式使用已知值或默认值直接执行。
 5. 等待工具返回；只有明确成功后才进入下一阶段。
 6. 导入成功后，标记 `import` 阶段为 `completed`、下一阶段为 `active`，并提供当前可用路径：水密性处理、自动部件分割（水密性处理后的必经路径）、水密性后自动部件分割、直接提取边界线。阶段计划的输出方式遵循 cfd_workflow.md 第 5.1 节的模式规则。进入自动部件分割时，读取 `references/part-segmentation.md`。
-7. 手动模式调用 `ask_user_question` 等待用户选择路径（工具不可用时退回 `options`）；用户尚未选择时，不得直接调用 `UGSur` 或其他表面网格生成工具。
-8. 自动模式根据用户原始目标选择最完整的匹配路径；目标不明确时仍使用 `options` 询问（auto 模式不得调用 `ask_user_question` 停下等待），不得擅自扩大处理范围。
+7. 手动模式使用 `options` 等待用户选择路径；用户尚未选择时，不得直接调用 `UGSur` 或其他表面网格生成工具。
+8. 自动模式根据用户原始目标选择最完整的匹配路径；目标不明确时仍使用 `options` 询问，不得擅自扩大处理范围。
 9. 只有路径已经明确且完成相应前置处理后，才能进入表面网格生成阶段。
 
 ## 2. 水密性处理路径
@@ -68,49 +68,86 @@
 
 ## 4. 默认参数生成表面网格
 
-1. 通过工具`GetGenerateSurMeshDefaultParam`获取表面网格生成默认参数。
-2. 用户没有要求则默认生成所有超面（使用工具`GetAllObjectByType`获取所有超面的ID）的表面网格。
-3. 如果需要已有的网格面加密或者稀疏，则再次调用工具`UGSur`生成表面网格即可。
-4. 如果已通过 AI 自动部件分割（`ProcessWithServer`）或手动分组完成了分部件处理，且 MAC 值已知，建议改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。
+1. 如果已通过 AI 自动部件分割（`ProcessWithServer`）或手动分组完成了分部件处理，且 MAC 值已知，则改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。
+2. 通过工具`GetGenerateSurMeshDefaultParam`获取表面网格生成默认参数。
+3. 用户没有要求则默认生成所有超面（使用工具`GetAllObjectByType`获取所有超面的ID）的表面网格。
+4. 如果需要已有的网格面加密或者稀疏，则再次调用工具`UGSur`生成表面网格即可。
 
-## 5. 各向异性处理
+## 5. 机翼各向异性与后缘面一体化处理
 
-各向异性处理属于独立 Skill `wing-anisotropy-processing`，流程见该 Skill 的 SKILL.md。
+机翼各向异性与后缘面处理已合并为一个一体化流程，属于独立 Skill `wing-anisotropy-processing`，详细流程见该 Skill 的 SKILL.md。
 
-**阶段位置**：表面网格生成之后、后缘面处理之前。
+**阶段位置**：表面网格生成之后、体网格块创建之前。
 
 **前置条件**：
-1. 自动部件分割已完成，机翼子组 `wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge` 已存在
+1. 自动部件分割已完成，机翼子组 `wingUpper` / `wingLower` / `wingTip` / `wingTrailingEdge` / `fuselage` 已存在
 2. 表面网格已生成
 
 **执行要求**：前置条件满足时必须执行，不得以用户未提网格数量要求为由跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
 
-**核心工具**：`WingAnisoProcessWingAnisotropy` — 一键执行完整 7 步流程。
+**核心工具**：**`WingAnisoProcessWingAnisotropy`** — 一键执行机翼各向异性 + 后缘面分类 + 后缘分布设置 + 后缘装配的完整一体化流程。
+
+**失败回退**：若 `WingAnisoProcessWingAnisotropy` 返回中 `step8b_te_delete_assemble` 失败，可回退到独立后缘面 MCP 工具：先 `ProcessAllTrailingEdges` 批量处理，失败后按 type1/type2 分步处理（详见 `wing-anisotropy-processing` SKILL.md 的后缘面处理失败回退流程）。
 
 **完成标准**：`WingAnisoProcessWingAnisotropy` 返回 `status: "success"`，见 `wing-anisotropy-processing` 的 SKILL.md。
 
-## 6. 后缘面处理
+## 6. 吊舱各向异性处理
 
-后缘面处理属于独立 Skill `trailing-edge-processing`，流程见该 Skill 的 SKILL.md。
+吊舱（含发动机短舱和支架）各向异性处理为独立 Skill `nacelle-anisotropy-processing`，详细流程见该 Skill 的 SKILL.md。
 
-**阶段位置**：各向异性处理之后、体网格块创建之前。
+**阶段位置**：机翼各向异性与后缘面一体化处理之后、体网格块创建之前。
 
 **前置条件**：
-1. 表面网格已生成
-2. 自动部件分割已完成，后缘相关分组 `wingTrailingEdge` / `wingTip` / `fuselage` 等已存在
-3. 各向异性处理已执行完成，或被标记为 `skipped`
+1. 发动机子部件分割已完成，以下分组已存在：`engineInner` / `engineOuter` / `enginePylonInner` / `enginePylonOuter` / `enginePylon` / `engineTrailingEdge` / `enginePylonTrailingEdge`
+2. 机翼各向异性处理已完成（`WingAnisoProcessWingAnisotropy`）
+3. 表面网格已生成
 
-**核心工具**：优先用 `ProcessAllTrailingEdges` 全自动批量处理；有失败或跳过条目时回退到 `ProcessTrailingEdgeType1` / `ProcessTrailingEdgeType2` 分步流程（先处理全部类型一，再处理全部类型二）。
+**执行要求**：前置条件满足时必须执行，不得以用户未提网格数量要求为由跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
 
-**完成标准**：所有后缘面处理返回成功，见 `trailing-edge-processing` 的 SKILL.md。
+**核心工具**：**`NacelleAnisoProcessNacelleAnisotropy`** — 一键执行吊舱各向异性网格处理的完整一体化流程。
 
-## 7. 体网格与空间网格
+**完成标准**：`NacelleAnisoProcessNacelleAnisotropy` 返回 `status: "success"`，见 `nacelle-anisotropy-processing` 的 SKILL.md。
 
-**阶段闸门（强制）**：表面网格生成成功后，必须按 各向异性处理（前置条件满足时）→ 后缘面处理 → 体网格块创建（`UGBlockCreate`）的顺序执行，然后才能进入空间网格生成（`UGUGSp`）。任何时候都不得跳过各向异性处理、后缘面处理或体网格块创建直接调用 `UGUGSp`。
+## 7. 尾翼各向异性处理
+
+尾翼（平尾 + 立尾）各向异性处理为独立 Skill `tail-anisotropy-processing`。
+
+**阶段位置**：吊舱各向异性处理之后、体网格块创建之前。
+
+**前置条件**：
+1. 尾翼子部件分割已完成，以下分组已存在：
+   - 立尾：`verticalTailRight` / `verticalTailLeft` / `verticalTailTip` / `verticalTailTrailingEdge`
+   - 平尾：`horizontalTailUpper` / `horizontalTailLower` / `horizontalTailTip` / `horizontalTailTrailingEdge`
+2. 机翼及吊舱各向异性处理已完成（`WingAnisoProcessWingAnisotropy` / `NacelleAnisoProcessNacelleAnisotropy`）
+3. 表面网格已生成
+
+**执行要求**：前置条件满足时必须执行，不得跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
+
+**核心工具**：**`TailAnisoProcessTailAnisotropy`** — 一键执行尾翼各向异性网格处理的完整一体化流程。
+
+**完成标准**：`TailAnisoProcessTailAnisotropy` 返回 `status: "success"`。
+
+## 8. 其余面各向异性处理
+
+其余网格面（机身、机尾等未被机翼/吊舱/尾翼覆盖的面）各向异性处理为独立 Skill `remaining-anisotropy-processing`。
+
+**阶段位置**：尾翼各向异性处理之后、体网格块创建之前。
+
+**前置条件**：
+1. 机翼、吊舱（若存在）、尾翼（若存在）各向异性处理已完成
+2. 表面网格已生成
+
+**核心工具**：**`RemainingAnisoProcessRemainingAnisotropy`** — 一键执行其余面各向异性处理。
+
+**完成标准**：`RemainingAnisoProcessRemainingAnisotropy` 返回 `status: "success"`。
+
+## 9. 体网格与空间网格
+
+**阶段闸门（强制）**：表面网格生成成功后，必须完成机翼、吊舱、尾翼、其余面各向异性处理（前置条件满足时），然后才能进行体网格块创建（`UGBlockCreate`）与空间网格生成（`UGUGSp`）。任何时候都不得跳过机翼处理或体网格块创建直接调用 `UGUGSp`。
 
 此步骤为强制，不可跳过。manual 模式使用 `tool_params` 确认体创建参数；auto 模式查询默认参数后直接执行 `UGBlockCreate`。体网格块成功后，manual 模式使用 `options` 询问是否继续生成空间网格；auto 模式根据用户原始目标判断。然后按以下步骤执行。
 
-### 7.1 场景判断
+### 9.1 场景判断
 
 根据用户模型情况判断属于哪种场景：
 
@@ -123,25 +160,25 @@
 
 半模场景需先调用 `UGHalfModelLine(cnIDs, symmetry)` 设置半模边界线。
 
-### 7.2 外场生成规则
+### 9.2 外场生成规则
 
 - 亚音速（0-1 马赫）：模型特征长度的 20 倍，外场形状一般给球形。
 - 超音速（>1 马赫）：大于 1.5 倍特征长度，外场形状一般给弓形。
 - 特征长度通过 `GetModelParameters` MCP 工具获取（返回 JSON 中的 `characteristic_length` 字段）。
 
-### 7.3 体创建
+### 9.3 体创建
 
 1. 查询体创建所需参数：调用 `GetCreateBlockDefaultParam()`，记返回的默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）与 `meshSize`。
-2. 按 §7.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
+2. 按 §6.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
    - 缩放系数 = 实际 `geoParam` 尺寸值 / 默认 `geoParam` 尺寸值
    - `meshSizeOrDimension` = 默认 `meshSize` × 缩放系数
    - 示例：默认 `geoParam`=121.107、`meshSize`=14.23，外场按 20 倍特征长度放大为 853.6 时，系数=853.6/121.107≈7.05，`meshSizeOrDimension`=14.23×7.05≈100.3。
 3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)` 创建体网格块。
    - `chooseParam` 的外场形状值：0=球形，1=立方体，2=圆柱，3=弓形。
    - `meshType`=0 表示给定尺寸时，`meshSizeOrDimension` 传缩放后的值；=1 表示期望点数时不受此规则影响。
-4. 体网格块成功后，manual 模式调用 `ask_user_question` 询问是否生成空间网格（工具不可用时退回 `options`）；auto 模式根据用户原始目标判断。
+4. 体网格块成功后，manual 模式使用 `options` 询问是否生成空间网格；auto 模式根据用户原始目标判断。
 
-### 7.4 空间网格生成
+### 9.4 空间网格生成
 
 如果需要空间网格：
 
@@ -157,7 +194,7 @@
 2. 调用 `UGUGSp` 生成空间网格。
 3. 手动模式使用 `tool_params` 确认，自动模式使用查询或 Schema 默认参数直接执行。
 
-## 8. 保存工程与导出
+## 10. 保存工程与导出
 
 1. 保存工程：文件名默认取模型名字，路径默认取模型所在路径。
 2. 网格导出：格式默认 CGNS，文件名默认取模型名字，路径默认取模型所在路径；用户另有指定时以用户为准。

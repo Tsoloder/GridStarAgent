@@ -2,23 +2,16 @@
 
 类型一后缘面与翼梢面相邻，由 4 条网格线（2 条长边 L1/L2、2 条短边 S1/S2）组成。
 
-> ⚠️ **处理方式选择**
+> ⚠️ **注意事项**
 >
-> **必须先使用批量处理入口**（`ProcessTrailingEdgeType1`），它一次性完成步骤 1→8 的全部流程。
->
-> 若批量处理返回 `status=failed`，则**回退到分步流程**，按下方步骤 1→8 顺序执行。
+> 本步骤为机翼一体化处理（`WingAnisoProcessWingAnisotropy`）内部的失败回退流程。
+> 正常情况下不需要执行本步骤，一体化入口已自动处理后缘面。
+> 以下步骤仅在 `WingAnisoProcessWingAnisotropy` 返回的 `steps` 中 `step8b_te_delete_assemble` 失败时，
+> 或后缘面处理条目 `status=failed` 时使用。
 
-> ⚠️ **全局注意事项**
->
-> - `CopyConnectorPointCount` 的 `sourceId` 是点数来源（拷贝**源**），`targetIds` 是接收点数的目标组，切勿搞反。
-> - 工具返回 `success` 为 `false` 时**立即停止**，报告失败。
-> - 交线判定失败（后缘面与翼梢面无公共短边）时立即停止。
-> - `SetConnectorPointCount`、`SetConnectorAverageDistribution`、`SetConnectorSmoothDistribution`、`CopyConnectorPointCount` 返回格式为 `{"success":true}`，**操作后网格线 ID 不变**，无需追踪新 ID。
-> - manual 模式下，中间步骤直接执行，**不输出 `tool_params`**。仅 `DeleteDomain` 通过 `options` 请求确认；auto 模式下 `DeleteDomain` 直接执行，不请求确认。
-
-**间距参数**：
-- `bodySpacing` = 0.01489（靠近翼梢端）
-- `rootSpacing` = 0.0718（靠近翼根端）
+**间距参数**（动态计算，调用 `GetModelParameters` 获取 `wing_half_span` 和 `mac`）：
+- `bodySpacing` = 0.1% × 半展长 = 0.001 × wing_half_span（靠近翼梢端）
+- `rootSpacing` = 2% × 当地弦长 = 0.02 × mac（靠近翼根端）
 - `params` = `"1.2,10,1.2,10"`
 
 ---
@@ -26,14 +19,18 @@
 ## 批量处理入口
 
 ```python
+# 先通过 GetModelParameters 获取 wing_half_span 和 mac（当地弦长）
+# bodySpacing = 0.001 × wing_half_span
+# rootSpacing = 0.02 × mac（或 localChord）
+
 # 类型判定已得到 domainId 和 wingTipId
 ProcessTrailingEdgeType1(
     domainId=te_domain_id,          # 来自 ClassifyTrailingEdgeDomains 的 domain_id
     wingTipId=wing_tip_id,          # 来自 ClassifyTrailingEdgeDomains 的 wing_tip_id
-    halfSpan=586.10,                # 半展长（可调整）
-    localChord=144.74,              # 当地弦长（可调整）
-    bodySpacing=0.01489,            # 翼梢端间距（可调整）
-    rootSpacing=0.0718,             # 翼根端间距（可调整）
+    halfSpan=wing_half_span,        # 通过 GetModelParameters 获取
+    localChord=mac,                 # 通过 GetModelParameters 获取
+    bodySpacing=0.001 * wing_half_span,
+    rootSpacing=0.02 * mac,
     params="1.2,10,1.2,10"          # 分布参数（可调整）
 )
 ```
@@ -55,7 +52,7 @@ ProcessTrailingEdgeType1(
 ### 步骤 2：验证交线位置
 
 后缘面与翼梢面的公共线（交线）必须在短边中。
-- 调用 `GetConnectorsByDomains`（`domain_ids` = `[后缘面ID, 翼梢面ID]`）→ 返回结果中取两个面 connector_ids 的交集。
+- 调用 `GetConnectorsByDomain`（`id` = 后缘面ID）和 `GetConnectorsByDomain`（`id` = 翼梢面ID），取两个返回的 `ids` 数组的交集。
 - 交线必须等于 S1 或 S2，否则 → 失败停止。
 
 ### 步骤 3：短边设点数 + 平均分布
@@ -66,7 +63,7 @@ S1、S2 各一遍，点数固定为 5：
   - `SetConnectorPointCount`（当前短边 ID, 5）
   - `SetConnectorAverageDistribution`（当前短边 ID）
 - 若点数 == 5：跳过操作。
-- **S2 同理**（仍使用 S2 的原始 ID）。
+- **S2 同理**。
 
 ### 步骤 4：判定 L1、L2 的方向
 

@@ -18,7 +18,7 @@ def ProcessWithServer(serverHost: str, serverPort: int, outputDir: str):
         返回 JSON 格式的7类部件分组结果,例如：
         [{"group_name":"nose","faces":[...]}, {"group_name":"fuselage","faces":[...]}, ...]
         其中 main_wing 组会被进一步拆分为：
-            wingUpperSurface / wingLowerSurface / wingTip / wingTrailingEdge
+            wingUpper / wingLower / wingTip / wingTrailingEdge
         失败时返回 "false"。
     """
     return send_post_request("ProcessWithServer", {"serverHost":serverHost, "serverPort":serverPort, "outputDir":outputDir}, timeout=360)

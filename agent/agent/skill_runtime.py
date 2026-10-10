@@ -33,6 +33,7 @@ class SkillDescriptor:
     allowed_tools: List[str] = field(default_factory=list)
     version: str = ""
     source: str = "user"
+    category: str = ""
 
     @property
     def content_hash(self) -> str:
@@ -229,6 +230,7 @@ class SkillRegistry:
             id=skill_id,
             name=skill_id,
             description=description,
+            category=str(meta.get("category", "")).strip(),
             root=skill_file.parent.resolve(),
             entry=skill_file.resolve(),
             allowed_tools=[str(item) for item in allowed],

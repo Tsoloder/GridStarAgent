@@ -29,7 +29,7 @@
     ]
   },
   "options": [
-    {"label": "确认执行", "value": "confirm", "style": "primary"},
+    {"label": "✅ 确认执行", "value": "confirm", "style": "primary"},
     {"label": "取消", "value": "cancel", "style": "danger"}
   ]
 }
@@ -79,8 +79,8 @@
 | 6 | `tail` | 尾部/尾椎 |
 
 4. 其中机翼组（`main_wing`）会被进一步拆分为 4 个子组：
-   - `wingUpperSurface`（机翼上表面）
-   - `wingLowerSurface`（机翼下表面）
+   - `wingUpper`（机翼上表面）
+   - `wingLower`（机翼下表面）
    - `wingTip`（翼稍）
    - `wingTrailingEdge`（后缘）
 
@@ -89,14 +89,14 @@
 
 ## 5. 后续操作
 
-分割完成后，manual 模式调用 `ask_user_question` 询问用户是否需要基于分割结果做进一步操作（工具不可用时退回 `options`）；auto 模式根据用户原始目标自动判断下一步。标准链中本阶段的下一步固定为"按分组生成表面网格"，随后进入各向异性处理与后缘面处理。
+分割完成后，manual 模式使用 `options` 询问用户是否需要基于分割结果做进一步操作；auto 模式根据用户原始目标自动判断下一步。标准链中本阶段的下一步固定为"按分组生成表面网格"，随后进入各向异性处理与后缘面处理。
 
 ```json
 {
   "options": [
-    {"label": "按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
-    {"label": "导出分割结果", "value": "export_result", "style": "default"},
-    {"label": "查看分组详情", "value": "view_details", "style": "default"}
+    {"label": "1️⃣ 按分组生成表面网格", "value": "mesh_by_group", "style": "primary"},
+    {"label": "2️⃣ 导出分割结果", "value": "export_result", "style": "default"},
+    {"label": "3️⃣ 查看分组详情", "value": "view_details", "style": "default"}
   ]
 }
 ```
@@ -112,13 +112,13 @@
 
 详细参数计算规则和调用流程见 `references/part-based-surface-mesh.md`。
 
-5. 表面网格生成成功后，按 `SKILL.md` 流程 A 继续各向异性处理与后缘面处理：本流程产出的机翼子组（`wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge`）正是这两个阶段的前置条件，存在时必须执行，不得直接跳到体网格块创建。
+5. 表面网格生成成功后，按 `SKILL.md` 流程 A 继续各向异性处理与后缘面处理：本流程产出的机翼子组（`wingUpper` / `wingLower` / `wingTip` / `wingTrailingEdge`）正是这两个阶段的前置条件，存在时必须执行，不得直接跳到体网格块创建。
 
 ### 分割结果决定后续必经阶段
 
 分割结果返回后，先记录是否包含机翼子组，供后续阶段判断：
 
-- 含 `wingUpperSurface` / `wingLowerSurface` / `wingTip` / `wingTrailingEdge`：表面网格生成后必须依次执行各向异性处理（`WingAnisoProcessWingAnisotropy`）与后缘面处理。
+- 含 `wingUpper` / `wingLower` / `wingTip` / `wingTrailingEdge`：表面网格生成后必须依次执行各向异性处理（`WingAnisoProcessWingAnisotropy`）与后缘面处理。
 - 不含上述子组：无法执行上述两阶段，标记为 `skipped` 并在阶段 `note` 中说明原因。
 
 ### 导出分割结果

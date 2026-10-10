@@ -3,7 +3,7 @@ name: cfd-meshing-workflow
 description: CFD 非结构网格生成全流程路由：CAD 导入、水密性与自由边、分部件、碎面合并、几何参数(MAC)、表面网格、各向异性、后缘面处理、体网格块创建、空间网格、边界条件、质量检查、保存与导出。当用户提到导入模型、生成网格、部件分割、表面/体/空间网格、附面层、边界条件、质量检查、导出网格、后缘面处理、MAC、各向异性、自由边或水密性、已生成表面网格、继续生成网格时必须使用。
 aliases: [CFD网格, 网格生成, 导入模型, 部件分割, 表面网格, 空间网格, 边界条件, 质量检查, 后缘面处理, MAC, 各向异性, 水密性, 继续生成网格]
 tags: [CFD, CAD, 网格, 工业软件, 质量检查, 边界条件, 气动弦长, 各向异性, 附面层]
-category: CFD
+category: Aircraft
 version: 2.1.0
 author: GridStarAgent
 allowed-tools: []
@@ -14,6 +14,24 @@ allowed-tools: []
 本 Skill 只决定"当前任务走哪条业务路径、需要哪类对象、按什么顺序做、读哪份 reference"。工具审批、对象范围解析、安全确认、错误重试以及 `options`、`tool_params`、`workflow` 的格式，始终遵守基础 system prompt。
 
 ## 开始任务前
+
+### 步骤 0：自动识别模型领域
+
+**每次开始网格生成任务前，必须先执行以下领域识别流程：**
+
+1. 调用 `CaptureGridStarWindow` 截取 GridStar 主窗口截图。
+2. 通过视觉分析截图中的主视口模型，判断当前加载的模型类型：
+   - **飞机模型**：有机翼、机身、尾翼、发动机吊舱等部件特征
+   - **导弹模型**：有弹体、弹翼（短而窄）、尾翼（舵面）、无发动机吊舱等特征
+3. 根据识别结果调用 `set_active_category` 设置正确的分类：
+   - 飞机模型 → `set_active_category(category="aircraft")`
+   - 导弹模型 → `set_active_category(category="missile")`
+   - 无法识别 → `set_active_category(category="")`（不限制）
+4. 设置完成后，如果实际领域与本技能不匹配（例如检测到导弹但当前是飞机技能），应调用 `read_skill` 读取正确领域的技能后重新开始。
+
+**领域识别之外的界面操作纪律**：`CaptureGridStarWindow` 按进程名（默认 `gridstar.exe`）定位窗口，不靠标题，返回的 `result.window` 里带 `is_foreground` / `is_iconic` / `input_blocked` 等诚实字段，先读这些字段再决定下一步。GridStar 是 Qt 程序、不暴露 UI 自动化控件，`GetUIElementInfo` 返回 0 个控件是正常现象，`ClickUIElement` / `TypeTextInUIElement` 在它身上用不了；要看某处、点某处时，用 `ClickAtPoint` / `DragAtPoint` / `ScrollAtPoint` 按截图上的 **0-1000 归一化坐标**操作（相对 `capture_rect`，左上 0、右下 1000）。坐标工具只保证光标落到目标像素，是否被响应必须重新截图确认。工具报「更高权限 / 完整性级别 / UIPI」时不要重试，直接告诉用户需要以与 GridStar 相同的权限运行本服务。
+
+### 常规步骤
 
 1. 从实时 MCP 工具列表识别可用工具和 Schema，不凭本文示例虚构工具；每个工具用实时 Schema 构造参数。
 2. 按下面的路由表选流程。**用户同时提到"表面网格已生成/已完成/已有"和"空间网格/体网格/继续生成"时，一律走流程 B**，不要因为出现"空间网格"字样就跳去单独阶段。
@@ -55,7 +73,7 @@ allowed-tools: []
 
 **各向异性网格处理（前置条件满足时）→ 后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查**
 
-1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认机翼子组存在（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）。存在时按流程 A 表第 7 行执行 `WingAnisoProcessWingAnisotropy`；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。
+1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认机翼子组存在（`wingUpper`、`wingLower`、`wingTip`、`wingTrailingEdge`）。存在时按流程 A 表第 7 行执行 `WingAnisoProcessWingAnisotropy`；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。
 2. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
 3. **体网格块创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时先按外场规则体创建生成外场。
 4. **空间网格生成**：按流程 A 表第 10 行执行。
@@ -68,13 +86,13 @@ allowed-tools: []
 2. **水密闸门**：表面网格生成前必须完成水密性处理（自由边检查通过）和自动部件分割。处理失败时公差加大 5 倍重试，最多 2 次；仍无效则停止迭代，提示用户模型可能存在缝隙、穿插、孔洞等错误，不得继续查询网格默认参数或调用 `UGSur`。自由边全部位于半模线位置时可接受。
 3. **边界闸门**：首次铺底（场景 A）时 `BorderConditionSaveDataToDomain` 的 `property` **必须统一为 `-10`（无边界条件）**，严禁在挂载阶段写入 4/7 等实际属性值。实际属性（物面→粘性固壁、外场→远场、对称→对称等）只能在铺底完成后、按用户明确要求通过 `BorderConditioConfigProperty` 逐组设置；用户未明确要求前不写入任何实际属性。物面可按分部件情况拆成多个物面组。
 4. **质量闸门**：面网格除去各向异性单元处最小角应大于 10°；体网格最大角不大于 178° 算合格，严格禁止存在 179.9° 单元。
-5. **前置条件闸门**：自动部件分割完成后必须检查分割结果中的分组。存在机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）时，表面网格生成后必须依次执行各向异性处理与后缘面处理；分组缺失时不得调用 `WingAnisoProcessWingAnisotropy` 或后缘面处理工具，须先补齐分组，无法补齐时向用户说明并在阶段 `note` 中记录跳过原因。
+5. **前置条件闸门**：自动部件分割完成后必须检查分割结果中的分组。存在机翼子组（`wingUpper`、`wingLower`、`wingTip`、`wingTrailingEdge`）时，表面网格生成后必须依次执行各向异性处理与后缘面处理；分组缺失时不得调用 `WingAnisoProcessWingAnisotropy` 或后缘面处理工具，须先补齐分组，无法补齐时向用户说明并在阶段 `note` 中记录跳过原因。
 
 ## 依赖与可选性
 
 - 部件网格参数表和各向异性尺寸均依赖 MAC；MAC 依赖翼根弦长、翼尖弦长、机翼展长。用户直接提供这些参数时跳过测量步骤。
 - `GetModelParameters` 返回 0.0 表示该参数未自动计算，回退 `references/geometry-parameters.md` §1.2 的文档默认值。`MeasureDistance`、`GetPointOnSurface`、`CalculateFirstLayerHeight` 为预留工具（当前 MCP 列表中不存在），按对应 reference 的替代方案处理。
-- 自动部件分割结果包含机翼子组（`wingUpperSurface`、`wingLowerSurface`、`wingTip`、`wingTrailingEdge`）时，各向异性处理与后缘面处理是表面网格生成后的必经阶段，不得以"用户未提网格数量要求"为由跳过；仅当分组缺失而无法补齐时才跳过，并在阶段 `note` 中说明原因。
+- 自动部件分割结果包含机翼子组（`wingUpper`、`wingLower`、`wingTip`、`wingTrailingEdge`）时，各向异性处理与后缘面处理是表面网格生成后的必经阶段，不得以"用户未提网格数量要求"为由跳过；仅当分组缺失而无法补齐时才跳过，并在阶段 `note` 中说明原因。
 - 翼身组合体标准划分：机头、机尾、机翼（上翼面/下翼面/翼稍面/后缘面）、垂尾、平尾；模型含外场时把外场单独设为一个部件。
 
 ## 完成标准

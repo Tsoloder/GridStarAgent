@@ -45,9 +45,9 @@ def UGUGSp(generateWay: int, ids: str, layer: int, growRate: float, caliperFirst
     """生成空间网格.
 
     Args:
-        generateWay: 生成方法,0 表示综合法,1 表示层推法,2 表示减层法.
+        generateWay: 生成方法,默认值为2。0 表示综合法,1 表示层推法,2 表示减层法.
         ids: 选择的网格块 ID,例如"5,6,7"
-        layer: 附面层层数,默认值为40.
+        layer: 附面层层数,默认值为60.
         growRate: 增长率,默认值为1.2.
         caliperFirst: 第一层厚度,默认值为0.001.
         diffusionFactor: 扩散因子,默认值为0.5.
@@ -91,7 +91,7 @@ def WingAnisoProcessWingAnisotropy():
     """机翼各向异性处理主入口 — 依次执行全部 7 步子流程并汇总结果。
 
     包含：尺寸数据获取 → 翼段检测 → 交线识别 → 第一组平滑分布 → 前缘线平滑分布 → 各向异性线组创建 → 各向异性域生成。
-    前置条件：表面网格已生成，分部件分组已完成（wingUpperSurface/wingLowerSurface/wingTip/wingTrailingEdge/fuselage/engine 等分组已存在）。
+    前置条件：表面网格已生成，分部件分组已完成（wingUpper/wingLower/wingTip/wingTrailingEdge/fuselage/engine 等分组已存在）。
 
     Returns:
         JSON 字符串，格式：
@@ -103,4 +103,50 @@ def WingAnisoProcessWingAnisotropy():
          "message":"..."}
     """
     return send_post_request("WingAnisoProcessWingAnisotropy", {})
+
+
+def NacelleAnisoProcessNacelleAnisotropy():
+    """吊舱各向异性处理主入口 — 依次执行全部子步骤并汇总结果。
+
+    包含：尺寸数据获取 → 网格线分类 → 9 类分布设置 → 支架前/后缘线分布 → 各向异性线组创建 → 各向异性域生成 → 狭长面处理。
+    前置条件：表面网格已生成，发动机子部件分割已完成（engineInner/engineOuter/enginePylonInner/enginePylonOuter/enginePylon/engineTrailingEdge/enginePylonTrailingEdge 等分组已存在）。
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success|failed","mac":<double>,
+         "steps":{"step1_dimensions":{...},"step2_classify":{...},...}}
+    """
+    return send_post_request("NacelleAnisoProcessNacelleAnisotropy", {})
+
+
+def TailAnisoProcessTailAnisotropy():
+    """尾翼各向异性处理主入口 — 依次执行全部子步骤并汇总结果。
+
+    包含：尺寸数据获取 → 尾翼线分类 → 分布设置 → 短边设点数 →
+          各向异性线组创建 → 各向异性域生成 → 狭长面处理。
+    前置条件：表面网格已生成，尾翼子部件分割已完成
+    （verticalTailRight/verticalTailLeft/verticalTailTip/verticalTailTrailingEdge/
+     horizontalTailUpper/horizontalTailLower/horizontalTailTip/horizontalTailTrailingEdge
+     等分组已存在）。
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success|failed","steps":{...}}
+    """
+    return send_post_request("TailAnisoProcessTailAnisotropy", {})
+
+
+def RemainingAnisoProcessRemainingAnisotropy():
+    """其余面各向异性处理主入口。
+
+    在机翼、吊舱、尾翼各向异性处理后，对剩余的所有网格面
+    （机身、机尾、弹头等未做处理的网格面）进行各向异性处理。
+
+    前置条件：机翼、吊舱、尾翼各向异性处理已完成。
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success|failed","domain_count":<int>}
+    """
+    return send_post_request("RemainingAnisoProcessRemainingAnisotropy", {})
 
