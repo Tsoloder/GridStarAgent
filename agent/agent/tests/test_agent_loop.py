@@ -42,6 +42,42 @@ def _make_session(session_id="test-session"):
     return Session(id=sid, title="Test", created_at=now, updated_at=now)
 
 
+def test_screenshot_gate_follows_capabilities_vision():
+    """截图能不能送达模型，按配置里的 capabilities.vision 判定。"""
+    import agent_loop
+
+    config = config_from_dict({
+        "version": 1,
+        "default_model": "test/text-only",
+        "providers": [{
+            "id": "test", "name": "Test", "base_url": "http://localhost:11434",
+            "api_key": "test-key", "default_api": "openai-chat",
+        }],
+        "models": [
+            {"provider": "test", "id": "text-only", "context_window": 32000,
+             "capabilities": {"vision": False}},
+            {"provider": "test", "id": "sees-images", "context_window": 32000,
+             "capabilities": {"vision": True}},
+        ],
+    })
+    assert agent_loop._model_sees_images(config, "test/text-only") is False
+    assert agent_loop._model_sees_images(config, "test/sees-images") is True
+    # 配置里查不到这个模型时按「能看图」处理：宁可白发一张图，也不要谎报看不到
+    assert agent_loop._model_sees_images(config, "test/absent") is True
+
+
+def test_screenshot_note_tells_the_truth_about_vision():
+    import agent_loop
+
+    delivered = agent_loop._screenshot_note("test/sees-images", r"C:\uploads\a.png", True)
+    assert "图片形式发送" in delivered
+
+    blocked = agent_loop._screenshot_note("test/text-only", r"C:\uploads\a.png", False)
+    assert "不会送达模型" in blocked
+    assert "a.png" in blocked and "test/text-only" in blocked
+    assert "不要重复截图" in blocked
+
+
 def _patch_stream_runtime(monkeypatch, agent_loop, stream_chat):
     async def stream_runtime(runtime, model_key, messages, system_prompt, tools):
         async for event in stream_chat(
@@ -1023,4 +1059,59 @@ async def test_auto_mode_blocks_ask_user_while_plan_open(tmp_path, monkeypatch):
     refused = next(event for event in events if event["type"] == "tool_result")
     assert "ask_user_question 不可用" in refused["result"]
     assert "options_offered" not in _event_types(events)
+
+
+@pytest.mark.asyncio
+async def test_set_active_category_notifies_the_frontend(tmp_path, monkeypatch):
+    """模型改了会话分类必须推 session_meta：否则 WebUI 的下拉框停在旧值。
+
+    回归守卫两层：
+    1. set_active_category 必须推 session_meta，否则界面读自己的 state 永不更新，
+       下一轮请求还会带着旧分类把服务端刚设好的值覆盖回去；
+    2. 分类只落在 Session 上。meta.json 的唯一写者是 save_session，而它每轮都用
+       自己那份 meta 全量覆盖文件；agent_loop 另写一遍非但多余，还会在同一个回合
+       里被抹掉。
+    """
+    import json
+
+    import agent_loop
+    import paths as paths_mod
+    import session as session_mod
+
+    monkeypatch.setattr(paths_mod, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    async def run(category, tag):
+        session = _make_session(tag)
+        (tmp_path / session.id).mkdir(parents=True, exist_ok=True)
+        runtime = _ScriptedRuntime([
+            _tool_call_events("set_active_category", {"category": category}),
+            _text_events("好。"),
+        ])
+        return session, [event async for event in agent_loop.run_agent_loop(
+            session, "这是导弹", "base", _make_config(), MockMcpBridge({}),
+            MockContextManager(), MockSkillRegistry(), model_runtime=runtime,
+            interaction_mode="manual",
+        )]
+
+    session, events = await run("missile", "category-meta")
+    kinds = _event_types(events)
+    assert "session_meta" in kinds
+    # 事件要排在对应的工具结果之后，前端拿到时状态已经改好了
+    assert kinds.index("session_meta") > kinds.index("tool_result")
+    assert next(e for e in events if e["type"] == "session_meta")["category"] == "missile"
+    # agent_loop 只改内存里的 Session，落盘交给唯一的写者 save_session
+    # （app.py 在 tool_result 事件处调用它，写的是同一个 Session 对象）
+    assert session.category == "missile"
+    session_mod.save_session(session)
+    saved = json.loads((tmp_path / session.id / "meta.json").read_text(encoding="utf-8"))
+    assert saved["category"] == "missile"
+    # 刷新页面/切会话时 GET /sessions/{id} 从 meta.json 恢复，必须能读回来
+    assert session_mod.load_session(session.id).category == "missile"
+
+    # 非法分类只把错误文案交给模型，不能推事件、也不能改会话分类
+    invalid, refused = await run("submarine", "category-invalid")
+    assert "session_meta" not in _event_types(refused)
+    assert invalid.category == ""
+    assert not (tmp_path / invalid.id / "meta.json").exists()
 

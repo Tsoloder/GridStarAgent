@@ -397,6 +397,7 @@ async def get_skills():
     return {"skills": [
         {
             "id": skill.id, "name": skill.name, "description": skill.description,
+            "category": skill.category,
             "version": skill.version, "source": skill.source,
             "content_hash": skill.content_hash, "allowed_tools": skill.allowed_tools,
             "shadowed": [
@@ -686,6 +687,17 @@ async def chat_stream(body: dict):
     message = body.get("message", "") or ""
     system_prompt = body.get("system_prompt", "") or ""
     selected_skills = body.get("selected_skills", []) or []
+    selected_category = body.get("selected_category", "") or ""
+    # 前端显式选了「全部」时传的也是空串，跟「没传」不是一回事：只有没传、
+    # 或明确不是显式选择时，才回落到会话 meta（agent 通过 set_active_category 设的）。
+    if not selected_category and not bool(body.get("category_explicit")):
+        try:
+            _meta_path = session_dir(session_id) / "meta.json"
+            if _meta_path.exists():
+                _meta = json.loads(_meta_path.read_text(encoding="utf-8"))
+                selected_category = _meta.get("category", "")
+        except Exception:
+            pass
     skill_roots = body.get("skill_roots", []) or []
     writable_skill_root = body.get("writable_skill_root", "") or ""
     model_id = body.get("model_id", "") or ""
@@ -776,7 +788,8 @@ async def chat_stream(body: dict):
                     bg.task = asyncio.create_task(
                         _run_background_locked(
                             bg, session_id, message, system_prompt,
-                            selected_skills, attachments, display_content,
+                            selected_skills, selected_category,
+                            attachments, display_content,
                             interaction_mode, model_id,
                             request_skill_registry,
                             runtime=_model_runtime,
@@ -986,6 +999,8 @@ async def get_session(session_id: str):
             "created_at": s.created_at,
             "updated_at": s.updated_at,
             "model_id": s.model_id,
+            # 会话的活动技能分类，前端切会话时用它把下拉框恢复成服务端真值
+            "category": s.category,
         },
         "messages": s.messages,
         "plan": plan,
@@ -1384,6 +1399,7 @@ async def _run_background_loop(
     message: str,
     system_prompt: str,
     selected_skills: list,
+    selected_category: str,
     attachments: list,
     display_content: str,
     interaction_mode: str,
@@ -1459,6 +1475,7 @@ async def _run_background_loop(
             request_skill_registry or SkillRegistry(SkillRegistry.default_roots()), selected_skills, _request_tool_approval,
             attachments=stored_attachments, display_content=display_content,
             interaction_mode=interaction_mode,
+            selected_category=selected_category,
             model_override=model_id if model_id else None,
             model_runtime=model_runtime if model_runtime is not None else _model_runtime,
             ledger=ledger,
@@ -1564,9 +1581,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=1231)
     parser.add_argument("--host", default="127.0.0.1")
-    # 提权重启时由 data_dir_guard 传入，用于把数据目录钉给提权子进程；
-    # 真正生效在 paths 导入阶段，这里只是让 argparse 接受它而不报错。
-    parser.add_argument("--data-dir", default=None,
-                        help="数据目录（提权重启时内部传入，通常无需手动指定）")
     args = parser.parse_args()
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")

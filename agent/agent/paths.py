@@ -1,46 +1,30 @@
 """Central writable-data paths for the Python runtime (Python 3.9+).
 
-数据目录固定在用户数据目录下的 ``.gridstar``：
+数据目录固定在用户数据目录下的 ``GridstarAgent.data``：
 
-* Windows：``%USERPROFILE%\\.gridstar``（即当前用户的漫游目录，默认
-  ``C:\\Users\\<账号>\\AppData\\Roaming\\.gridstar``）
-* Linux / macOS：``~/.local/share/.gridstar``
+* Windows：``%USERPROFILE%\\GridstarAgent.data``（即当前用户的漫游目录，默认
+  ``C:\\Users\\<账号>\\AppData\\Roaming\\GridstarAgent.data``）
+* Linux / macOS：``~/.local/share/GridstarAgent.data``
 
 不再提供自定义存放路径的开关：内网多台机器、多个账号之间数据必须落在同一个
 位置，路径可配会让「同代码换台机器就找不到数据」变成常态问题。写不进去时由
 ``data_dir_guard`` 当场修权限或请求提权，而不是换目录写。
 
-``GRIDSTAR_DATA_DIR_PINNED`` 与同名命令行参数 ``--data-dir`` 只服务一个场景：
-权限修不动时提权重启进程，提权后 ``%APPDATA%`` 会变成提权账号的目录，需要把
-已解析好的目标目录钉给子进程，保证它落回同一个位置。两条路都走是因为 runas
-子进程不保证继承父进程的环境块，命令行参数才是确定的那条。它们不是对外的
-自定义路径入口。
+``GRIDSTAR_DATA_DIR_PINNED`` 只服务一个场景：权限修不动时提权重启进程，提权后
+``%APPDATA%`` 会变成提权账号的目录，需要把已解析好的目标目录钉给子进程，保证
+它落回同一个位置。它不是对外的自定义路径入口。
 """
 import os
 import sys
 from pathlib import Path
 
-from data_dir_guard import DATA_DIR_ARG, PIN_ENV
+from data_dir_guard import PIN_ENV
 
-DATA_DIR_NAME = ".gridstar"
-_LEGACY_DIR_NAMES = ("ClineLikeChat",)
+DATA_DIR_NAME = "GridstarAgent.data"
+_LEGACY_DIR_NAMES = ("ClineLikeChat", ".gridstar")
 
 # 启动期发生的事都记在这里，交给 logging_setup 在当前进程能用的日志出口打出来。
 STARTUP_NOTICES = []
-
-
-def _pinned_from_argv() -> str:
-    """从命令行读取提权重启传入的 ``--data-dir``。
-
-    提权子进程不一定继承父进程的环境变量，所以钉目录还要靠命令行参数兜底。
-    """
-    argv = sys.argv[1:]
-    for index, item in enumerate(argv):
-        if item == DATA_DIR_ARG and index + 1 < len(argv):
-            return argv[index + 1].strip()
-        if item.startswith(DATA_DIR_ARG + "="):
-            return item.split("=", 1)[1].strip()
-    return ""
 
 
 def _user_data_parent() -> Path:
@@ -56,10 +40,11 @@ def _user_data_parent() -> Path:
 
 
 def migrate_legacy_dir(root: Path) -> None:
-    """把旧目录名（ClineLikeChat）搬迁到新目录名，保住已有的配置与会话。
+    """把旧目录名搬迁到新目录名，保住已有的配置与会话。
 
-    只在目标不存在时搬迁；两边都存在时保留旧目录并记一条提示，让使用者自己决
-    定怎么合并，程序不替他做取舍。
+    遍历 ``_LEGACY_DIR_NAMES``，找到第一个存在的旧目录，将其重命名为新的
+    目标目录名。只在目标不存在时搬迁；两边都存在时保留旧目录并记一条提示，
+    让使用者自己决定怎么合并，程序不替他做取舍。
     """
     if root.exists():
         for legacy_name in _LEGACY_DIR_NAMES:
@@ -86,7 +71,7 @@ def migrate_legacy_dir(root: Path) -> None:
 
 
 def data_dir() -> Path:
-    configured = os.environ.get(PIN_ENV, "").strip() or _pinned_from_argv()
+    configured = os.environ.get(PIN_ENV, "").strip()
     if configured:
         root = Path(configured).expanduser()
         root.mkdir(parents=True, exist_ok=True)

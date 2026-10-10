@@ -302,7 +302,7 @@ def test_background_fallback_keeps_error_classification(monkeypatch):
     async def main():
         bg = server.BackgroundSession("bg-1")
         await server._run_background_loop(
-            bg, "bg-1", "hi", "base", [], [], "hi", "chat", ""
+            bg, "bg-1", "hi", "base", [], "", [], "hi", "chat", ""
         )
         return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
 
@@ -351,7 +351,7 @@ def test_background_loop_does_not_append_second_done(monkeypatch):
     async def main():
         bg = server.BackgroundSession(session_id)
         await server._run_background_loop(
-            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
         )
         return [bg.queue.get_nowait() for _ in range(bg.queue.qsize())]
 
@@ -787,7 +787,7 @@ def test_invalidated_background_turn_skips_persistence(monkeypatch):
         bg = server.BackgroundSession(session_id)
         bg.invalidated = True
         await server._run_background_loop(
-            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
         )
         return bg.done_event.is_set()
 
@@ -811,7 +811,7 @@ def test_background_turn_holds_session_turn_lock(monkeypatch):
     async def main():
         bg = server.BackgroundSession(session_id)
         await server._run_background_locked(
-            bg, session_id, "hi", "base", [], [], "hi", "chat", ""
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
         )
 
     asyncio.run(main())

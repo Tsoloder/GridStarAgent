@@ -313,6 +313,7 @@
 /* 交互模式下拉：每项一行标题加一行说明（手动逐步确认 / 自动连续执行），选中项右侧打勾。
    宽度按说明文字的体量给定，比模型/Skill 下拉窄，避免一行小字被拉得过长。 */
 .mode-listbox{width:240px;max-width:calc(100vw - 18px)}
+
 /* 技能斜杠面板：输入框以 "/" 开头时浮在输入框上方，每行 = 名称 + 技能 id + 右对齐说明 */
 .slash-menu{position:absolute;left:0;right:0;bottom:calc(100% + 6px);z-index:24;max-height:264px;overflow:auto;border:1px solid var(--line-strong);border-radius:var(--radius-lg);background:var(--inset);box-shadow:0 -18px 44px rgba(0,0,0,.45);padding:5px}
 .slash-menu::-webkit-scrollbar{width:8px}

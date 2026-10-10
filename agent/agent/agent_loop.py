@@ -1,10 +1,12 @@
 import asyncio
+import base64
 import difflib
 import html
 import json
 import logging
 import os
 import re
+import secrets
 import time as _time
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +17,7 @@ from context import ContextManager, MAX_TURNS
 from document_loader import read_image_data
 from llm_client.adapters.base import is_retryable
 from mcp_bridge import McpBridge
+from paths import UPLOADS_DIR
 from session import Session, export_session_markdown
 from tool_memory import (
     merge as merge_tool_memory,
@@ -302,10 +305,35 @@ EXPORT_SESSION_TOOL = RuntimeTool(
 )
 
 
+SET_CATEGORY_TOOL_NAME = "set_active_category"
+
+SET_CATEGORY_TOOL = RuntimeTool(
+    name=SET_CATEGORY_TOOL_NAME,
+    description=(
+        "设置当前会话的活动技能分类（category）。"
+        "设置后系统只会加载该分类下的技能供模型使用。"
+        "常用于根据当前任务类型（飞机/导弹）自动切换对应技能集。"
+        "可选值：'aircraft'（飞机CFD网格技能）、'missile'（导弹CFD网格技能）、"
+        "'common'（通用技能）、''（空字符串，显示全部技能）。"
+        "调用前建议先对 GridStar 截图分析主视口模型类型再决定。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "category": {
+                "type": "string",
+                "description": "技能分类：'aircraft'、'missile'、'common'、或 ''（显示全部）"
+            }
+        },
+        "required": ["category"]
+    },
+)
+
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
                    UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME,
-                   EXPORT_SESSION_TOOL_NAME}
+                   EXPORT_SESSION_TOOL_NAME, SET_CATEGORY_TOOL_NAME}
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -394,6 +422,64 @@ def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id):
         "model": model_id,
     }
     return total, record, fields
+
+
+# 截图工具 CaptureGridStarWindow 返回的图片，暂存后供下一轮 model_messages
+# 构建时以附件图片块形式发给 LLM。key = session_id，value = 图片文件路径。
+_pending_tool_images: dict = {}
+
+
+def _maybe_save_screenshot_image(result, session_id: str):
+    """如果工具返回结果是截图，把 base64 图片写到 uploads 目录，返回文件路径。"""
+    if not isinstance(result, str) or not result.strip().startswith("{"):
+        return None
+    try:
+        parsed = json.loads(result)
+        if not (isinstance(parsed, dict) and parsed.get("status") == "success"
+                and isinstance(parsed.get("result"), dict)
+                and parsed["result"].get("image")):
+            return None
+        img_data = parsed["result"]["image"]
+        width = parsed["result"].get("width", 0)
+        stored_name = "%s-%s.png" % (
+            datetime.now().strftime("%Y%m%d%H%M%S"), secrets.token_hex(4)
+        )
+        target = UPLOADS_DIR / stored_name
+        UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(base64.b64decode(img_data))
+        logger.info("[screenshot] saved to %s (%sx%s)", target, width,
+                     parsed["result"].get("height", ""))
+        return str(target)
+    except Exception as e:
+        logger.warning("[screenshot] save failed: %s", e)
+        return None
+
+
+def _model_sees_images(config, model_key: str) -> bool:
+    """当前模型是否真的会收到图片输入。
+
+    网关对不支持图片的模型是「静默丢弃」：HTTP 200，图片一个 token 都不算，
+    模型只看到工具返回的元数据，然后如实回答「我看不到画面」，再反复截图。
+    这里按配置里的 capabilities.vision 做闸门；查不到模型时按支持处理
+    （宁可白发一张图，也不要谎报「看不到」）。
+    """
+    try:
+        return bool(config.model(model_key).capabilities.vision)
+    except Exception:
+        return True
+
+
+def _screenshot_note(model_key: str, path: str, sees_images: bool) -> str:
+    """回给模型的截图结果说明文字：能不能看图，说实话。"""
+    if sees_images:
+        return "截图已缓存，将在下一轮请求中以图片形式发送给模型"
+    return (
+        "截图已保存到 uploads/%s，但不会送达模型：当前模型 %s 被配置为不支持图片输入"
+        "（capabilities.vision=false），网关会把图片静默丢掉，你看到的只有这段文字。"
+        "不要重复截图；改用工程数据（模型几何参数、对象列表）判断，"
+        "或请用户在设置里切换到支持视觉（Vision）的模型。"
+        % (os.path.basename(path), model_key)
+    )
 
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
@@ -527,6 +613,7 @@ async def run_agent_loop(
     attachments: list = None,
     display_content: str = "",
     interaction_mode: str = "manual",
+    selected_category: str = "",
     model_override: str = None,
     model_runtime=None,
     ledger=None,
@@ -582,6 +669,37 @@ async def run_agent_loop(
     if base_system_prompt:
         system_parts.append(base_system_prompt)
     system_parts.append(skill_registry.catalog_prompt(selected_ids))
+    # 通用领域识别引导：不依赖技能是否选中，模型始终知道该截图识别模型类型
+    system_parts.append(
+        "<domain_detection>\n"
+        "当用户要求「生成网格」「画网格」「导出网格」等 CFD 网格操作，"
+        "但未明确指定模型类型时：\n"
+        "0. 若当前工具列表里还没有 CaptureGridStarWindow，先调用 enable_tool_group，"
+        "group_id 传 \"screen\"，把桌面截图分组打开\n"
+        "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（它按进程 gridstar.exe "
+        "定位窗口，不看标题；返回结果里的 is_foreground 说明画面是不是 GridStar 本身，"
+        "不是则先调用 ActivateGridStarWindow）\n"
+        "2. 通过视觉分析主视口的模型是飞机还是导弹\n"
+        "（若截图结果的 note 说「不会送达模型」，说明当前模型不支持图片输入，"
+        "不要再重复截图：改用工程数据判断，或请用户在设置里切换到带 Vision 的模型）\n"
+        "3. 根据识别结果调用 set_active_category 设置正确分类\n"
+        "4. 通过 / 菜单或 read_skill 加载对应领域的技能再开始工作\n"
+        "需要操作界面时：GridStar 不提供 UI 自动化控件，GetUIElementInfo 返回 "
+        "0 个控件是正常现象，ClickUIElement / TypeTextInUIElement 在它身上用不了。"
+        "请在截图上看清目标位置后，用 ClickAtPoint / DragAtPoint / ScrollAtPoint "
+        "按 0-1000 归一化坐标操作（坐标相对截图结果里的 capture_rect，"
+        "0=左/上边缘，1000=右/下边缘）。这几个工具只能确认光标落点，"
+        "无法确认 GridStar 是否响应，操作后请重新截图确认结果；"
+        "键盘快捷键仍可用 SendKeyboardShortcut。\n"
+        "注意：截图工具只有在你确实需要看界面时才调用，它返回的图片会占用较多上下文。\n"
+        "</domain_detection>"
+    )
+    if selected_category:
+        system_parts.append(
+            "<selected_category>%s</selected_category>\n"
+            "当前专业分类为 %s，优先使用该分类下的技能和参考知识。"
+            % (selected_category, selected_category)
+        )
     if selected_bodies:
         system_parts.append("<selected_skill_instructions>\n%s\n</selected_skill_instructions>" %
                             "\n\n".join(selected_bodies))
@@ -861,6 +979,7 @@ async def run_agent_loop(
             )
             runtime_tools = skill_registry.internal_tools() + [
                 UPDATE_PLAN_TOOL, ASK_USER_TOOL, EXPORT_SESSION_TOOL,
+                SET_CATEGORY_TOOL,
             ]
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
@@ -1154,6 +1273,12 @@ async def run_agent_loop(
                 }
                 _tool_ok = True
                 _tool_t0 = _time.monotonic()
+                # 每轮工具调用重置：截图路径只属于本次调用，否则上一轮的值会被
+                # 反复注入，且异常路径下这个变量会未绑定（NameError）。
+                _image_path = None
+                # set_active_category 改了会话 meta.json，前端无从得知：记下来，
+                # 本轮工具结果之后补发一个 session_meta 事件。
+                _category_event = None
                 try:
                     if tc["name"] == ASK_USER_TOOL_NAME:
                         # 内置询问工具：不走 MCP、不走审批。参数合法则本轮到此为止，等用户选择
@@ -1253,6 +1378,50 @@ async def run_agent_loop(
                             tc["args"].get("files", {}),
                             bool(tc["args"].get("overwrite", False)),
                         )
+                    elif tc["name"] == SET_CATEGORY_TOOL_NAME:
+                        # 内置分类切换工具：不走 MCP、不走审批
+                        category = str(tc["args"].get("category", "")).strip().lower()
+                        valid = {"aircraft", "missile", "common", ""}
+                        if category not in valid:
+                            result = (
+                                "无效的分类：%s。可选值：'aircraft'（飞机）、"
+                                "'missile'（导弹）、'common'（通用）、''（全部）"
+                            ) % category
+                        else:
+                            try:
+                                from paths import SESSIONS_DIR
+                                from session import atomic_write
+                                # 两处一起写：session.category 是权威值，本轮紧接着
+                                # yield 的 tool_result 会让 app.py 的 save_session
+                                # 拿它重建 meta.json；只改 meta.json 的键的话，会
+                                # 在同一个回合内被那次全量重建覆盖掉。
+                                session.category = category
+                                meta_path = SESSIONS_DIR / session.id / "meta.json"
+                                if meta_path.exists():
+                                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                                else:
+                                    meta = {}
+                                if category:
+                                    meta["category"] = category
+                                else:
+                                    meta.pop("category", None)
+                                # 原子写：并发读 meta.json 的调用方不会读到半截文件，
+                                # 那是 load_session 直接报「会话不存在」的来源。
+                                atomic_write(
+                                    str(meta_path), json.dumps(meta, ensure_ascii=False)
+                                )
+                                result = (
+                                    "当前会话的专业分类已切换为：%s。"
+                                    "后续任务将优先使用该分类下的技能和参考知识。"
+                                ) % (category or "全部（不限分类）")
+                                # 前端界面的分类选择读的是自己的 state，不会跟着
+                                # 服务端变，必须显式推一条事件给它。
+                                _category_event = {
+                                    "type": "session_meta",
+                                    "category": category,
+                                }
+                            except Exception as exc:
+                                result = "设置分类失败：%s" % exc
                     elif tc["name"] == EXPORT_SESSION_TOOL_NAME:
                         # 内置导出工具：不走 MCP、不走审批，把当前会话历史写成 md 落盘
                         result = "已导出当前会话历史：%s" % export_session_markdown(session)
@@ -1328,6 +1497,38 @@ async def run_agent_loop(
                         else:
                             logger.info("[execute] 直接执行工具 %s", tc["name"])
                             result = await mcp.call_tool(tc["name"], tc["args"])
+                    # 截图工具返回了 base64 图片：把 base64 写入 uploads 目录的文件，
+                    # 同时把 result 替换为简洁文本（去掉 base64 字符串，避免纯文本模型
+                    # 被几千个字符撑爆或混淆）。这一块放在三条分支之外，让「直接执行」
+                    # 与「用户确认参数后执行」两条路径得到同样的处理。
+                    if not internal_tool:
+                        _image_path = _maybe_save_screenshot_image(result, session.id)
+                        if _image_path:
+                            # 模型不看图就别注入：注入了也是白发（网关静默丢弃），
+                            # 还会让后续每个请求都背上几十万字符的 base64。
+                            _sees = _model_sees_images(config, call_model_id)
+                            if _sees:
+                                _pending_tool_images[session.id] = _image_path
+                            else:
+                                logger.warning(
+                                    "[screenshot] 模型 %s 不支持图片输入，截图 %s 不注入下一轮请求",
+                                    call_model_id, _image_path,
+                                )
+                            try:
+                                _parsed = json.loads(result)
+                                if isinstance(_parsed, dict) and isinstance(_parsed.get("result"), dict):
+                                    _parsed["result"] = {
+                                        "width": _parsed["result"].get("width"),
+                                        "height": _parsed["result"].get("height"),
+                                        "format": _parsed["result"].get("format", "png"),
+                                        "note": _screenshot_note(call_model_id, _image_path, _sees),
+                                        "image_delivered": _sees,
+                                    }
+                                    result = json.dumps(_parsed, ensure_ascii=False)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+                            if not _sees:
+                                _image_path = None
                     result = ctx_mgr.persist_large_result(result, session.id)
                 except Exception as e:
                     result = f"Tool error: {e}"
@@ -1349,6 +1550,25 @@ async def run_agent_loop(
                     "duration_ms": int(round((_time.monotonic() - _tool_t0) * 1000)),
                 }
                 session.append_tool_result(tc["id"], result, tc["name"])
+                if _category_event is not None:
+                    # 会话分类变了：让前端把下拉框同步过来（不落盘、不进轨迹）
+                    logger.info("[category] 会话分类已切到 %s，通知前端",
+                                _category_event.get("category") or "(全部)")
+                    yield _category_event
+                # 截图工具结果包含图片路径：把它注入到最新一条 user 消息的
+                # attachments 中（和用户上传图片一样），下一轮请求时
+                # model_messages 构建会自动用 read_image_data 编码并发送。
+                if _image_path:
+                    for _m in reversed(session.messages):
+                        if _m.get("role") == "user":
+                            _attach = _m.setdefault("attachments", [])
+                            # 避免同一张截图重复注入
+                            if not any(item.get("path") == _image_path for item in _attach):
+                                _attach.append({
+                                    "kind": "image", "name": "screenshot.png",
+                                    "path": _image_path, "media_type": "image/png",
+                                })
+                            break
                 # 自动记账：每次工具调用（含 update_plan、失败）都记一条
                 if ledger is not None:
                     ledger.record_call(

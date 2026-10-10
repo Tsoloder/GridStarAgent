@@ -18,7 +18,7 @@ const state = {
   // status: id → 徽标状态 running|done|stopped|error（done 常驻，该会话下次发消息时刷新）；
   // stashed: 切走会话时摘下暂存的消息 DOM，切回后原样挂回继续实时更新
   controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
-  modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
+  modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, categoryListOpen: false, categoryTouched: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
   attachments: [], uploading: 0,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{}},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
@@ -37,7 +37,7 @@ const el = {
   connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
-  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"),
+  welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"), categoryTrigger: $("#category-trigger"), categoryLabel: $("#category-label"), categoryListbox: $("#category-listbox"), categorySelect: $("#category-select"),
   input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"), composer: $(".composer"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
@@ -176,7 +176,7 @@ function renderModelList() {
   if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">没有已配置的模型</div>';
 }
 function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); }
-function openModelList() { closeModeList(); closeSlashMenu(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
+function openModelList() { closeModeList(); closeSlashMenu(); closeCategoryList(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
 function closeModelList() { state.modelListOpen = false; state.modelSearch = ""; el.modelListbox.classList.add("hidden"); el.modelTrigger.setAttribute("aria-expanded","false"); }
 function focusModelOption() { const options = [...el.modelListbox.querySelectorAll(".model-option")]; options.forEach((item,index) => item.classList.toggle("focused",index === state.modelOptionIndex)); const active = options[state.modelOptionIndex]; if (active) active.scrollIntoView({block:"nearest"}); }
 function handleModelKeys(event) {
@@ -218,17 +218,36 @@ function slashGroups() {
       kind: "model",
     }))}];
   }
-  // 全部候选都建出来，过滤只靠 applySlashFilter 切可见性：
-  // 这样删字变宽时能重新出现，也不会每敲一个字重建 DOM。
-  const skills = [{id: "", name: "不启用技能", description: "默认：按消息内容自动匹配技能"}]
-    .concat(state.skills || [])
-    .map(item => ({id: item.id || "", name: item.name || item.id, code: item.id || "—",
-                   description: item.description || "", kind: "skill"}));
   const commands = SLASH_COMMANDS.map(item => ({
     id: item.id, name: item.name, code: item.id, description: item.description, kind: "command",
   }));
-  // 指令在前：模型、导出这类动作比技能更常用
-  return [{label: "指令", items: commands}, {label: "技能", items: skills}];
+  const groups = [{label: "指令", items: commands}];
+  const cat = (state.selectedCategory || "").toLowerCase();
+  if (!cat) {
+    // 全部：按 category 分组展示
+    const byCat = {};
+    (state.skills || []).forEach(s => {
+      const key = (s.category || "通用").charAt(0).toUpperCase() + (s.category || "通用").slice(1);
+      if (!byCat[key]) byCat[key] = [];
+      byCat[key].push({id: s.id, name: s.name || s.id, code: s.id,
+                       description: s.description || "", kind: "skill"});
+    });
+    Object.keys(byCat).sort().forEach(key => {
+      groups.push({label: key, items: byCat[key]});
+    });
+  } else {
+    // 选了具体 category：只显示该 category + Common 的技能
+    const filtered = [{id: "", name: "不启用技能", description: "默认：按消息内容自动匹配技能"}]
+      .concat(state.skills || [])
+      .filter(s => {
+        const sc = (s.category || "").toLowerCase();
+        return sc === cat || sc === "common" || s.id === "";
+      })
+      .map(s => ({id: s.id || "", name: s.name || s.id, code: s.id || "—",
+                  description: s.description || "", kind: "skill"}));
+    groups.push({label: cat.charAt(0).toUpperCase() + cat.slice(1), items: filtered});
+  }
+  return groups;
 }
 function renderSlashMenu() {
   // 行只在打开面板或切换模式时建一次，之后按键只切换可见性：
@@ -345,7 +364,7 @@ function focusSlashItem(index) {
   if (rows[index]) rows[index].scrollIntoView({block:"nearest"});
 }
 function openSlashMenu() {
-  closeModeList(); closeModelList();
+  closeModeList(); closeCategoryList(); closeModelList();
   state.slashOpen = true;
   el.slashMenu.classList.remove("hidden");
 }
@@ -420,8 +439,39 @@ function selectMode(value) {
   closeModeList();
   renderModeList();
 }
-function openModeList() { closeModelList(); closeSlashMenu(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
+function openModeList() { closeModelList(); closeSlashMenu(); closeCategoryList(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
 function closeModeList() { state.modeListOpen = false; el.modeListbox.classList.add("hidden"); el.modeTrigger.setAttribute("aria-expanded","false"); }
+function selectCategory(value, explicit) {
+  state.selectedCategory = value;
+  // 用户自己点过下拉框才算「显式选择」：只有显式选择才允许覆盖服务端 meta.json
+  // 里的分类，否则「全部」这个空值会被 app.py 当成「前端没传」而回落读 meta。
+  if (explicit) state.categoryTouched = true;
+  el.categorySelect.value = value;
+  el.categoryLabel.textContent = value ? value.charAt(0).toUpperCase() + value.slice(1) : "全部";
+  closeCategoryList();
+  renderSlashMenu();
+}
+// 模型调用 set_active_category 只会改服务端的会话 meta.json，界面上不会自己变。
+// 收到 session_meta 事件后同步过来，否则下拉框停在旧值，下一轮请求又用旧值
+// 把服务端刚设好的分类覆盖回去。
+function syncCategoryFromMeta(id, category) {
+  if (!state.session || state.session.meta.id !== id) return;
+  state.session.meta.category = category || "";
+  if ((state.selectedCategory || "") !== (category || "")) selectCategory(category || "");
+}
+function openCategoryList() { closeModelList(); closeSlashMenu(); state.categoryListOpen = true; el.categoryListbox.classList.remove("hidden"); el.categoryTrigger.setAttribute("aria-expanded","true"); }
+function closeCategoryList() { state.categoryListOpen = false; el.categoryListbox.classList.add("hidden"); el.categoryTrigger.setAttribute("aria-expanded","false"); }
+function handleCategoryKeys(event) {
+  if (!["ArrowDown","ArrowUp","Enter","Escape"].includes(event.key)) return;
+  event.preventDefault();
+  if (!state.categoryListOpen) { if (event.key !== "Escape") openCategoryList(); return; }
+  if (event.key === "Escape") { closeCategoryList(); return; }
+  const opts = [...el.categoryListbox.querySelectorAll(".model-option")];
+  let idx = opts.findIndex(o => o.getAttribute("aria-selected") === "true");
+  idx = event.key === "ArrowDown" ? Math.min(idx + 1, opts.length - 1) : Math.max(idx - 1, 0);
+  opts.forEach((o, i) => { o.classList.toggle("focused", i === idx); o.setAttribute("aria-selected", String(i === idx)); });
+  if (opts[idx]) opts[idx].scrollIntoView({block:"nearest"});
+}
 function handleModeKeys(event) {
   if (!["ArrowDown","ArrowUp","Enter","Escape"].includes(event.key)) return;
   event.preventDefault();
@@ -1751,6 +1801,9 @@ async function loadSession(id) {
     state.session = await request(`/sessions/${encodeURIComponent(id)}`);
     el.currentTitle.textContent = state.session.meta.title;
     const sessionModel = state.models.find(item => modelKey(item) === state.session.meta.model_id || item.model_id === state.session.meta.model_id); if (sessionModel) selectModel(modelKey(sessionModel));
+    // 会话里存着模型上次用 set_active_category 设的分类：切回来/刷新后要显示它，
+    // 而不是永远从「全部」开始。这不是用户的选择，所以不置 categoryTouched。
+    state.categoryTouched = false; selectCategory(state.session.meta.category || "");
     el.messages.innerHTML = ""; hidePhasePanel(); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
     if (!restoreView(id)) {
@@ -1892,6 +1945,7 @@ function handleStreamEvent(id, type, event, assistant) {
   else if (type === "tool_approval_required") { queueApproval(id, event); }
   else if (type === "skill_loaded") { /* 识别但不在气泡上展示 Skill 标签 */ }
   else if (type === "notice") showToast(event.message || "附件处理提示");
+  else if (type === "session_meta") syncCategoryFromMeta(id, event.category || "");
   else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
   else if (type === "error") throw streamFailure(event);
   else if (type === "done") { finishAssistant(assistant); const stream = state.streams.get(id); if (stream && assistant.awaitingInput) stream.awaiting = true; setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); }
@@ -1934,7 +1988,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   syncComposer();
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
-    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,attachments:sentAttachments})});
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,selected_category:state.selectedCategory || "",category_explicit:!!state.categoryTouched,attachments:sentAttachments})});
     await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)), controller);
     backgroundSafe(sessionId, () => finishAssistant(assistant));
     // 回合以选项/参数卡片收尾 → 「待确认」，否则「已完成」
@@ -2760,11 +2814,19 @@ el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openMod
 el.skillChip.onclick = () => { selectSkill(""); el.input.focus(); };
 el.modeTrigger.onclick = () => state.modeListOpen ? closeModeList() : openModeList();
 el.modeTrigger.onkeydown = handleModeKeys;
+el.categoryTrigger.onclick = () => state.categoryListOpen ? closeCategoryList() : openCategoryList();
+el.categoryTrigger.onkeydown = handleCategoryKeys;
 bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);
 bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
-bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
+bindHoverDropdown(el.categoryTrigger.closest(".model-control"), openCategoryList, closeCategoryList);
 selectMode(state.mode);
+selectCategory("");
 renderSkillChip();
+// 分类选项点击
+el.categoryListbox.addEventListener("click", event => {
+  const opt = event.target.closest(".model-option");
+  if (opt) selectCategory(opt.dataset.category || "", true);
+});
 el.openSettings.onclick = openSettings; el.closeSettings.onclick = () => closeSettings(); el.cancelSettings.onclick = () => closeSettings(); el.saveSettings.onclick = saveSettings; el.addProvider.onclick = addProvider;
 document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclick = () => switchSettingsTab(button.dataset.settingsTab));
 if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
@@ -2784,6 +2846,22 @@ el.connection.onclick = bootstrap;
 el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
 el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };
 el.input.onkeydown = event => { if (handleSlashKeys(event)) return; if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
+// 粘贴文件/图片：从剪贴板提取文件附件，走现有的 addFiles 流程
+el.input.addEventListener("paste", event => {
+  const items = event.clipboardData && event.clipboardData.items;
+  if (!items) return;
+  const files = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.kind === "file") {
+      const file = item.getAsFile();
+      if (file) files.push(file);
+    }
+  }
+  if (files.length === 0) return;
+  event.preventDefault();
+  addFiles(files);
+});
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
 // 浮层高度会随卡片折叠/换提问而变，计划窗口得跟着重新贴合（变大顶开、变小落回）
@@ -2831,12 +2909,13 @@ document.addEventListener("drop", event => {
 document.addEventListener("click", event => {
   const path = typeof event.composedPath === "function" ? event.composedPath() : [];
   const inside = selector => path.some(node => node.nodeType === 1 && node.matches && node.matches(selector));
-  if (state.modelListOpen && !inside(".model-control:not(.mode-control)")) closeModelList();
+  if (state.modelListOpen && !inside("#model-trigger,#model-listbox")) closeModelList();
   if (state.modeListOpen && !inside(".mode-control")) closeModeList();
+  if (state.categoryListOpen && !inside("#category-trigger,#category-listbox")) closeCategoryList();
   if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();
   if (!el.sessionPanel.classList.contains("hidden") && !inside("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions();
 });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); closeCategoryList(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
 
 // --- 语音转文字（voice_asr）：点击录音 → 浏览器端编码 16kHz WAV → POST /asr → 回填输入框 ---
 const voice = {

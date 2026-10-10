@@ -809,3 +809,33 @@ def test_webui_skill_slash_menu_contract():
     # 取值链路不变：仍以 selected_skills 发给后端
     assert "const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];" in script
 
+
+def test_webui_category_round_trip_contract():
+    """模型调 set_active_category 后，下拉框必须跟着变；用户自己选过的不许被顶掉。
+
+    链路：agent_loop 推 session_meta → 前端 syncCategoryFromMeta 同步 state 与下拉框。
+    同时区分「用户显式选过」和「只是个默认值」：只有前者才允许覆盖服务端 meta.json，
+    否则「全部」这个空值会被 app.py 当成前端没传而回落，用户的选择又会被模型改掉。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    # 前端：消费 session_meta，并把 state 和下拉框一起改掉
+    assert 'else if (type === "session_meta") syncCategoryFromMeta(id, event.category || "");' in script
+    assert "function syncCategoryFromMeta(id, category)" in script
+    # 事件可能属于另一个会话（多会话并行流式输出），必须按会话 id 过滤
+    assert "if (!state.session || state.session.meta.id !== id) return;" in script
+    assert "if ((state.selectedCategory || \"\") !== (category || \"\")) selectCategory(category || \"\");" in script
+
+    # 显式选择才有覆盖权：默认值不置 categoryTouched
+    assert "if (explicit) state.categoryTouched = true;" in script
+    assert 'selectCategory(opt.dataset.category || "", true);' in script
+    assert "state.categoryTouched = false; selectCategory(state.session.meta.category || \"\");" in script
+
+    # 请求体同时带值和「是不是用户选的」，后端据此决定要不要回落读 meta.json
+    assert 'selected_category:state.selectedCategory || "",category_explicit:!!state.categoryTouched' in script
+    assert 'if not selected_category and not bool(body.get("category_explicit")):' in backend
+
+    # 切会话/刷新后下拉框要显示会话里存的分类，所以接口得把它带出来
+    assert '"category": s.category,' in backend
+

@@ -97,6 +97,18 @@
               <div id="model-listbox" class="model-listbox hidden" role="listbox" aria-label="按供应商分组的模型"></div>
             </div>
           </div>
+          <div class="model-control" title="专业分类">
+            <div class="model-combobox">
+              <input id="category-select" type="hidden" value="">
+              <button id="category-trigger" type="button" role="combobox" aria-label="专业分类" aria-haspopup="listbox" aria-expanded="false"><span id="category-label">全部</span></button>
+              <div id="category-listbox" class="model-listbox hidden" role="listbox" aria-label="专业分类">
+                <button type="button" data-category="" class="model-option" role="option" aria-selected="true">全部</button>
+                <button type="button" data-category="aircraft" class="model-option" role="option">Aircraft</button>
+                <button type="button" data-category="missile" class="model-option" role="option">Missile</button>
+                <button type="button" data-category="common" class="model-option" role="option">Common</button>
+              </div>
+            </div>
+          </div>
           <input id="skill-select" type="hidden" value="">
           <button id="skill-chip" class="skill-chip hidden" type="button" title="清除技能"><b>无 Skill</b><span aria-hidden="true">×</span></button>
           <span id="busy-label" class="busy-label"></span>

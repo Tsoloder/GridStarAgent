@@ -178,6 +178,10 @@ class Session:
     messages: list = field(default_factory=list)
     archived: bool = False
     model_id: str = ""  # 该对话使用的模型 ID，空字符串表示用全局默认
+    # 该对话的活动技能分类（aircraft / missile / common / ""），由 set_active_category
+    # 内置工具写入。必须落在 Session 上而不是只写 meta.json：save_session 每轮都会用
+    # 自己那份 meta 全量覆盖 meta.json，游离在 Session 之外的键会在同一个回合内被抹掉。
+    category: str = ""
     _dirty_full_write: bool = False  # 标记是否需要全量重写（原地修改触发）
 
     def ResolvedModelId(self, default_model_id: str = "") -> str:
@@ -350,6 +354,7 @@ def save_session(s: Session):
         "archived": bool(s.archived),
         "model_id": s.model_id,
         "provider_id": s.provider_id,
+        "category": s.category,
     }
     atomic_write(str(target / "meta.json"), json.dumps(meta, ensure_ascii=False, indent=2))
     # 混合策略：如果有原地修改（_dirty_full_write），全量重写 JSONL；
@@ -387,6 +392,7 @@ def load_session(sid: str):
             created_at=meta["created_at"], updated_at=meta["updated_at"],
             messages=msgs, archived=bool(meta.get("archived", False)),
             model_id=str(meta.get("model_id", "")),
+            category=str(meta.get("category", "") or ""),
         )
     except Exception as e:
         logger.error("load_session %s failed: %s", sid, e)
