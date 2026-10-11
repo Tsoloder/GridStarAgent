@@ -2655,7 +2655,7 @@ function memoryDetailRows(item) {
     `被参考 ${item.exposure_count || 0} 次`,
     `有帮助 ${item.helpful_count || 0} · 有害 ${item.harmful_count || 0}`,
     `验证成功 ${item.verified_success_count || 0} · 失败 ${item.verified_failure_count || 0}`,
-  ])];
+  ]]);
   return rows;
 }
 

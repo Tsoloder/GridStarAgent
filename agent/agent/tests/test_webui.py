@@ -1,5 +1,8 @@
+import shutil
+import subprocess
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import WEBUI_DIR, app
@@ -902,4 +905,24 @@ def test_webui_memory_panel_contract():
     ):
         assert selector in stylesheet
     assert ".memory-detail-dialog{width:100%;height:100%;max-height:none;border:0;border-radius:0}" in stylesheet
+
+
+def test_webui_javascript_parses():
+    """字符串断言拦不住打错的括号。
+
+    写坏一个括号，整个脚本解析失败，bootstrap() 从不执行，页面右上角会永远停在
+    index.html 里那句静态的「连接中」；而所有 grep 型契约测试照样全绿。这里用真正的
+    JS 解析器过一遍。没装 node 就跳过——离线构建环境不该因为这条测试挂掉。
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node 不可用，跳过 JS 语法校验")
+
+    for name in ("app.js", "charts.js"):
+        completed = subprocess.run(
+            [node, "--check", str(WEBUI_DIR / name)],
+            capture_output=True,
+            text=True,
+        )
+        assert completed.returncode == 0, f"{name} 语法错误：\n{completed.stderr}"
 
