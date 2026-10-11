@@ -184,6 +184,7 @@ UPDATE_PLAN_TOOL = RuntimeTool(
     name=UPDATE_PLAN_TOOL_NAME,
     description=(
         "创建或更新当前任务的阶段计划（全量替换语义：每次传入完整阶段列表）。"
+        "只列用户这次要求的阶段，以及完成它绕不过去的前置阶段，不要把整条流程一次性列进去。"
         "确定整体规划后必须立即调用；每个阶段开始/结束时更新状态，并用 note 记录关键事实"
         "（对象数量、文件名等）。状态枚举：pending（待开始）/ in_progress（进行中）/ "
         "done（完成）/ failed（失败）/ skipped（跳过）。"
@@ -500,11 +501,27 @@ def _screenshot_note(model_key: str, path: str, sees_images: bool) -> str:
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
 
 
+BASE_PROMPT_FILENAME = "base_prompt.md"
+_LEGACY_PROMPT_FILENAMES = ("cfd_workflow.md",)
+
+
 def _load_base_prompt() -> str:
-    """Load cfd_workflow.md from the prompt directory (hot-reload)."""
-    prompt_file = _PROMPT_DIR / "cfd_workflow.md"
-    if prompt_file.is_file():
-        return prompt_file.read_text(encoding="utf-8")
+    """从 agent/prompt 读基础系统提示词（每轮热加载，不缓存）。
+
+    文件叫 base_prompt.md：它装着整份基础系统提示词（身份与能力边界、全局工具
+    执行规则、输出格式要求），不是 CFD 专属流程。旧名 cfd_workflow.md 会让人
+    （包括模型自己）以为它只在 CFD 流程里生效，所以改名。
+    旧名保留为回退：代码与 prompt 目录分批更新时，这里返回空串会让整个系统
+    提示词静默消失，那是比读到旧文件严重得多的故障。
+    """
+    for name in (BASE_PROMPT_FILENAME,) + _LEGACY_PROMPT_FILENAMES:
+        prompt_file = _PROMPT_DIR / name
+        if prompt_file.is_file():
+            return prompt_file.read_text(encoding="utf-8")
+    logger.warning(
+        f"[prompt] 基础系统提示词缺失：{_PROMPT_DIR} 下既没有 {BASE_PROMPT_FILENAME} "
+        f"也没有 {_LEGACY_PROMPT_FILENAMES[0]}，本轮将以空系统提示词运行"
+    )
     return ""
 
 

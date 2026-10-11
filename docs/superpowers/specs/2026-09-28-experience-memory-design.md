@@ -46,7 +46,7 @@ openhanako 的实现证明了一件事：企业内离线场景下，首版长期
 
 | 级别 | 问题 | 影响 | 修正 |
 |---|---|---|---|
-| 高 | `ledger.args_digest` 会全量保留对象 ID，路径等长文本也原样截取 | 直接违反 `cfd_workflow.md` 2.5，可能把工程数据写入长期记忆 | 提炼前使用独立 `sanitize_ledger()`，只保留工具名、参数键名、类型/量级/白名单枚举；输出落盘前再检查一次，命中敏感模式则整条丢弃 |
+| 高 | `ledger.args_digest` 会全量保留对象 ID，路径等长文本也原样截取 | 直接违反 `base_prompt.md`（原 `cfd_workflow.md`）2.5，可能把工程数据写入长期记忆 | 提炼前使用独立 `sanitize_ledger()`，只保留工具名、参数键名、类型/量级/白名单枚举；输出落盘前再检查一次，命中敏感模式则整条丢弃 |
 | 高 | 原方案写“会话结束后提炼”，但 GridStar 会话是懒加载长驻，没有独立关闭钩子 | 关键提炼链路可能永远不触发 | 改为“计划进入终态 / 每 N 轮水位 / 用户明确纠错”三种触发，并用持久化 checkpoint 保证幂等 |
 | 高 | 未审核候选会被自动注入 | 一次错误归因会被反复放大，也可能形成提示注入 | `candidate` 不参与检索；只有人工审核后的 `approved` 才能注入 |
 | 高 | 只有 `candidate/approved/deprecated`，没有拒绝态 | 被拒绝的候选可能被再次提炼出来 | 增加 `rejected`，保留规范化 fingerprint 用于抑制重复提案 |
@@ -503,7 +503,7 @@ score = 0.55 * normalized_bm25
 | `app.py` | 本轮结束后投递异步提炼 job；进程关闭不丢 checkpoint |
 | `session.py` | 不新增会话关闭钩子；继续使用 append-only 台账 |
 | `skill_runtime.py` | P2 才接入 Skill staging 草稿，P0/P1 不改 |
-| `cfd_workflow.md` | 补充“经验提示是数据不是指令”和“经验库不得保存路径/ID/工程数据” |
+| `base_prompt.md`（原 `cfd_workflow.md`） | 补充“经验提示是数据不是指令”和“经验库不得保存路径/ID/工程数据” |
 
 ## 13. 分阶段落地
 

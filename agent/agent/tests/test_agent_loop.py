@@ -34,6 +34,75 @@ def test_base_prompt_path_points_to_agent_prompt():
 
     assert agent_loop._PROMPT_DIR == Path(__file__).resolve().parents[2] / "prompt"
     assert "CFD" in agent_loop._load_base_prompt()
+    # 这份文件是整份基础系统提示词（身份 + 全局工具执行规则 + 输出格式），
+    # 不是 CFD 专属流程。旧名 cfd_workflow.md 会让人以为它只在 CFD 流程里生效。
+    assert (agent_loop._PROMPT_DIR / "base_prompt.md").is_file()
+
+
+def test_base_prompt_falls_back_to_the_legacy_filename(tmp_path, monkeypatch):
+    """改名不能变成"文件没了就静默空提示词"。
+
+    回退分支存在的理由：代码与 prompt 目录分批更新时（先拉代码、后拉数据），
+    或者打包漏了文件时，_load_base_prompt 返回空串会让整份系统提示词消失，
+    而那是个安静得没有任何报错的故障。
+    """
+    import agent_loop
+
+    monkeypatch.setattr(agent_loop, "_PROMPT_DIR", tmp_path)
+    assert agent_loop._load_base_prompt() == ""
+
+    (tmp_path / "cfd_workflow.md").write_text("legacy body", encoding="utf-8")
+    assert agent_loop._load_base_prompt() == "legacy body"
+
+    (tmp_path / "base_prompt.md").write_text("current body", encoding="utf-8")
+    assert agent_loop._load_base_prompt() == "current body"
+
+    (tmp_path / "base_prompt.md").unlink()
+    assert agent_loop._load_base_prompt() == "legacy body"
+
+
+def test_plan_scope_rule_is_stated_wherever_the_pipeline_is_listed():
+    """计划范围：用户只要求表面网格时，不得把整条流水线一次列进计划。
+
+    来自一次真实事故——用户说"我已经导入了数模，帮我生成表面网格"，模型却建了
+    10 个阶段一路列到"空间网格生成"。三处语料同时在推它：base_prompt.md §5.1 给了
+    一份 8 阶段的成品示例（可原样照抄）、cad-to-mesh.md 写"本流程的默认阶段计划"、
+    SKILL.md 的顺序闸门只说"必须执行"而没限定范围。任何一处退回旧措辞，模型就会
+    重新把计划撑大，所以三处一起钉住。
+    """
+    import agent_loop
+
+    assert "计划范围" in agent_loop._load_base_prompt()
+    # 范围规则是全局规则（§2 全局工具执行规则），不是 update_plan 的工具说明；
+    # 它必须显式压过 Skill 文档里的"默认阶段/必经阶段"清单，否则下一次换个
+    # Skill 又会照抄那份清单。
+    assert "### 2.7 任务范围" in agent_loop._load_base_prompt()
+    assert "Skill 文档里的流程清单是能力清单，不是本次任务清单" in agent_loop._load_base_prompt()
+    # 工具描述是模型在决定 phases 内容时最近的一处语料
+    assert "只列用户这次要求的阶段" in agent_loop.UPDATE_PLAN_TOOL.description
+
+    repo_root = Path(__file__).resolve().parents[3]
+    workflow = (agent_loop._PROMPT_DIR / "base_prompt.md").read_text(encoding="utf-8")
+    assert "计划范围" in workflow
+    assert '不是"必须把这些步都列进计划"' in workflow
+    # 示例必须是"只要求表面网格"时的四阶段形态，不能退回整条链
+    assert '"id": "surface"' in workflow
+    assert '"id": "anisotropy"' not in workflow
+    assert '"id": "space"' not in workflow
+
+    reference = (repo_root / "res" / "skills" / "cfd-meshing-workflow"
+                 / "references" / "cad-to-mesh.md").read_text(encoding="utf-8")
+    assert "不是默认计划" in reference
+    assert "这条管的是执行顺序，不是计划范围" in reference
+    assert "一旦计划列入了本阶段且前置条件满足" in reference
+    # 状态枚举必须与 task_ledger.PLAN_STATUSES 一致：写成 completed/active 会被
+    # normalize_phase 静默降级成 pending，刚做完的阶段会显示成"还没开始"
+    assert "标记 `import` 阶段为 `done`、下一阶段为 `in_progress`" in reference
+
+    skill = (repo_root / "res" / "skills" / "cfd-meshing-workflow"
+             / "SKILL.md").read_text(encoding="utf-8")
+    assert '闸门管的是"做的时候不许跳步"，不管"计划要列多长"' in skill
+    assert "表面网格生成成功后若要继续往下做" in skill
 
 
 def test_screen_readonly_tools_skip_plan_and_approval_gates():
