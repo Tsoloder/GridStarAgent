@@ -93,10 +93,14 @@ SESSIONS_DIR = DATA_DIR / "sessions"
 LOG_DIR = DATA_DIR / "logs"
 SKILLS_DIR = DATA_DIR / "skills"
 UPLOADS_DIR = DATA_DIR / "uploads"
+# 长期记忆（策略经验 + 工程事实）落在这里。目录里可能有历史遗留的
+# working.db，与本模块无关，新库固定叫 memory.db，不去动别人的文件。
+MEMORY_DIR = DATA_DIR / "memory"
+MEMORY_DB_PATH = MEMORY_DIR / "memory.db"
 
 # 子目录建不出来不阻断启动：日志、会话、技能各自在真正写入时才有依赖，
 # 让它们报到自己的调用点上，比在 import 阶段让整个进程崩掉更好定位。
-for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR):
+for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR):
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -110,7 +114,7 @@ def ensure_subdirs() -> list:
     席，/uploads 静态挂载和附件落盘在本次运行里就永久失效了。
     """
     failures = []
-    for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR):
+    for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

@@ -21,7 +21,7 @@ if sys.platform == "win32":
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from agent_loop import classify_error, run_agent_loop
@@ -30,6 +30,7 @@ from config import (
     API_KEY_MASK,
     ApiConfig,
     ConfigError,
+    MemoryConfig,
     _parse_provider,
     config_from_dict,
     config_revision,
@@ -56,6 +57,7 @@ from llm_client.types import ProviderConfig as RuntimeProviderConfig
 from data_dir_guard import guard_data_dir
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
+from memory_store import MemoryFault, MemoryService
 from paths import DATA_DIR, UPLOADS_DIR, ensure_subdirs
 from session import (
     InvalidSessionId,
@@ -120,6 +122,7 @@ _mcp: Optional[McpBridge] = None
 _model_catalog: Optional[DiscoveryCatalog] = None
 _model_runtime: Optional[ModelRuntime] = None
 _config_lock: Optional[asyncio.Lock] = None
+_memory: Optional[MemoryService] = None
 _session_async_locks = {}
 _session_turn_locks = {}
 _pending_approvals = {}
@@ -267,9 +270,48 @@ async def _request_tool_approval(session_id, call_id, name, args):
         _pending_approvals.pop(key, None)
 
 
+def _memory_config_reader() -> MemoryConfig:
+    if current_config is None:
+        return MemoryConfig()
+    return current_config.memory
+
+
+def _memory_config_writer(updates) -> MemoryConfig:
+    """把记忆开关并回 config.json。
+
+    复用模型设置的同一份版本化落盘：两者共用一个 revision，这里若另写一套，
+    模型 Tab 保存时就会撞 409。所以路由层要先拿 `_config_lock`。
+    """
+    from dataclasses import replace
+
+    global current_config
+    if current_config is None:
+        raise ConfigError("配置尚未加载，无法保存记忆开关")
+    current_config = replace(
+        current_config, memory=replace(current_config.memory, **dict(updates))
+    )
+    save_config(current_config)
+    _sync_memory_runtime()
+    return current_config.memory
+
+
+def _sync_memory_runtime() -> None:
+    """把默认模型挂到提炼器上。
+
+    `ModelRuntime` 没有 `default_model` 属性，模型 key 必须由调用方给出，
+    否则提炼会在 `runtime.model("")` 上直接失败。
+    """
+    if _memory is None:
+        return
+    model_key = ""
+    if current_config is not None:
+        model_key = str(current_config.default_model or "")
+    _memory.attach_runtime(_model_runtime, model_key)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _mcp, _model_catalog, _model_runtime, _config_lock
+    global _mcp, _model_catalog, _model_runtime, _config_lock, _memory
     _config_lock = asyncio.Lock()
     if current_config is not None:
         _model_catalog, _model_runtime = _build_runtime(current_config)
@@ -283,9 +325,30 @@ async def lifespan(app: FastAPI):
         await _mcp.connect()
     except Exception as e:
         logger.error(f"mcp connect failed: {e}")
+
+    # 记忆子系统：库坏了不能挡住 Agent 主流程，所以构造与启动都不进 try 的失败分支。
+    _memory = MemoryService()
+    _memory.bind_config(_memory_config_reader, _memory_config_writer)
+    _sync_memory_runtime()
+    try:
+        _memory.start()
+    except RuntimeError as exc:
+        logger.warning("memory extraction queue not started: %s", exc)
+    # 进程上次被强杀时可能留下了中间态断点，这里做一次幂等清理与候选治理
+    try:
+        _memory.start_maintenance("governance")
+    except MemoryFault as exc:
+        logger.warning("memory startup maintenance skipped: %s", exc.code)
+
     try:
         yield
     finally:
+        if _memory is not None:
+            try:
+                await _memory.stop()
+            except Exception as exc:  # noqa: BLE001 - 关停不该盖住其它清理
+                logger.warning("memory shutdown failed: %s", type(exc).__name__)
+            _memory = None
         if _mcp:
             await _mcp.disconnect()
         await _retire_runtime(_model_runtime)
@@ -523,6 +586,189 @@ async def update_config(body: dict):
             "revision": config_revision(candidate),
             "config": redacted_config(candidate),
         }
+
+
+def _unaddressable_name(value: str) -> bool:
+    """判断一个工具名/字段名能否安全地当路径参数传递。
+
+    ``/`` 是路由分隔符（ASGI 之前就被解码成路径段），反斜杠与控制字符则是
+    路径规范化与日志注入的常见入口。这类名字在路径式接口里无法寻址，只能
+    明确回 400，而不是让前端对着一个 404 猜「是不是已经被删了」。
+    """
+    text = str(value or "")
+    if not text:
+        return True
+    return "\\" in text or "/" in text or any(ord(ch) < 32 for ch in text)
+
+
+def _memory_unavailable() -> JSONResponse:
+    return JSONResponse(
+        {"error": "记忆子系统尚未就绪", "code": "store_unavailable"}, status_code=503
+    )
+
+
+def _memory_call(fn, *args, **kwargs):
+    """统一执行一次记忆操作，把异常翻成 §7 约定里的错误码。
+
+    路由层不该猜异常类型，也不该把异常原文回给前端（原文里常带数据目录路径）。
+    """
+    service = _memory
+    if service is None:
+        return _memory_unavailable()
+    try:
+        return fn(service, *args, **kwargs)
+    except MemoryFault as exc:
+        return JSONResponse({"error": exc.message, "code": exc.code}, status_code=exc.status)
+    except InvalidSessionId:
+        return JSONResponse(
+            {"error": "无效的会话 id", "code": "invalid_request"}, status_code=400
+        )
+    except Exception as exc:  # noqa: BLE001 - 记忆出问题绝不该 500 打穿页面
+        logger.warning("memory operation failed: %s", type(exc).__name__)
+        return JSONResponse({"error": "记忆操作失败", "code": "store_unavailable"}, status_code=503)
+
+
+@app.get("/memory/summary")
+async def memory_summary():
+    return _memory_call(MemoryService.summary)
+
+
+@app.patch("/memory/config")
+async def memory_config(body: dict = None):
+    """记忆开关立即生效并落盘，不走底部「保存设置」的草稿模型。"""
+    updates = body or {}
+    lock = _config_lock or asyncio.Lock()
+    async with lock:
+        return _memory_call(MemoryService.patch_config, updates)
+
+
+@app.get("/memory/experiences")
+async def memory_experiences(
+    status: str = "",
+    scope: str = "",
+    task_type: str = "",
+    kind: str = "",
+    q: str = "",
+    page: int = 1,
+    page_size: int = 20,
+):
+    return _memory_call(
+        MemoryService.list_experiences,
+        kind=kind or None,
+        status=status or None,
+        scope=scope or None,
+        task_type=task_type or None,
+        q=q or None,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@app.get("/memory/experiences/{item_id}")
+async def memory_experience_detail(item_id: str):
+    return _memory_call(MemoryService.get_experience, item_id)
+
+
+@app.patch("/memory/experiences/{item_id}")
+async def memory_experience_transition(item_id: str, body: dict = None):
+    payload = body or {}
+    action = str(payload.get("action", "")).strip()
+    if not action:
+        return JSONResponse(
+            {"error": "缺少 action", "code": "invalid_request"}, status_code=400
+        )
+    return _memory_call(
+        MemoryService.transition_experience,
+        item_id,
+        action,
+        reason=str(payload.get("reason", "") or ""),
+        expected_updated_at=payload.get("expected_updated_at") or None,
+    )
+
+
+@app.delete("/memory/experiences/{item_id}")
+async def memory_experience_delete(item_id: str):
+    """删除不可逆，前端必须二次确认；后端不提供批量删除入口。"""
+    result = _memory_call(MemoryService.delete_experience, item_id)
+    if isinstance(result, JSONResponse):
+        return result
+    if not result:
+        return JSONResponse(
+            {"error": "该记录不存在，可能已被删除", "code": "not_found"}, status_code=404
+        )
+    return Response(status_code=204)
+
+
+@app.post("/memory/experiences/bulk")
+async def memory_experience_bulk(body: dict = None):
+    payload = body or {}
+    ids = payload.get("ids")
+    if not isinstance(ids, list):
+        return JSONResponse(
+            {"error": "ids 必须是数组", "code": "invalid_request"}, status_code=400
+        )
+    action = str(payload.get("action", "")).strip()
+    if not action:
+        return JSONResponse(
+            {"error": "缺少 action", "code": "invalid_request"}, status_code=400
+        )
+    return _memory_call(
+        MemoryService.bulk_experience,
+        ids,
+        action,
+        reason=str(payload.get("reason", "") or ""),
+    )
+
+
+@app.get("/memory/tool-parameters")
+async def memory_tool_parameters():
+    return _memory_call(MemoryService.list_tool_parameters)
+
+
+@app.delete("/memory/tool-parameters")
+async def memory_tool_parameters_clear():
+    return _memory_call(MemoryService.clear_tool_parameters)
+
+
+@app.delete("/memory/tool-parameters/{tool}")
+async def memory_tool_parameter_delete(tool: str):
+    if _unaddressable_name(tool):
+        return JSONResponse(
+            {"error": "工具名包含无法在路径中传递的字符", "code": "invalid_request"},
+            status_code=400,
+        )
+    result = _memory_call(MemoryService.delete_tool, tool)
+    if isinstance(result, JSONResponse):
+        return result
+    return Response(status_code=204)
+
+
+@app.delete("/memory/tool-parameters/{tool}/{field_name}")
+async def memory_tool_parameter_field_delete(tool: str, field_name: str):
+    if _unaddressable_name(tool) or _unaddressable_name(field_name):
+        return JSONResponse(
+            {"error": "工具名或字段名包含无法在路径中传递的字符", "code": "invalid_request"},
+            status_code=400,
+        )
+    result = _memory_call(MemoryService.delete_tool_field, tool, field_name)
+    if isinstance(result, JSONResponse):
+        return result
+    return Response(status_code=204)
+
+
+@app.get("/memory/status")
+async def memory_status():
+    return _memory_call(MemoryService.maintenance_status)
+
+
+@app.post("/memory/maintenance/runs")
+async def memory_maintenance_run(body: dict = None):
+    """投递维护任务后立即返回，前端轮询 /memory/status，不占用长连接。"""
+    kind = str((body or {}).get("kind", "governance")).strip() or "governance"
+    result = _memory_call(MemoryService.start_maintenance, kind)
+    if isinstance(result, JSONResponse):
+        return result
+    return JSONResponse(result, status_code=202)
 
 
 def _provider_from_body(body: dict):
@@ -1532,6 +1778,18 @@ async def _run_background_loop(
         if not _done_sent and not bg.invalidated:
             await _bg_put(bg, {"type": "done"})
         bg.done_event.set()
+
+        # 提炼排在 done 之后：只投递不等待，模型慢或失败都不影响用户看到的结果。
+        # 用的是内存里的 ledger（run_agent_loop 刚更新过），不再读一次盘。
+        if _memory is not None and not bg.invalidated:
+            try:
+                _memory.schedule_after_turn(
+                    session_id,
+                    {"plan": ledger.plan, "calls": ledger.calls},
+                    turn_count=_traj_turn,
+                )
+            except Exception as exc:  # noqa: BLE001 - 记忆是旁路，绝不打断收尾
+                logger.warning("experience scheduling failed: %s", type(exc).__name__)
 
 
 async def _drain_queue(queue):

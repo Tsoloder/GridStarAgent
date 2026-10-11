@@ -31,6 +31,10 @@ const state = {
     catalog:{},configuredProviders:{},providerOptions:[],modelOptions:[],
     calendar:null,pendingStart:null,pendingEnd:null,sort:{key:"total",desc:true}},
   viewTab: "chat",
+  // 记忆面板：影子期只采集与审核，所有操作立即落盘，不写入 settings.draft
+  memory: {loaded:false,loading:false,error:"",summary:null,items:[],page:1,pageSize:20,total:0,
+    facets:{scopes:[],task_types:[]},selected:new Set(),detail:null,tools:{tools:[],tool_count:0,field_count:0},
+    maint:{state:"idle",step:null,last_result:null,last_error:null},poll:null,busy:false},
   traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
 const el = {
@@ -56,6 +60,15 @@ const el = {
   trajLedger: $("#traj-ledger"), trajInspector: $("#traj-inspector"), trajSearch: $("#traj-search"),
   trajTimeline: $("#traj-timeline"), composer: $(".composer"),
   turnRail: $("#turn-rail"), turnRailPanel: $("#turn-rail-panel"), turnRailList: $("#turn-rail-list"), turnRailCount: $("#turn-rail-count"),
+  memoryStatus: $("#memory-status"), memorySwitches: $("#memory-switches"), memoryList: $("#memory-list"),
+  memoryCount: $("#memory-count"), memoryToolCount: $("#memory-tool-count"), memoryTools: $("#memory-tools"),
+  memoryFilterStatus: $("#memory-filter-status"), memoryFilterKind: $("#memory-filter-kind"),
+  memoryFilterScope: $("#memory-filter-scope"), memorySearch: $("#memory-search"), memoryRefresh: $("#memory-refresh"),
+  memoryBulk: $("#memory-bulk"), memorySelectPage: $("#memory-select-page"), memoryBulkCount: $("#memory-bulk-count"),
+  memoryBulkApprove: $("#memory-bulk-approve"), memoryBulkReject: $("#memory-bulk-reject"),
+  memoryMore: $("#memory-more"), memoryLoadMore: $("#memory-load-more"),
+  memoryMaintResult: $("#memory-maintenance-result"), memoryRunExtract: $("#memory-run-extract"),
+  memoryRunGovernance: $("#memory-run-governance"), memoryClearTools: $("#memory-clear-tools"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -2147,7 +2160,7 @@ function renderModelCard(model, parent) {
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); const limits = [item.context_window ? `${formatTokens(item.context_window)} 输入` : "", item.max_output_tokens ? `${formatTokens(item.max_output_tokens)} 输出` : ""].filter(Boolean).join(" · "); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}${limits ? `<em>${escapeHtml(limits)}</em>` : ""}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
 function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
-function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); }
+function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); if (tab === "memory") memoryEnterTab(); else memoryStopPolling(); }
 function schemaParams(schema) {
   // 从 JSON Schema 提取入参摘要，用于工具列表展示每个工具的参数
   const props = (schema && schema.properties) || {}, required = new Set((schema && schema.required) || []);
@@ -2204,7 +2217,7 @@ async function loadSkills() {
   finally { state.skillsLoading = false; if (el.refreshSkills) el.refreshSkills.disabled = false; renderSkills(); }
 }
 async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
-function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
+function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; memoryStopPolling(); el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
 function providerPayload(provider) { return {provider:{...provider,headers:provider.headers || {},discover_models:provider.discover_models !== false}}; }
 async function testProvider() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.test) state.settings.controllers.test.abort(); state.settings.controllers.test = controller; state.settings.testingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/test",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); if (state.settings.activeProviderId === id) el.settingsStatus.textContent = data.message || `连接成功 · ${data.latency_ms || 0}ms`; } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.testingProviderId === id) { state.settings.testingProviderId = null; renderProviderEditor(); } } }
 async function readProviderModels() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.models) state.settings.controllers.models.abort(); state.settings.controllers.models = controller; state.settings.readingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/models",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); state.settings.discoveredModels[id] = [...new Map((data.models || []).map(item => [item.id || item.model_id,item])).values()].sort((a,b) => String(a.id || a.model_id).localeCompare(String(b.id || b.model_id))); if (state.settings.activeProviderId === id) renderProviderEditor(); } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.readingProviderId === id) { state.settings.readingProviderId = null; renderProviderEditor(); } } }
@@ -2213,6 +2226,655 @@ function deleteProvider() { const provider = draftProvider(), models = providerM
 function validateSettings() { const errors = []; for (const provider of state.settings.draft.providers) { try { const url = new URL(provider.base_url); if (!["http:","https:"].includes(url.protocol)) errors.push(`${provider.name} 的 API 地址无效`); } catch (_) { errors.push(`${provider.name} 的 API 地址无效`); } } for (const model of state.settings.draft.models) { if (model.context_window < model.max_output_tokens) errors.push(`${model.id} 的 context window 不能小于最大输出`); } const enabledModels = state.settings.draft.models.filter(item => item.enabled !== false); if (!enabledModels.some(item => `${item.provider}/${item.id}` === state.settings.draft.default_model)) { const fallback = enabledModels[0]; if (fallback) state.settings.draft.default_model = `${fallback.provider}/${fallback.id}`; else errors.push("请至少添加一个已启用模型"); } el.settingsStatus.textContent = errors[0] || ""; return !errors.length; }
 async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); state.configLoaded = true; el.warning.classList.add("hidden"); await refreshModels(null, data.config && data.config.default_model); updateSendState(); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
 async function refreshModels(models = null, defaultModel = null) { if (!models) { const data = await request("/config/models"); models = data.models || []; defaultModel = data.default_model || defaultModel; } const previous = el.model.value; state.models = models; const keys = visibleModels().map(modelKey); selectModel(keys.includes(previous) ? previous : (defaultModel && keys.includes(defaultModel) ? defaultModel : keys[0] || "")); }
+
+// --- 记忆面板：影子期只采集与审核，全部操作即时落盘，不写入 settings.draft ---
+const MEMORY_STATUS_LABELS = {candidate:"待审核", approved:"已启用", rejected:"已拒绝", deprecated:"已停用"};
+const MEMORY_SOURCE_LABELS = {manual_curated:"人工录入", user_correction:"用户纠正", validated_workflow:"已验证流程", auto_extraction:"自动提炼"};
+const MEMORY_FACT_TYPE_LABELS = {user_preference:"用户偏好", environment:"环境", project_trait:"工程特征"};
+const MEMORY_ACTION_LABELS = {approve:"通过", reject:"拒绝", deprecate:"停用", restore:"恢复", reopen:"重新开启"};
+const MEMORY_SOURCE_PRIOR = {manual_curated:0.85, user_correction:0.65, validated_workflow:0.55, auto_extraction:0.35};
+
+function memoryState() { return state.memory; }
+
+// 时间戳一律转本地时区显示，库里存的是 UTC
+function memoryTime(value) {
+  const raw = String(value || "");
+  if (!raw) return "";
+  const stamp = new Date(raw.endsWith("Z") || raw.includes("+") ? raw : `${raw}Z`);
+  if (Number.isNaN(stamp.getTime())) return raw.slice(0, 16).replace("T", " ");
+  const pad = n => String(n).padStart(2, "0");
+  return `${stamp.getFullYear()}-${pad(stamp.getMonth() + 1)}-${pad(stamp.getDate())} ${pad(stamp.getHours())}:${pad(stamp.getMinutes())}`;
+}
+
+async function memoryEnterTab() {
+  const mem = memoryState();
+  if (!mem.loaded) { await memoryLoadAll(); return; }
+  memoryRenderAll();
+  const running = mem.summary && mem.summary.maintenance && mem.summary.maintenance.state === "running";
+  if (running) memoryStartPolling();
+}
+
+async function memoryLoadAll() {
+  const mem = memoryState();
+  mem.loading = true;
+  memoryRenderStatus();
+  try {
+    const [summary, listing, tools] = await Promise.all([
+      request("/memory/summary"),
+      memoryFetchList(1),
+      request("/memory/tool-parameters"),
+    ]);
+    mem.summary = summary;
+    memoryAdoptList(listing, 1);
+    mem.tools = tools;
+    mem.error = "";
+    mem.loaded = true;
+  } catch (error) {
+    mem.error = error.message;
+  } finally {
+    mem.loading = false;
+    memoryRenderAll();
+  }
+}
+
+async function memoryReloadSummary() {
+  const mem = memoryState();
+  try {
+    mem.summary = await request("/memory/summary");
+    mem.error = "";
+  } catch (error) { mem.error = error.message; }
+  memoryRenderStatus();
+  memoryRenderSwitches();
+  memoryRenderMaintenance();
+}
+
+async function memoryReloadTools() {
+  const mem = memoryState();
+  try { mem.tools = await request("/memory/tool-parameters"); }
+  catch (error) { mem.error = error.message; }
+  memoryRenderTools();
+  memoryRenderStatus();
+}
+
+function memoryFetchList(page) {
+  const mem = memoryState();
+  const params = new URLSearchParams();
+  // 用非空值判断：状态「全部」的 option value 是空串，要真的不传这个参数
+  if (el.memoryFilterStatus.value) params.set("status", el.memoryFilterStatus.value);
+  if (el.memoryFilterKind.value) params.set("kind", el.memoryFilterKind.value);
+  if (el.memoryFilterScope.value) params.set("scope", el.memoryFilterScope.value);
+  const query = el.memorySearch.value.trim();
+  if (query) params.set("q", query);
+  params.set("page", String(page));
+  params.set("page_size", String(mem.pageSize));
+  return request(`/memory/experiences?${params.toString()}`);
+}
+
+function memoryAdoptList(listing, page) {
+  const mem = memoryState();
+  const append = page > 1;
+  const incoming = listing.items || [];
+  mem.items = append ? mem.items.concat(incoming) : incoming;
+  mem.total = listing.total || 0;
+  mem.page = listing.page || page;
+  mem.pageSize = listing.page_size || mem.pageSize;
+  mem.facets = listing.facets || {scopes:[], task_types:[]};
+  // 选中项只在仍可见时保留：被审掉的卡片留在集合里，下次批量会打在一个看不见的 id 上
+  const visible = new Set(mem.items.map(item => item.id));
+  mem.selected.forEach(id => { if (!visible.has(id)) mem.selected.delete(id); });
+}
+
+async function memoryReloadList(page = 1) {
+  const mem = memoryState();
+  if (page === 1) mem.selected.clear();
+  try {
+    memoryAdoptList(await memoryFetchList(page), page);
+    mem.error = "";
+  } catch (error) { mem.error = error.message; }
+  memoryRenderList();
+  memoryRenderStatus();
+}
+
+// -- 状态条 -----------------------------------------------------------------
+
+function memoryRenderStatus() {
+  const mem = memoryState();
+  const host = el.memoryStatus;
+  if (!host) return;
+  if (mem.loading && !mem.loaded) { host.dataset.tone = ""; host.textContent = "正在读取记忆…"; return; }
+  if (mem.error && !mem.summary) { host.dataset.tone = "error"; host.textContent = `记忆读取失败：${mem.error}`; return; }
+  const summary = mem.summary;
+  if (!summary) { host.dataset.tone = ""; host.textContent = "正在读取记忆…"; return; }
+  const store = summary.store || {};
+  const counts = summary.experience || {};
+  const parts = [];
+  let tone = "ok";
+  parts.push(summary.enabled ? "记忆已启用" : "记忆已关闭");
+  if (!summary.enabled) tone = "off";
+  if (store.status === "healthy") parts.push("经验库正常");
+  else { parts.push("经验库降级"); tone = "warn"; }
+  if (!summary.enabled) { /* 关闭时不谈库健康，避免误导 */ }
+  else if (store.fts === false) { parts.push("关键词检索降级为模糊匹配"); tone = "warn"; }
+  else if (store.fts) parts.push("全文检索可用");
+  parts.push(`待审核 ${counts.candidate || 0} 条`);
+  const maint = summary.maintenance || {};
+  if (maint.state === "running") { parts.push(`维护进行中（${maint.step || "准备"}）`); tone = "warn"; }
+  else if (maint.finished_at) parts.push(`上次维护 ${memoryTime(maint.finished_at)}`);
+  host.dataset.tone = tone;
+  host.textContent = parts.join(" · ");
+  const notice = document.createElement("span");
+  notice.className = "memory-notice";
+  notice.textContent = summary.notice || "";
+  if (notice.textContent) host.append(" ", notice);
+}
+
+// -- 开关 -------------------------------------------------------------------
+
+function memoryRenderSwitches() {
+  const mem = memoryState();
+  const host = el.memorySwitches;
+  if (!host) return;
+  const summary = mem.summary;
+  if (!summary) { host.innerHTML = ""; return; }
+  const config = summary.config || {};
+  const on = !!summary.enabled;
+  const rows = [
+    {key:"enabled", label:"启用记忆", checked:on, disabled:mem.busy,
+     hint:"关闭后停止提炼与参数记忆写入，已有数据保留。"},
+    {key:"extract", label:"自动提炼", checked:!!config.experience_extract, disabled:mem.busy || !on,
+     hint:"从已完成的计划里提炼待审核候选，通过审核后才会被使用。"},
+    {key:"inject", label:"注入记忆提示", checked:!!config.experience_inject, disabled:mem.busy || !on,
+     hint:"当前为影子期：只采集不注入，开启后也要等审核通过的记忆才生效。"},
+  ];
+  host.innerHTML = rows.map(row => `<label class="memory-switch${row.disabled ? " disabled" : ""}"><input type="checkbox" data-memory-switch="${row.key}"${row.checked ? " checked" : ""}${row.disabled ? " disabled" : ""}><span class="memory-switch-body"><strong>${escapeHtml(row.label)}</strong><small>${escapeHtml(row.hint)}</small></span></label>`).join("");
+  host.querySelectorAll("[data-memory-switch]").forEach(box => {
+    box.onchange = () => memoryPatch({[box.dataset.memorySwitch]: box.checked});
+  });
+}
+
+async function memoryPatch(updates) {
+  const mem = memoryState();
+  if (mem.busy) return;
+  mem.busy = true;
+  memoryRenderSwitches();
+  try {
+    mem.summary = await request("/memory/config", {method:"PATCH", body: JSON.stringify(updates)});
+    await memorySyncSettingsConfig();
+    mem.error = "";
+    showToast("记忆设置已保存");
+  } catch (error) {
+    mem.error = error.message;
+    showToast(error.message);
+    await memoryReloadSummary();
+  } finally {
+    mem.busy = false;
+    memoryRenderSwitches();
+    memoryRenderStatus();
+  }
+}
+
+async function memorySyncSettingsConfig() {
+  // 记忆开关和模型设置共用同一份 config.json 与同一个 revision：
+  // 不回写 draft.memory，用户接着点「保存设置」会用旧开关值把刚改的覆盖回去；
+  // 不刷新 revision，那次保存会撞 409「配置已被其他窗口修改」。
+  if (!state.settings.open || !state.settings.draft) return;
+  try {
+    const data = await request("/config");
+    const memory = data.config && data.config.memory;
+    if (data.revision) state.settings.revision = data.revision;
+    if (memory) {
+      state.settings.draft.memory = clone(memory);
+      if (state.settings.original) state.settings.original.memory = clone(memory);
+    }
+  } catch (_) { /* 同步失败不影响已经落盘的开关本身 */ }
+}
+
+// -- 经验列表 ---------------------------------------------------------------
+
+function memoryScopeLabel(scope) {
+  const raw = String(scope || "global");
+  return raw.startsWith("skill:") ? raw.slice(6) : raw;
+}
+
+function memoryCardActions(item) {
+  const actions = [];
+  if (item.status === "candidate") actions.push(["approve", "通过"], ["reject", "拒绝"]);
+  else if (item.status === "approved") actions.push(["deprecate", "停用"]);
+  else if (item.status === "rejected") actions.push(["reopen", "重新开启"]);
+  else if (item.status === "deprecated") actions.push(["restore", "恢复"]);
+  return actions.map(([action, label]) => `<button type="button" class="action-button${action === "reject" || action === "deprecate" ? " deny" : " approve"}" data-memory-act="${action}" data-memory-id="${escapeHtml(item.id)}">${escapeHtml(label)}</button>`).join("");
+}
+
+function memoryCard(item) {
+  const mem = memoryState();
+  const selectable = item.status === "candidate";
+  const checked = selectable && mem.selected.has(item.id) ? " checked" : "";
+  const tags = [memoryScopeLabel(item.scope)];
+  tags.push(item.kind === "fact" ? "工程事实" : "策略经验");
+  if (item.task_type) tags.push(item.task_type);
+  const evidence = item.evidence_count || 0;
+  const bits = [`置信度 ${Number(item.confidence || 0).toFixed(2)}`, `证据 ${evidence}`, memoryTime(item.status === "candidate" ? item.created_at : item.updated_at)];
+  if (item.possible_duplicate) bits.push("疑似重复");
+  return `<article class="memory-card" data-memory-card="${escapeHtml(item.id)}">`
+    + `<div class="memory-card-head">`
+    + (selectable ? `<input type="checkbox" class="memory-card-check" data-memory-check="${escapeHtml(item.id)}"${checked} aria-label="选择这条记忆">` : `<span class="memory-card-check-spacer" aria-hidden="true"></span>`)
+    + `<span class="memory-chip memory-chip-${escapeHtml(item.status)}">${escapeHtml(MEMORY_STATUS_LABELS[item.status] || item.status)}</span>`
+    + `<span class="memory-card-tags">${tags.map(tag => `<span>${escapeHtml(tag)}</span>`).join("")}</span>`
+    + `</div>`
+    + `<h4 class="memory-card-title">${escapeHtml(item.title || "（无标题）")}</h4>`
+    + `<p class="memory-card-meta">${escapeHtml(bits.join(" · "))}</p>`
+    + `<div class="memory-card-actions"><button type="button" class="secondary" data-memory-detail="${escapeHtml(item.id)}">查看详情</button>${memoryCardActions(item)}</div>`
+    + `</article>`;
+}
+
+function memoryRenderList() {
+  const mem = memoryState();
+  const host = el.memoryList;
+  if (!host) return;
+  el.memoryCount.textContent = String(mem.total || 0);
+  if (mem.error && !mem.items.length) { host.innerHTML = `<p class="memory-empty">读取失败：${escapeHtml(mem.error)}</p>`; }
+  else if (!mem.items.length) { host.innerHTML = `<p class="memory-empty">这个筛选下还没有记忆。完成的计划会被自动提炼成待审核候选。</p>`; }
+  else host.innerHTML = mem.items.map(memoryCard).join("");
+  el.memoryMore.classList.toggle("hidden", mem.items.length >= mem.total);
+  memoryRenderBulk();
+  memoryRenderScopeFilter();
+}
+
+function memoryRenderScopeFilter() {
+  const mem = memoryState();
+  const select = el.memoryFilterScope;
+  if (!select) return;
+  const current = select.value;
+  const options = [["", "全部作用域"]].concat((mem.facets.scopes || []).map(entry => [entry.value, `${memoryScopeLabel(entry.value)}（${entry.count}）`]));
+  select.innerHTML = options.map(([value, label]) => `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`).join("");
+  select.value = options.some(([value]) => value === current) ? current : "";
+}
+
+function memoryRenderBulk() {
+  const mem = memoryState();
+  const count = mem.selected.size;
+  el.memoryBulk.classList.toggle("hidden", !mem.items.some(item => item.status === "candidate"));
+  el.memoryBulkCount.textContent = `已选 ${count} 条`;
+  el.memoryBulkApprove.disabled = !count;
+  el.memoryBulkReject.disabled = !count;
+  const pageIds = mem.items.filter(item => item.status === "candidate").map(item => item.id);
+  el.memorySelectPage.checked = pageIds.length > 0 && pageIds.every(id => mem.selected.has(id));
+  el.memorySelectPage.indeterminate = !el.memorySelectPage.checked && pageIds.some(id => mem.selected.has(id));
+}
+
+function memoryRenderTools() {
+  const mem = memoryState();
+  const host = el.memoryTools;
+  if (!host) return;
+  const tools = (mem.tools && mem.tools.tools) || [];
+  el.memoryToolCount.textContent = String((mem.tools && mem.tools.tool_count) || 0);
+  if (!tools.length) {
+    host.innerHTML = `<p class="memory-empty">还没有记住的工具参数。你在工具审批中确认参数后，这里会出现记录。</p>`;
+    return;
+  }
+  host.innerHTML = tools.map(tool => {
+    const fields = Object.entries(tool.fields || {});
+    const rows = fields.map(([name, value]) => `<li class="memory-field"><code>${escapeHtml(name)}</code><span>=</span><code class="memory-field-value">${escapeHtml(memoryFieldValue(value))}</code><button type="button" class="link-button" data-memory-field="${escapeHtml(name)}" data-memory-tool="${escapeHtml(tool.tool)}">删除</button></li>`).join("");
+    return `<details class="memory-tool" data-memory-tool-row="${escapeHtml(tool.tool)}"><summary><span class="memory-tool-name">${escapeHtml(tool.tool)}</span><span class="memory-tool-meta">${fields.length} 个字段 · 更新于 ${escapeHtml(memoryTime(tool.updated_at))}</span><button type="button" class="link-button danger" data-memory-clear-tool="${escapeHtml(tool.tool)}">清除</button></summary><ul class="memory-fields">${rows}</ul></details>`;
+  }).join("");
+}
+
+function memoryFieldValue(value) {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function memoryRenderMaintenance() {
+  const mem = memoryState();
+  const host = el.memoryMaintResult;
+  if (!host) return;
+  const maint = (mem.summary && mem.summary.maintenance) || {};
+  const running = maint.state === "running";
+  el.memoryRunExtract.disabled = running || mem.busy;
+  el.memoryRunGovernance.disabled = running || mem.busy;
+  if (running) { host.textContent = `维护运行中：${maint.step || "准备"}…`; return; }
+  if (maint.last_error) { host.textContent = `上次维护失败（${maint.last_error}）。`; return; }
+  const result = maint.last_result;
+  if (!result || !maint.finished_at) { host.textContent = "还没有运行过维护任务。"; return; }
+  const bits = [`上次维护 ${memoryTime(maint.finished_at)}`];
+  ["merged", "flagged", "archived", "submitted", "candidates", "facts"].forEach(key => {
+    if (typeof result[key] === "number") bits.push(`${key} ${result[key]}`);
+  });
+  host.textContent = `${bits.join(" · ")}。`;
+}
+
+function memoryRenderAll() {
+  memoryRenderStatus();
+  memoryRenderSwitches();
+  memoryRenderList();
+  memoryRenderTools();
+  memoryRenderMaintenance();
+}
+
+// -- 单条与批量操作 ---------------------------------------------------------
+
+function memoryActionConfirm(item, action) {
+  const label = MEMORY_ACTION_LABELS[action] || action;
+  const messages = {
+    approve: "通过后这条记忆才可能被未来的任务参考。",
+    reject: "拒绝后它不会再出现在待审核列表，相同内容也不会被重复提案。",
+    deprecate: "停用后它不再被参考，但记录和审计会保留。",
+    restore: "恢复后它会重新参与检索。",
+    reopen: "重新开启后它回到待审核列表。",
+    delete: "删除不可恢复，也无法再被检索到。",
+  };
+  return showDialog({
+    title: `确定要${label}这条记忆吗？`,
+    message: messages[action] || "",
+    confirmText: label,
+    danger: action === "reject" || action === "deprecate" || action === "delete",
+  });
+}
+
+async function memoryAct(id, action) {
+  const mem = memoryState();
+  if (mem.busy) return;
+  mem.busy = true;
+  try {
+    await request(`/memory/experiences/${encodeURIComponent(id)}`, {method:"PATCH", body: JSON.stringify({action})});
+    mem.selected.delete(id);
+    await memoryReloadList(1);
+    await memoryReloadSummary();
+    showToast(`已${MEMORY_ACTION_LABELS[action] || action}`);
+  } catch (error) {
+    if (error.status === 409) { showToast("该条状态已变化，已刷新"); await memoryReloadList(1); }
+    else showToast(error.message);
+  } finally { mem.busy = false; }
+}
+
+async function memoryDelete(id) {
+  const mem = memoryState();
+  if (mem.busy) return;
+  mem.busy = true;
+  try {
+    await request(`/memory/experiences/${encodeURIComponent(id)}`, {method:"DELETE"});
+    mem.selected.delete(id);
+    await memoryReloadList(1);
+    await memoryReloadSummary();
+    showToast("已删除");
+  } catch (error) { showToast(error.message); }
+  finally { mem.busy = false; }
+}
+
+async function memoryBulk(action) {
+  const mem = memoryState();
+  const ids = Array.from(mem.selected);
+  if (!ids.length || mem.busy) return;
+  const label = MEMORY_ACTION_LABELS[action] || action;
+  const ok = await showDialog({
+    title: `批量${label}`,
+    message: `将对 ${ids.length} 条经验执行该操作，是否继续？`,
+    confirmText: label,
+    danger: action === "reject",
+  });
+  if (!ok) return;
+  mem.busy = true;
+  try {
+    const data = await request("/memory/experiences/bulk", {method:"POST", body: JSON.stringify({ids, action})});
+    mem.selected.clear();
+    await memoryReloadList(1);
+    await memoryReloadSummary();
+    if (data.failed) showToast(`成功 ${data.succeeded} 条，失败 ${data.failed} 条`);
+    else showToast(`已${label} ${data.succeeded} 条`);
+  } catch (error) { showToast(error.message); }
+  finally { mem.busy = false; }
+}
+
+// -- 详情浮层 ---------------------------------------------------------------
+
+function memoryDetailRows(item) {
+  const payload = item.payload || {};
+  const rows = [];
+  if (item.kind === "fact") {
+    rows.push(["事实", [payload.fact_text || ""]]);
+    rows.push(["类型", [MEMORY_FACT_TYPE_LABELS[payload.fact_type] || payload.fact_type || ""]]);
+    if ((payload.tags || []).length) rows.push(["标签", payload.tags]);
+  } else {
+    rows.push(["触发条件", payload.trigger_cues || []]);
+    rows.push(["前置条件", payload.preconditions || []]);
+    rows.push(["建议步骤", payload.strategy_steps || []]);
+    rows.push(["工具顺序", payload.tool_sequence || []]);
+    rows.push(["失败模式", payload.failure_patterns || []]);
+  }
+  const version = item.source_version || {};
+  rows.push(["来源与版本", [
+    `来源：${MEMORY_SOURCE_LABELS[item.source_kind] || item.source_kind || "未知"}`,
+    `提炼器 v${version.extractor || "?"}`,
+    version.skill_hash ? `技能版本 ${String(version.skill_hash).slice(0, 12)}` : "",
+  ].filter(Boolean)]);
+  rows.push(["置信度与反馈", [
+    `置信度 ${Number(item.confidence || 0).toFixed(2)}（先验 ${MEMORY_SOURCE_PRIOR[item.source_kind] || 0}）`,
+    `证据 ${item.evidence_count || 0}`,
+    `被参考 ${item.exposure_count || 0} 次`,
+    `有帮助 ${item.helpful_count || 0} · 有害 ${item.harmful_count || 0}`,
+    `验证成功 ${item.verified_success_count || 0} · 失败 ${item.verified_failure_count || 0}`,
+  ])];
+  return rows;
+}
+
+function memoryShowDetailDialog(item) {
+  const backdrop = document.createElement("div");
+  backdrop.className = "modal-backdrop dialog-backdrop";
+  const rows = memoryDetailRows(item).map(([label, values]) => {
+    const body = values.length
+      ? `<ul>${values.map(value => `<li>${escapeHtml(String(value))}</li>`).join("")}</ul>`
+      : `<p class="memory-empty-inline">（无）</p>`;
+    return `<section class="memory-detail-group"><h4>${escapeHtml(label)}</h4>${body}</section>`;
+  }).join("");
+  const actions = [];
+  if (item.status === "candidate") actions.push(["approve", "通过"], ["reject", "拒绝"]);
+  else if (item.status === "approved") actions.push(["deprecate", "停用"]);
+  else if (item.status === "rejected") actions.push(["reopen", "重新开启"]);
+  else if (item.status === "deprecated") actions.push(["restore", "恢复"]);
+  const actionHtml = actions.map(([action, label]) =>
+    `<button type="button" class="action-button${action === "reject" || action === "deprecate" ? " deny" : " approve"}" data-detail-act="${action}">${escapeHtml(label)}</button>`).join("");
+  backdrop.innerHTML = `<div class="memory-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="memory-detail-title">`
+    + `<header class="memory-detail-head">`
+    + `<span class="memory-chip memory-chip-${escapeHtml(item.status)}">${escapeHtml(MEMORY_STATUS_LABELS[item.status] || item.status)}</span>`
+    + `<h3 id="memory-detail-title">${escapeHtml(item.title || "（无标题）")}</h3>`
+    + `<p class="memory-detail-meta">${escapeHtml([memoryScopeLabel(item.scope), item.kind === "fact" ? "工程事实" : "策略经验", item.task_type || "未分类", memoryTime(item.created_at)].filter(Boolean).join(" · "))}</p>`
+    + `</header>`
+    + `<div class="memory-detail-body">${rows}</div>`
+    + `<footer class="memory-detail-actions"><button type="button" class="action-button danger" data-detail-act="delete">删除</button><span class="memory-detail-spacer"></span><button type="button" class="secondary" data-detail-act="close">关闭</button>${actionHtml}</footer>`
+    + `</div>`;
+  let settled = false;
+  const close = () => {
+    if (settled) return;
+    settled = true;
+    document.removeEventListener("keydown", onKey);
+    backdrop.remove();
+    const card = document.querySelector(`[data-memory-detail="${item.id}"]`);
+    if (card) card.focus();
+  };
+  const onKey = event => { if (event.key === "Escape") close(); };
+  backdrop.onclick = event => { if (event.target === backdrop) close(); };
+  document.addEventListener("keydown", onKey);
+  backdrop.querySelector('[data-detail-act="close"]').onclick = close;
+  backdrop.querySelectorAll("[data-detail-act]").forEach(button => {
+    const action = button.dataset.detailAct;
+    if (action === "close") return;
+    button.onclick = async () => {
+      if (action === "delete") {
+        const ok = await memoryActionConfirm(item, "delete");
+        if (!ok) return;
+        close();
+        await memoryDelete(item.id);
+        return;
+      }
+      const ok = await memoryActionConfirm(item, action);
+      if (!ok) return;
+      close();
+      await memoryAct(item.id, action);
+    };
+  });
+  document.body.append(backdrop);
+  backdrop.querySelector("#memory-detail-title").setAttribute("tabindex", "-1");
+  backdrop.querySelector("#memory-detail-title").focus();
+}
+
+async function memoryOpenDetail(id) {
+  try {
+    memoryShowDetailDialog(await request(`/memory/experiences/${encodeURIComponent(id)}`));
+  } catch (error) {
+    if (error.status === 404) { showToast("该条记忆已不存在，已刷新"); await memoryReloadList(1); }
+    else showToast(error.message);
+  }
+}
+
+// -- 工具参数删除 -----------------------------------------------------------
+
+async function memoryDeleteField(tool, field) {
+  const ok = await showDialog({
+    title: "删除记住的参数",
+    message: `将删除 ${tool} 记住的 ${field}，后续调用不再自动建议这个值。`,
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await request(`/memory/tool-parameters/${encodeURIComponent(tool)}/${encodeURIComponent(field)}`, {method:"DELETE"});
+    await memoryReloadTools();
+    showToast("已删除");
+  } catch (error) {
+    if (error.status === 404) { showToast("该字段已不存在，已刷新"); await memoryReloadTools(); }
+    else showToast(error.message);
+  }
+}
+
+async function memoryClearTool(tool) {
+  const ok = await showDialog({
+    title: "清除这个工具的参数记忆",
+    message: `将删除 ${tool} 记住的全部参数，后续调用不再自动建议。`,
+    confirmText: "清除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await request(`/memory/tool-parameters/${encodeURIComponent(tool)}`, {method:"DELETE"});
+    await memoryReloadTools();
+    showToast("已清除");
+  } catch (error) {
+    if (error.status === 404) { showToast("该工具已不存在，已刷新"); await memoryReloadTools(); }
+    else showToast(error.message);
+  }
+}
+
+async function memoryClearAllTools() {
+  const mem = memoryState();
+  const counts = (mem.tools && mem.tools.tool_count) || 0;
+  const fields = (mem.tools && mem.tools.field_count) || 0;
+  const ok = await showDialog({
+    title: "清空全部工具参数记忆",
+    message: `将删除 ${counts} 个工具记住的 ${fields} 个字段，不可撤销。后续调用会退回参数默认值。`,
+    confirmText: "清空",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const data = await request("/memory/tool-parameters", {method:"DELETE"});
+    await memoryReloadTools();
+    showToast(`已清空 ${data.fields || 0} 个字段`);
+  } catch (error) { showToast(error.message); }
+}
+
+// -- 维护任务 ---------------------------------------------------------------
+
+function memoryStopPolling() {
+  const mem = memoryState();
+  if (mem.poll) { clearTimeout(mem.poll); mem.poll = null; }
+}
+
+function memoryStartPolling() {
+  const mem = memoryState();
+  if (mem.poll) return;
+  // 离开记忆 Tab 就不再轮询：维护是后台任务，用户看不见的进度条没有意义
+  if (state.settings.activeTab !== "memory" || !state.settings.open) return;
+  mem.poll = setTimeout(memoryPollTick, 2000);
+}
+
+async function memoryPollTick() {
+  const mem = memoryState();
+  mem.poll = null;
+  if (state.settings.activeTab !== "memory" || !state.settings.open) return;
+  try {
+    const status = await request("/memory/status");
+    if (mem.summary) mem.summary.maintenance = status.maintenance;
+    memoryRenderStatus();
+    memoryRenderMaintenance();
+    if (status.maintenance && status.maintenance.state === "running") { memoryStartPolling(); return; }
+    await memoryReloadSummary();
+    await memoryReloadList(1);
+  } catch (error) { mem.error = error.message; memoryRenderStatus(); }
+}
+
+async function memoryRunMaintenance(kind) {
+  const mem = memoryState();
+  try {
+    await request("/memory/maintenance/runs", {method:"POST", body: JSON.stringify({kind})});
+    if (mem.summary) mem.summary.maintenance = {state:"running", step:null, started_at:null, finished_at:null, last_result:null, last_error:null};
+    memoryRenderMaintenance();
+    memoryRenderStatus();
+    showToast(kind === "extract" ? "已投递提炼任务，完成后候选会出现在待审核列表" : "已开始维护");
+    memoryStartPolling();
+  } catch (error) {
+    if (error.status === 409) { showToast("已有维护任务在运行"); memoryStartPolling(); }
+    else showToast(error.message);
+  }
+}
+
+// -- 事件绑定 ---------------------------------------------------------------
+
+el.memoryRefresh.onclick = () => memoryReloadList(1).then(memoryReloadSummary);
+el.memoryLoadMore.onclick = () => memoryReloadList(memoryState().page + 1);
+["memoryFilterStatus", "memoryFilterKind", "memoryFilterScope"].forEach(key => {
+  el[key].onchange = () => { memoryState().selected.clear(); memoryReloadList(1); };
+});
+let memorySearchTimer = null;
+el.memorySearch.oninput = () => {
+  clearTimeout(memorySearchTimer);
+  memorySearchTimer = setTimeout(() => { memoryState().selected.clear(); memoryReloadList(1); }, 300);
+};
+el.memorySelectPage.onchange = () => {
+  const mem = memoryState();
+  const pageIds = mem.items.filter(item => item.status === "candidate").map(item => item.id);
+  pageIds.forEach(id => { if (el.memorySelectPage.checked) mem.selected.add(id); else mem.selected.delete(id); });
+  memoryRenderList();
+};
+el.memoryBulkApprove.onclick = () => memoryBulk("approve");
+el.memoryBulkReject.onclick = () => memoryBulk("reject");
+el.memoryRunExtract.onclick = () => memoryRunMaintenance("extract");
+el.memoryRunGovernance.onclick = () => memoryRunMaintenance("governance");
+el.memoryClearTools.onclick = () => memoryClearAllTools();
+el.memoryList.addEventListener("click", event => {
+  const detail = event.target.closest("[data-memory-detail]");
+  if (detail) { memoryOpenDetail(detail.dataset.memoryDetail); return; }
+  const action = event.target.closest("[data-memory-act]");
+  if (action) {
+    const id = action.dataset.memoryId;
+    const item = memoryState().items.find(entry => entry.id === id);
+    if (item) memoryActionConfirm(item, action.dataset.memoryAct).then(ok => { if (ok) memoryAct(id, action.dataset.memoryAct); });
+  }
+});
+el.memoryList.addEventListener("change", event => {
+  const box = event.target.closest("[data-memory-check]");
+  if (!box) return;
+  const mem = memoryState();
+  if (box.checked) mem.selected.add(box.dataset.memoryCheck); else mem.selected.delete(box.dataset.memoryCheck);
+  memoryRenderBulk();
+});
+el.memoryTools.addEventListener("click", event => {
+  const clear = event.target.closest("[data-memory-clear-tool]");
+  if (clear) { event.preventDefault(); memoryClearTool(clear.dataset.memoryClearTool); return; }
+  const field = event.target.closest("[data-memory-field]");
+  if (field) { event.preventDefault(); memoryDeleteField(field.dataset.memoryTool, field.dataset.memoryField); }
+});
 
 // --- 用量统计面板：按供应商/模型聚合历史 token 消耗 ---
 const USAGE_PRESETS = [

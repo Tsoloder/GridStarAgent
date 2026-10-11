@@ -137,6 +137,7 @@
         <button id="tab-models" type="button" role="tab" aria-selected="true" aria-controls="panel-models" data-settings-tab="models">模型</button>
         <button id="tab-skills" type="button" role="tab" aria-selected="false" aria-controls="panel-skills" data-settings-tab="skills">技能</button>
         <button id="tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="panel-mcp" data-settings-tab="mcp">MCP 工具</button>
+        <button id="tab-memory" type="button" role="tab" aria-selected="false" aria-controls="panel-memory" data-settings-tab="memory">记忆</button>
         <button id="tab-usage" type="button" role="tab" aria-selected="false" aria-controls="panel-usage" data-settings-tab="usage">用量</button>
       </div>
       <div class="settings-content">
@@ -153,6 +154,45 @@
           <div class="mcp-toolbar"><div><span class="eyebrow">MCP TOOLS</span><h3>MCP 工具 <small id="mcp-count">0</small></h3></div><button id="refresh-mcp" class="secondary" type="button">刷新</button></div>
           <div id="mcp-status" class="mcp-status" role="status" aria-live="polite"></div>
           <div id="mcp-tools" class="mcp-tools"></div>
+        </div>
+        <div id="panel-memory" class="settings-panel memory-panel hidden" role="tabpanel" aria-labelledby="tab-memory">
+          <div id="memory-status" class="memory-status" role="status" aria-live="polite">正在读取记忆…</div>
+          <div class="memory-switches" id="memory-switches"></div>
+          <section class="memory-section">
+            <div class="memory-toolbar">
+              <div class="memory-toolbar-head"><span class="eyebrow">EXPERIENCE</span><h3>策略经验与工程事实 <small id="memory-count">0</small></h3></div>
+              <div class="memory-filters">
+                <label class="memory-filter"><span>状态</span><select id="memory-filter-status" aria-label="按状态筛选"><option value="candidate">待审核</option><option value="approved">已启用</option><option value="rejected">已拒绝</option><option value="deprecated">已停用</option><option value="">全部</option></select></label>
+                <label class="memory-filter"><span>类型</span><select id="memory-filter-kind" aria-label="按类型筛选"><option value="">全部</option><option value="experience">策略经验</option><option value="fact">工程事实</option></select></label>
+                <label class="memory-filter"><span>作用域</span><select id="memory-filter-scope" aria-label="按作用域筛选"></select></label>
+                <label class="memory-filter memory-filter-search"><span>搜索</span><input id="memory-search" type="search" placeholder="关键词" aria-label="搜索记忆"></label>
+                <button id="memory-refresh" class="secondary" type="button">刷新</button>
+              </div>
+              <div class="memory-bulk hidden" id="memory-bulk">
+                <label class="memory-check"><input type="checkbox" id="memory-select-page"><span>本页全选</span></label>
+                <span id="memory-bulk-count">已选 0 条</span>
+                <button id="memory-bulk-approve" class="secondary" type="button">批量通过</button>
+                <button id="memory-bulk-reject" class="secondary" type="button">批量拒绝</button>
+              </div>
+            </div>
+            <div id="memory-list" class="memory-list"></div>
+            <div id="memory-more" class="memory-more hidden"><button id="memory-load-more" class="secondary wide" type="button">加载更多</button></div>
+          </section>
+          <section class="memory-section">
+            <div class="memory-toolbar-head"><span class="eyebrow">TOOL PARAMETERS</span><h3>工具参数记忆 <small id="memory-tool-count">0</small></h3></div>
+            <p class="memory-hint">你在工具审批中确认过的参数会被记住，作为下次调用的默认建议。</p>
+            <div id="memory-tools" class="memory-tools"></div>
+          </section>
+          <section class="memory-section memory-danger">
+            <div class="memory-toolbar-head"><span class="eyebrow">MAINTENANCE</span><h3>维护</h3></div>
+            <p class="memory-hint" id="memory-maintenance-result">还没有运行过维护任务。</p>
+            <div class="memory-maint-actions">
+              <button id="memory-run-extract" class="secondary" type="button">立即提炼</button>
+              <button id="memory-run-governance" class="secondary" type="button">运行维护</button>
+              <button id="memory-clear-tools" class="secondary danger" type="button">清空全部工具参数记忆</button>
+            </div>
+            <p class="memory-hint">「立即提炼」只生成待审核候选，不会自动启用；「清空全部工具参数记忆」不可撤销。</p>
+          </section>
         </div>
         <div id="panel-usage" class="settings-panel usage-panel hidden" role="tabpanel" aria-labelledby="tab-usage">
           <div class="usage-filters">

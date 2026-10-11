@@ -169,10 +169,83 @@ def catalog(schemas: Optional[Mapping[str, Mapping[str, object]]] = None) -> str
     return "<tool_parameter_memory>\n%s\n</tool_parameter_memory>" % "\n".join(lines)
 
 
-def clear(tool: str = "") -> None:
+def catalog_all() -> Dict[str, object]:
+    """给 API 层用的结构化读取。
+
+    与上面的 ``catalog(schemas)`` 是两回事：那个渲染成 ``<tool_parameter_memory>``
+    给提示词用，返回字符串；这个返回 dict 给设置页用。同名会让后来者覆盖前者，
+    ``agent_loop`` 就会拿到一个 dict 去拼字符串——所以两个名字必须分开。
+    """
+    data = _load()
+    tools = []
+    field_count = 0
+    for name, entry in sorted(data.items()):
+        values = entry.get("params") if isinstance(entry, dict) else None
+        if not isinstance(values, dict):
+            continue
+        fields = {
+            str(key): value
+            for key, value in sorted(values.items())
+            if isinstance(value, (str, int, float, bool))
+        }
+        if not fields:
+            continue
+        field_count += len(fields)
+        tools.append({
+            "tool": str(name),
+            "updated_at": str(entry.get("updated_at", "")),
+            "fields": fields,
+        })
+    return {"tools": tools, "tool_count": len(tools), "field_count": field_count}
+
+
+def delete_fields(tool: str, fields) -> int:
+    """删除某工具下的若干字段，返回真正删掉的数量。字段删空则工具条目整体消失。"""
+    tool = str(tool or "").strip()
+    if not tool:
+        return 0
+    wanted = {str(name) for name in fields if str(name).strip()}
+    if not wanted:
+        return 0
+    data = _load()
+    entry = data.get(tool)
+    values = entry.get("params") if isinstance(entry, dict) else None
+    if not isinstance(values, dict):
+        return 0
+    removed = 0
+    for name in wanted:
+        if name in values:
+            values.pop(name)
+            removed += 1
+    if removed:
+        if values:
+            entry["params"] = values
+            entry["updated_at"] = datetime.now().isoformat()
+            data[tool] = entry
+        else:
+            data.pop(tool, None)
+        _save(data)
+    return removed
+
+
+def counts() -> Dict[str, int]:
+    info = catalog_all()
+    return {"tools": int(info["tool_count"]), "fields": int(info["field_count"])}
+
+
+def clear(tool: str = "") -> int:
+    """清空指定工具或全部记忆，返回被删除的字段数（旧调用方忽略返回值即可）。"""
     data = _load()
     if tool:
+        entry = data.get(tool)
+        values = entry.get("params") if isinstance(entry, dict) else None
+        removed = len(values) if isinstance(values, dict) else 0
         data.pop(tool, None)
     else:
+        removed = 0
+        for entry in data.values():
+            if isinstance(entry, dict) and isinstance(entry.get("params"), dict):
+                removed += len(entry["params"])
         data = {}
     _save(data)
+    return removed

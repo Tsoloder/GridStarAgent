@@ -12,6 +12,19 @@ from .conftest import (
     MockContextManager,
     load_fixture,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_sessions_dir(tmp_path, monkeypatch):
+    """把会话落盘钉在沙箱里。
+
+    多数用例自己 monkeypatch 了 ``session_mod.SESSIONS_DIR``，漏掉的那几个
+    会往真实数据目录写一个只含 "hi" 的空会话。跑几轮测试，用户的会话列表里
+    就多出几十个打不开的幽灵会话——测试不该动用户数据，所以这里兜底。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path / "sessions")
 from config import config_from_dict
 from session import Session
 

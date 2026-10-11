@@ -764,7 +764,15 @@ def test_webui_skill_slash_menu_contract():
     # 指令分组：模型（切到可搜索的模型面板）与导出对话（直接调后端导出）；指令排在技能之前
     assert '{id: "model", name: "模型", description: "选择本次会话使用的模型"}' in script
     assert '{id: "export", name: "导出对话", description: "把当前会话导出为 Markdown 文件"}' in script
-    assert 'return [{label: "指令", items: commands}, {label: "技能", items: skills}];' in script
+    # 技能按 category 分组：指令组永远排第一，技能各归自己的分类组；
+    # 分类名为空时回落到「通用」，选了具体分类则额外带一个「不启用技能」项
+    assert 'const groups = [{label: "指令", items: commands}];' in script
+    assert 'const key = (s.category || "通用").charAt(0).toUpperCase() + (s.category || "通用").slice(1);' in script
+    assert 'groups.push({label: key, items: byCat[key]});' in script
+    assert '{id: "", name: "不启用技能", description: "默认：按消息内容自动匹配技能"}' in script
+    assert 'groups.push({label: cat.charAt(0).toUpperCase() + cat.slice(1), items: filtered});' in script
+    assert "return groups;" in script
+    assert 'return [{label: "指令", items: commands}, {label: "技能", items: skills}];' not in script
     # 供应商发现来的模型不进选择范围：斜杠面板与模型下拉都只列配置里写过的，
 # 但"查名字"仍用全量目录，避免既有会话选中的发现模型显示成"未配置"
     assert 'function configuredModels() { return visibleModels().filter(item => item.status !== "discovered"); }' in script
@@ -838,4 +846,60 @@ def test_webui_category_round_trip_contract():
 
     # 切会话/刷新后下拉框要显示会话里存的分类，所以接口得把它带出来
     assert '"category": s.category,' in backend
+
+
+def test_webui_memory_panel_contract():
+    """记忆 Tab 的静态契约：入口、接口路径、确认浮层与独立样式都要在。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # Tab 入口与面板，顺序上排在 MCP 之后、用量之前
+    assert 'id="tab-memory"' in index
+    assert 'data-settings-tab="memory"' in index
+    assert 'id="panel-memory"' in index
+    assert 'aria-controls="panel-memory"' in index
+    assert index.index('data-settings-tab="mcp"') < index.index('data-settings-tab="memory"')
+    assert index.index('data-settings-tab="memory"') < index.index('data-settings-tab="usage"')
+
+    # 切 Tab 时懒加载，切走时停止轮询
+    assert 'if (tab === "memory") memoryEnterTab(); else memoryStopPolling();' in script
+
+    # 全部接口路径
+    for endpoint in (
+        'request("/memory/summary")',
+        'request("/memory/config"',
+        '`/memory/experiences?${params.toString()}`',
+        '`/memory/experiences/${encodeURIComponent(id)}`',
+        'request("/memory/experiences/bulk"',
+        'request("/memory/tool-parameters")',
+        'request("/memory/status")',
+        'request("/memory/maintenance/runs"',
+    ):
+        assert endpoint in script
+
+    # 记忆操作即时生效：既不写 settings.draft，也不触发未保存确认
+    assert "state.settings.draft =" not in script.split("async function memorySyncSettingsConfig")[1].split("function memoryScopeLabel")[0]
+    assert "markSettingsDirty" not in script.split("// --- 记忆面板")[1].split("// --- 用量统计面板")[0]
+    # 但开关改了要回写 draft.memory 并刷新 revision，否则模型 Tab 保存会 409 或把开关覆盖回去
+    assert "state.settings.draft.memory = clone(memory);" in script
+    assert "state.settings.original.memory = clone(memory);" in script
+    assert "if (data.revision) state.settings.revision = data.revision;" in script
+
+    # 危险操作走站内确认浮层，删除只在详情里给
+    assert "memoryActionConfirm" in script
+    assert "function showDialog(" in script
+    assert "data-memory-detail" in script
+    # 经验正文来自模型提炼，一律转义后再渲染
+    assert "function escapeHtml(" in script
+    assert "memoryCard(item)" in script
+
+    # 样式：独立类名 + 窄屏规则
+    for selector in (
+        ".memory-panel{", ".memory-status{", ".memory-switches{", ".memory-toolbar-head{",
+        ".memory-filters{", ".memory-bulk{", ".memory-list{", ".memory-card{",
+        ".memory-detail-dialog{", ".memory-danger{", ".memory-detail-body{",
+    ):
+        assert selector in stylesheet
+    assert ".memory-detail-dialog{width:100%;height:100%;max-height:none;border:0;border-radius:0}" in stylesheet
 

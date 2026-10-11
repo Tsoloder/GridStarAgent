@@ -104,3 +104,26 @@ def test_remember_keeps_declared_params(memory_path):
     assert json.loads(memory_path.read_text(encoding="utf-8"))["FindGridStarWindow"]["params"] == {
         "window_title": "NNW-GridStar"
     }
+
+
+def test_catalog_and_catalog_all_stay_distinct(memory_path):
+    """两个读取入口必须一个渲染成字符串、一个返回结构体。
+
+    它们曾经同名，后定义的那个把前一个覆盖掉，``agent_loop`` 拿到 dict 去拼
+    系统提示，直接 TypeError 打挂每一次对话。名字分开就是这条断言的用意。
+    """
+    software = {"FindGridStarWindow": WINDOW_SCHEMA}
+    tool_memory.remember("FindGridStarWindow", {"window_title": "NNW-GridStar"}, WINDOW_SCHEMA)
+
+    rendered = tool_memory.catalog(software)
+    assert isinstance(rendered, str)
+    assert rendered.startswith("<tool_parameter_memory>")
+    assert "NNW-GridStar" in rendered
+
+    structured = tool_memory.catalog_all()
+    assert isinstance(structured, dict)
+    assert structured["tool_count"] == 1
+    assert structured["field_count"] == 1
+    assert structured["tools"][0]["tool"] == "FindGridStarWindow"
+    assert structured["tools"][0]["fields"] == {"window_title": "NNW-GridStar"}
+    assert tool_memory.counts() == {"tools": 1, "fields": 1}

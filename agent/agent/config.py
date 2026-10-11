@@ -73,11 +73,28 @@ class ModelConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    """长期记忆开关。
+
+    五个开关刻意分开：经验（怎么做这类任务）与工程事实（用户偏好、环境、
+    工程特征）的风险面不同，前者是策略、后者更贴近具体数据，允许用户只开
+    其中一条链路。全部默认开启，但首版只采集不注入，注入要等 P0b。
+    """
+
+    enabled: bool = True
+    experience_extract: bool = True
+    experience_inject: bool = True
+    fact_extract: bool = True
+    fact_inject: bool = True
+
+
+@dataclass(frozen=True)
 class ApiConfig:
     version: int
     default_model: str
     providers: tuple[ProviderConfig, ...]
     models: tuple[ModelConfig, ...]
+    memory: MemoryConfig = field(default_factory=MemoryConfig)
 
     def provider(self, provider_id: str) -> ProviderConfig:
         for item in self.providers:
@@ -101,7 +118,8 @@ _MODEL_FIELDS = frozenset({
     "max_output_tokens", "capabilities", "compat",
 })
 _CAPABILITY_FIELDS = frozenset(ModelCapabilities.__dataclass_fields__)
-_ROOT_FIELDS = frozenset({"version", "default_model", "providers", "models"})
+_MEMORY_FIELDS = frozenset(MemoryConfig.__dataclass_fields__)
+_ROOT_FIELDS = frozenset({"version", "default_model", "providers", "models", "memory"})
 
 
 def _require_fields(data: Mapping[str, Any], allowed: frozenset[str], required: set[str], path: str) -> None:
@@ -215,6 +233,23 @@ def _parse_model(raw: Any, index: int) -> ModelConfig:
     )
 
 
+def _parse_memory(raw: Any) -> MemoryConfig:
+    """解析 config.memory。
+
+    整个节缺失时按全开补默认，这是老配置文件的升级路径：不写 memory 就等于
+    使用默认值，不改动已有配置的语义，也不强迫用户先手动补一段 JSON。
+    """
+    if raw is None:
+        return MemoryConfig()
+    path = "config.memory"
+    data = _mapping(raw, path)
+    _require_fields(data, _MEMORY_FIELDS, set(), path)
+    return MemoryConfig(**{
+        key: _boolean(value, f"{path}.{key}")
+        for key, value in data.items()
+    })
+
+
 def config_from_dict(data: Mapping[str, Any]) -> ApiConfig:
     data = _mapping(data, "config")
     _require_fields(data, _ROOT_FIELDS, {"version", "default_model", "providers", "models"}, "config")
@@ -249,7 +284,7 @@ def config_from_dict(data: Mapping[str, Any]) -> ApiConfig:
     }
     if default_model not in enabled_models:
         raise ConfigError("default_model must reference an enabled model and provider")
-    return ApiConfig(1, default_model, providers, models)
+    return ApiConfig(1, default_model, providers, models, _parse_memory(data.get("memory")))
 
 
 def _plain(value: Any) -> Any:

@@ -1,4 +1,4 @@
-"""数据目录策略测试：固定 .gridstar、旧目录迁移、提权钉目录。
+"""数据目录策略测试：固定 GridstarAgent.data、旧目录迁移、提权钉目录。
 
 权限修复（icacls/takeown/UAC）依赖真实 ACL 与提权，不适合放进单元测试，
 由 agent/agent/check_data_dir.py 与手工验证覆盖；这里锁住可离线的路径策略。
@@ -24,14 +24,14 @@ def fake_profile(tmp_path, monkeypatch):
 
 
 def test_default_dir_is_gridstar_under_roaming_appdata(fake_profile):
-    """默认位置就应该是 <profile>\\AppData\\Roaming\\.gridstar，逐段钉住。"""
-    assert paths.DATA_DIR_NAME == ".gridstar"
+    """默认位置就应该是 <profile>\\AppData\\Roaming\\GridstarAgent.data，逐段钉住。"""
+    assert paths.DATA_DIR_NAME == "GridstarAgent.data"
     parent = paths._user_data_parent()
     if os.name == "nt":
         assert parent == fake_profile / "AppData" / "Roaming"
     else:
         assert parent == fake_profile / ".local" / "share"
-    assert parent / paths.DATA_DIR_NAME == parent / ".gridstar"
+    assert parent / paths.DATA_DIR_NAME == parent / "GridstarAgent.data"
 
 
 def test_legacy_env_var_no_longer_selects_the_dir(fake_profile, monkeypatch, tmp_path):
@@ -42,7 +42,7 @@ def test_legacy_env_var_no_longer_selects_the_dir(fake_profile, monkeypatch, tmp
     module = importlib.reload(paths)
     try:
         assert "elsewhere" not in str(module.DATA_DIR)
-        assert module.DATA_DIR.name == ".gridstar"
+        assert module.DATA_DIR.name == "GridstarAgent.data"
     finally:
         monkeypatch.undo()
         importlib.reload(paths)
@@ -98,6 +98,8 @@ def test_ensure_subdirs_reports_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "LOG_DIR", tmp_path / "logs")
     monkeypatch.setattr(paths, "SKILLS_DIR", tmp_path / "skills")
     monkeypatch.setattr(paths, "UPLOADS_DIR", tmp_path / "uploads")
+    # 记忆目录同样要指到沙箱里，否则这个用例会去动真实用户目录
+    monkeypatch.setattr(paths, "MEMORY_DIR", tmp_path / "memory")
 
     failures = paths.ensure_subdirs()
 
@@ -105,6 +107,7 @@ def test_ensure_subdirs_reports_failures(tmp_path, monkeypatch):
     assert "blocked" in failures[0]
     assert (tmp_path / "logs").is_dir()
     assert (tmp_path / "uploads").is_dir()
+    assert (tmp_path / "memory").is_dir()
 
 
 def test_probe_writable_detects_writable_dir(tmp_path):

@@ -598,3 +598,78 @@ Tab 的布局、交互、API 契约、错误处理、测试与验收细则独立
 - 日常状态变更不再依赖 CLI；CLI 与 Web 必须调用同一套存储层函数，禁止两套写入逻辑。
 - `config.json` 新增 `memory.enabled` / `memory.experience_extract` /
   `memory.experience_inject` 三个开关，初次读取时按开值补默认，不改变现有配置语义。
+
+
+---
+
+## 实现记录（P0a 已落地）
+
+本节记实现过程中定下的事，替代正文里对应的待确认项。P0a = 影子采集：
+候选只入库、不注入，先把脱敏质量和候选噪声看清。
+
+### 覆盖范围从「策略经验」扩到「策略经验 + 工程事实」
+
+用户确认记忆要覆盖两层：跨任务的工作方法（经验），以及环境与偏好类事实（事实）。
+两者风险面不同——经验错一次会误导流程，事实错一次会把某个工程的环境当成通用前提——
+因此开关拆成两条链路，允许只开一条。
+
+`config.json` 的 `memory` 节因此是**五个**布尔开关，全部默认开：
+`enabled` / `experience_extract` / `experience_inject` / `fact_extract` / `fact_inject`。
+旧配置文件没有 `memory` 节时按全默认补齐，不改动已有配置语义。
+
+### 事实与经验共用一张表
+
+`memory_item` 用 `kind` 区分 `experience` / `fact`，类型专属字段进 JSON `payload`。
+两者共享同一套生命周期（candidate → approved → rejected → deprecated）、同一套
+scope 与脱敏、同一套审计与 FTS 索引；拆两张表会把状态机和检索逻辑各写两遍。
+`memory_fts` 走 external-content 模式挂在同一张表上。
+
+### 不实现 superseded_by
+
+openhanako 的 dream 也只做「整份快照环」，没有 per-record 版本。经验条数远小于
+事实条数，体积由「同指纹不复活 + 30 天未增证据淘汰 + 每 scope 候选上限 200」控制。
+要逐条追溯「这条被哪条取代」，得同时承担合并与冲突消解逻辑，P0a 不值得。
+
+### 断点住在会话目录里，但不许把它造回来
+
+抽取断点写 `sessions/<sid>/experience_extraction_state.json`，会话删除时随目录一起
+被回收，长期记忆里不留会话关联。代价是：会话已删、提炼任务还在跑时，写入会把
+删掉的会话目录**重新造出一个空壳**，空壳在界面上无法再删第二次。因此 `save_state`
+在父目录不存在时直接放弃写入——丢一个断点的代价只是可能重复提炼一次，指纹层会把
+重复候选吃掉。
+
+同理，`submit_recent_extractions` 只扫**在线**会话的 `ledger.json`，不进 `.trash`：
+用户删掉的会话就是不想再被提起。
+
+### 回收站与权限
+
+真实数据目录里 44 个 `ledger.json` 全部位于 `sessions/.trash/`，在线会话一个都没有。
+另有部分台账文件受 ACL 保护读不出来（`PermissionError`）。两条都按「没有素材就
+不提炼」处理，读取失败只记类型名，不让主流程受影响。
+
+### 命名：`catalog` 与 `catalog_all`
+
+`tool_memory` 原有的 `catalog(schemas)` 渲染成 `<tool_parameter_memory>` 给提示词用，
+返回字符串；新增给设置页用的结构化读取**必须**换名（`catalog_all()`）。同名会让
+后定义者覆盖前定义者，`agent_loop` 拿到 dict 去拼系统提示，直接 TypeError 打挂
+每一次对话。已加回归断言钉住两者返回值类型不同。
+
+### 已落地的文件
+
+| 文件 | 职责 |
+|---|---|
+| `agent/agent/memory_sanitize.py` | 两层脱敏：压形状 + 落盘前复查，纯函数 |
+| `agent/agent/experience_memory.py` | SQLite + FTS5 存储、状态机、检索、治理 |
+| `agent/agent/experience_extractor.py` | 触发判断、job 幂等、断点、LLM 提炼、schema 校验 |
+| `agent/agent/memory_store.py` | 唯一门面：经验库 + 参数记忆 + 队列 + 维护，异常翻译成 HTTP 语义 |
+| `agent/agent/app.py` | 13 条 `/memory/*` 路由；后台轮次结束后异步投递提炼 |
+| `webui/{index.html,app.js,style.css}` | 设置中心「记忆」Tab |
+| `agent/agent/tests/test_memory_*.py`、`test_experience_*.py` | 170 条用例 |
+
+### 尚未做
+
+- 注入侧全部留白：`agent_loop.py` 里没有任何经验检索，P0b 才接 `<experience_hints>`。
+- 用户明确纠错的识别、轮次水位触发只做了判断函数，尚无主动喂 focus 的入口。
+- 人工录入候选（`manual_curated` 高先验那条路）没有入口，只能等 P0b 的审核 Tab 扩展。
+- 项目级 scope 仍未启用，`normalize_scope` 只认 `global` 与 `skill:<id>`。
+- 「高置信经验自动生成 Skill 草稿」仍是 P2。
