@@ -125,11 +125,13 @@ def test_screen_readonly_tools_skip_plan_and_approval_gates():
         [{"name": "CaptureGridStarWindow"}, {"name": "ClickAtPoint"}])
 
 
-def test_capture_tool_is_declared_without_arguments():
+def test_capture_tool_is_declared_without_arguments(monkeypatch):
     """模型侧零参数：截图不该为参数确认多花一轮，也不该有机会传错参数。
 
     实现体 _capture_gridstar 仍保留 window_title / activate / clean 三个开关，
-    脚本与自测要验 PrintWindow 回退路径时用得上。
+    脚本与自测要验 PrintWindow 回退路径时用得上。但模型侧那三项行为是定死的：
+    不做标题过滤、截图前先把 GridStar 切到前台、不走 PrintWindow 自绘。这里断言
+    的是生效值而不是写法，改成显式传参或依赖默认值都行，值不对就红。
     """
     import inspect
     import sys
@@ -143,6 +145,20 @@ def test_capture_tool_is_declared_without_arguments():
     assert list(inspect.signature(sa.CaptureGridStarWindow).parameters) == []
     inner = inspect.signature(sa._capture_gridstar).parameters
     assert {"window_title", "activate", "clean"} <= set(inner)
+
+    names = ("window_title", "activate", "clean")
+    defaults = {"window_title": "", "activate": True, "clean": False}
+    calls = []
+
+    def fake(*args, **kwargs):
+        passed = dict(zip(names, args))
+        passed.update(kwargs)
+        calls.append({**defaults, **passed})
+        return "{}"
+
+    monkeypatch.setattr(sa, "_capture_gridstar", fake)
+    sa.CaptureGridStarWindow()
+    assert calls == [defaults]
 
 
 def _make_config():

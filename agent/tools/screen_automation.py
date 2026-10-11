@@ -1903,9 +1903,10 @@ def CaptureGridStarWindow() -> str:
 
     三个内部开关（标题过滤 / 是否切前台 / 是否用 PrintWindow 自绘）保留在
     _capture_gridstar() 里供脚本与自测直接调用，模型侧不暴露：拍一张图不该为
-    参数确认多花一轮，也不该让模型有机会传错参数。
+    参数确认多花一轮，也不该让模型有机会传错参数。模型侧的行为在这里写死，
+    不跟着那些开关的默认值走：不做标题过滤、截图前先切前台、不走 PrintWindow。
     """
-    return _capture_gridstar()
+    return _capture_gridstar(window_title="", activate=True, clean=False)
 
 
 def _capture_gridstar(window_title: str = "", activate: bool = True,
