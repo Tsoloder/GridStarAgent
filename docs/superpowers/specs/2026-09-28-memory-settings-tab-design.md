@@ -214,8 +214,8 @@
 
 ```text
 ▸ create_mesh                          3 个字段 · 更新于 09-28 15:20   [清除]
-    size        = 2.0      [删除]
-    algorithm   = "delaunay" [删除]
+    size        = 2.0         [编辑] [删除]
+    algorithm   = "delaunay"  [编辑] [删除]
 ▸ export_model                         1 个字段 · 更新于 09-27 09:10   [清除]
 ```
 
@@ -225,6 +225,30 @@
 - “清空全部”放在维护区危险区域，确认文案必须写明不可撤销，并提示影响工具数量。
 - 删除后立即重渲染列表；若某工具字段被删空，工具条目整体消失。
 - 空状态：`还没有记住的工具参数。你在工具审批中确认参数后，这里会出现记录。`
+
+#### 5.6.1 字段值编辑（实现补充）
+
+改错一个值（例如服务端地址从测试机换成正式机）原先只能删掉再等下一次审批重新记住，
+而“删除”与“记住”之间那段时间里，这个参数会退回默认值或缺失。所以补一个原地编辑入口。
+
+- 交互：字段行右侧“编辑”→ 行内变输入框（字段名与 `=` 保持原位，输入框独占剩余宽度）→
+  `Enter` 或“保存”提交，`Escape` 或“取消”还原。成功后 toast“已更新”并局部重渲染，
+  不整体刷新列表。
+- **类型由原值决定，界面上改不出类型**。输入框旁显示类型标签（文本 / 数字 / 布尔）。
+  提交时按原值类型还原：原值是字符串则原样取用（所以 `10.76.19.98` 直接填，不必加引号）；
+  布尔只认 `true/1/yes/on` 与 `false/0/no/off`；数字必须匹配十进制或科学计数法字面量。
+  解析失败或后端拒绝时**保持编辑态并聚焦输入框**，让人直接改，而不是从头再点一次。
+- **值未变化时不发请求**，避免无意义地刷新 `updated_at`。
+- **只改值不新增字段**：设置页拿不到 schema，编不出一个能被工具接受的键名；新键既会被
+  调用时的 schema 过滤掉，又会在文件里留下一条像“记住了”的假记录。
+- 类型族规则：`boolean` / `number`（整数与小数同族，网格尺寸本来就常在这两者之间来回调）/
+  `string`。跨族一律拒绝。判定时 **布尔必须先于整数判断**：Python 里 `True` 就是 `1`，
+  顺序反了布尔字段会被当成数字。
+- 存放的是**用户可见、可自行判断**的值。这条编辑能力与“删除”同类，**不受总开关约束**：
+  关掉记忆的动机常常就是“我不想让它再记了”，此时连改和删都锁死，用户只能去翻数据目录。
+- 展开态与编辑态要跨重渲染保住（`state.memory.openTools` / `state.memory.editing`），
+  否则一次重渲染就把 `<details>` 收回折叠，输入框连同焦点一起消失。`<details>` 的
+  `toggle` 事件**不冒泡**，监听必须用捕获阶段。
 
 ### 5.7 维护与危险区
 
@@ -381,6 +405,25 @@
 删除单个字段，成功返回 204；字段不存在时返回 404。工具名和字段名按 URL path
 参数传递，前端使用 `encodeURIComponent()`。
 
+`PATCH /memory/tool-parameters/{tool}/{field}`
+
+```json
+{"value": 4.5}
+```
+
+改写一个已记住的值，成功返回 200 与 `{"tool", "field", "value"}`（回传落盘后的实际值，
+前端不必自行推断）。错误：
+
+| 情况 | 状态码 | 文案要点 |
+|---|---|---|
+| 工具或字段不存在 | 404 `not_found` | 该字段已不存在，可能刚刚被删掉 |
+| 与原值不同族 | 400 `invalid_request` | 该字段是数字 / 文本 / 布尔值，只能改成同一类型的值 |
+| 值不是标量 | 400 `invalid_request` | 值只能是文本、数字或布尔 |
+| 请求体缺少 `value` | 400 `invalid_request` | 请求体需要包含 `value` |
+| 名字含反斜杠等无法寻址的字符 | 400 `invalid_request` | 与 `DELETE` 同一套 `_unaddressable_name` 判定 |
+
+**不允许新增字段**：请求里的 `{tool}/{field}` 必须已存在。原因见 §5.6.1。
+
 ### 6.4 维护
 
 `GET /memory/status`
@@ -475,8 +518,15 @@ P0-1 到 P0-3 依赖经验库的存储与状态接口先用最小实现落地；
 - 记忆操作不写入 `state.settings.draft`，并继续用 `request()` 发请求。
 - 不使用 `confirm(` / `prompt(` / `alert(`。
 - 新增 CSS 类：`.memory-panel`、`.memory-status`、`.memory-switches`、`.memory-toolbar`、
-  `.memory-bulk`、`.memory-list`、`.memory-card`、`.memory-detail-dialog`、`.memory-danger`，
-  且包含 `max-width:640px` 下的响应式规则。
+  `.memory-bulk`、`.memory-list`、`.memory-card`、`.memory-detail-dialog`、`.memory-danger`、
+  `.memory-field-input`、`.memory-field-type`，且包含 `max-width:640px` 下的响应式规则。
+- 参数编辑：`app.js` 出现 `PATCH /memory/tool-parameters/{tool}/{field}` 模板串与
+  `data-memory-edit-field` / `-save-field` / `-cancel-field` / `data-memory-field-row` /
+  `data-memory-tool-row`；不存在遗留的 `data-memory-tool=` 写法。
+- **`node --check` 契约**：`test_webui_javascript_parses` 对 `app.js` 与 `charts.js` 各跑一次
+  `node --check`（无 node 时 skip）。字符串断言对括号平衡一无所知 —— 一个多余的 `]`
+  会让整个脚本解析失败，`bootstrap()` 从不执行，页面右上角永远停在“连接中”，
+  而当时 448 条测试全绿。这条断言就是那次的代价换来的。
 
 ### 11.2 行为测试
 
@@ -487,6 +537,8 @@ P0-1 到 P0-3 依赖经验库的存储与状态接口先用最小实现落地；
 - 关闭设置时模型草稿仍触发“放弃未保存”确认，纯记忆操作不触发。
 - 409 冲突时页面自动刷新当前页并给出提示。
 - 维护任务运行中每 2 秒轮询，离开 Tab 后停止，回来后恢复状态。
+- 参数编辑：解析失败或后端拒绝时保持编辑态；值未变不发请求；同族 int/float 互换允许，
+  跨族（数字 ↔ 文本、布尔 ↔ 数字）拒绝；总开关关闭时仍可编辑与删除。
 
 ### 11.3 无障碍与兼容
 

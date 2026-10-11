@@ -287,6 +287,82 @@ def test_slash_in_name_is_rejected_not_silently_missing(client):
     assert client.delete("/memory/tool-parameters/create%2Fmesh/a").status_code == 404
 
 
+def test_tool_parameter_field_edit_round_trip(client):
+    """改一个已记住的值：返回新值，列表里立刻可见。"""
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    response = client.patch("/memory/tool-parameters/create_mesh/size", json={"value": 4.5})
+    assert response.status_code == 200
+    assert response.json() == {"tool": "create_mesh", "field": "size", "value": 4.5}
+    assert client.get("/memory/tool-parameters").json()["tools"][0]["fields"] == {"size": 4.5}
+
+
+def test_tool_parameter_field_edit_keeps_the_type(client):
+    """类型族在写入前就挡住：数字字段不能变成文本。
+
+    参数记忆的价值在于"下次调用直接当默认值用"，类型一变，服务端会以
+    Unexpected keyword argument 或类型错误拒掉整次调用 —— 比没有记忆更糟。
+    """
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    response = client.patch("/memory/tool-parameters/create_mesh/size", json={"value": "很大"})
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
+    assert "数字" in response.json()["error"]
+    assert client.get("/memory/tool-parameters").json()["tools"][0]["fields"] == {"size": 2.0}
+
+
+def test_tool_parameter_field_edit_404_for_unknown_field(client):
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    assert client.patch(
+        "/memory/tool-parameters/create_mesh/nope", json={"value": 1}
+    ).status_code == 404
+    assert client.patch(
+        "/memory/tool-parameters/unknown_tool/size", json={"value": 1}
+    ).status_code == 404
+
+
+def test_tool_parameter_field_edit_requires_value_key(client):
+    """`{"value": null}` 合法（有些字段就是想清成 null 之外的空），但缺键是请求错误。"""
+    tool_memory.remember(
+        "create_mesh", {"algorithm": "delaunay"}, {"type": "object", "properties": {"algorithm": {}}}
+    )
+    assert client.patch("/memory/tool-parameters/create_mesh/algorithm", json={}).status_code == 400
+    assert client.patch(
+        "/memory/tool-parameters/create_mesh/algorithm", json={"val": "x"}
+    ).status_code == 400
+
+
+def test_tool_parameter_field_edit_rejects_path_chars(client):
+    tool_memory.remember(
+        "create_mesh", {"a\\b": 1}, {"type": "object", "properties": {"a\\b": {}}}
+    )
+    response = client.patch("/memory/tool-parameters/create_mesh/a%5Cb", json={"value": 2})
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
+
+
+def test_tool_parameter_edit_survives_the_master_switch(service, client):
+    """记忆总开关关掉后仍要能收拾它留下的数据。
+
+    关掉记忆的动机常常就是"我不想让它再记了"，如果连改和删都一起锁死，
+    用户只能去翻数据目录 —— 那正是这个设置页要消灭的动作。
+    """
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    service.patch_config({"enabled": False})
+    assert service.enabled is False
+    assert client.patch(
+        "/memory/tool-parameters/create_mesh/size", json={"value": 3}
+    ).status_code == 200
+    assert client.delete("/memory/tool-parameters/create_mesh/size").status_code == 204
+
+
 # --------------------------------------------------------------- 维护
 
 

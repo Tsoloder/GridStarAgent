@@ -902,9 +902,52 @@ def test_webui_memory_panel_contract():
         ".memory-panel{", ".memory-status{", ".memory-switches{", ".memory-toolbar-head{",
         ".memory-filters{", ".memory-bulk{", ".memory-list{", ".memory-card{",
         ".memory-detail-dialog{", ".memory-danger{", ".memory-detail-body{",
+        ".memory-field-input{", ".memory-field-type{",
     ):
         assert selector in stylesheet
     assert ".memory-detail-dialog{width:100%;height:100%;max-height:none;border:0;border-radius:0}" in stylesheet
+    # 窄屏下编辑输入框要独占一行，否则 11px 的输入框会被两个按钮挤成看不清的窄条
+    assert ".memory-field-input{flex-basis:100%;order:1;margin:2px 0}" in stylesheet
+
+
+def test_webui_tool_parameter_edit_contract():
+    """参数记忆的编辑入口：改值走 PATCH，且只在原地开一个输入框。
+
+    这条链最容易在细节上断：字段与工具的身份从行上取（按钮不必重复 data 值）、
+    类型由原值决定（界面上改不出类型）、展开态要跨重渲染保住（否则一点"编辑"
+    整条 <details> 就收回去，输入框当场消失）。
+    """
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+
+    # 改值接口：PATCH + 两个路径参数都编码
+    assert "`/memory/tool-parameters/${encodeURIComponent(tool)}/${encodeURIComponent(field)}`" in script
+    assert 'method:"PATCH"' in script
+
+    # 行内编辑：三个动作属性齐备，且没有遗留的旧属性名
+    for hook in (
+        "data-memory-edit-field", "data-memory-save-field", "data-memory-cancel-field",
+        "data-memory-field-row", "data-memory-tool-row", ".memory-field-input",
+    ):
+        assert hook in script
+    assert "data-memory-tool=" not in script  # 旧写法：每个删除按钮各自重复工具名
+
+    # 类型由原值决定，用户改不出类型
+    assert "function memoryParseFieldValue(text, original)" in script
+    assert "布尔字段只能填 true 或 false" in script
+    assert "数字字段只能填数字" in script
+    # 值没变就不发请求，免得白刷 updated_at
+    assert "if (value === original)" in script
+
+    # 展开态与编辑态：重渲染前先把输入框焦点接回去
+    assert "openTools:new Set()" in script
+    assert "editing:null" in script
+    assert 'addEventListener("toggle"' in script
+    assert ", true);" in script  # toggle 不冒泡，必须捕获阶段
+    assert 'input.focus(); input.select();' in script
+
+    # 输入框里 Enter 保存、Escape 取消
+    assert 'event.key === "Enter"' in script
+    assert 'event.key === "Escape"' in script
 
 
 def test_webui_javascript_parses():

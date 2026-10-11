@@ -127,3 +127,91 @@ def test_catalog_and_catalog_all_stay_distinct(memory_path):
     assert structured["tools"][0]["tool"] == "FindGridStarWindow"
     assert structured["tools"][0]["fields"] == {"window_title": "NNW-GridStar"}
     assert tool_memory.counts() == {"tools": 1, "fields": 1}
+
+
+# --------------------------------------------------------- set_field：改一个值
+
+
+def test_set_field_changes_only_the_value(memory_path):
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0, "algorithm": "delaunay"},
+        {"type": "object", "properties": {"size": {}, "algorithm": {}}},
+    )
+    assert tool_memory.set_field("create_mesh", "size", 4.5) == {"ok": True, "value": 4.5}
+    stored = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert stored["create_mesh"]["params"] == {"algorithm": "delaunay", "size": 4.5}
+
+
+def test_set_field_never_adds_a_field(memory_path):
+    """设置页拿不到 schema，猜不出一个能被工具接受的键名。
+
+    新键不仅没用（调用时会被 schema 过滤掉），还会在文件里堆成一个看起来
+    像"记住了"的假记录。所以只允许改已存在的键。
+    """
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    assert tool_memory.set_field("create_mesh", "bogus", 1)["reason"] == "not_found"
+    assert tool_memory.set_field("unknown_tool", "size", 1)["reason"] == "not_found"
+    stored = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert stored["create_mesh"]["params"] == {"size": 2.0}
+
+
+def test_set_field_refuses_a_type_change(memory_path):
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0, "algorithm": "delaunay", "clean": False},
+        {"type": "object", "properties": {"size": {}, "algorithm": {}, "clean": {}}},
+    )
+    assert tool_memory.set_field("create_mesh", "size", "很大") == {
+        "ok": False, "reason": "type_mismatch", "expected": "number",
+    }
+    assert tool_memory.set_field("create_mesh", "algorithm", 3)["expected"] == "string"
+    # bool 必须排在 int 前面判断：Python 里 True 就是 1，顺序反了布尔字段会被当数字
+    assert tool_memory.set_field("create_mesh", "clean", 1)["expected"] == "boolean"
+
+
+def test_set_field_allows_int_and_float_to_swap(memory_path):
+    """整数与小数同族：网格尺寸本来就是 2 和 2.5 之间来回调。"""
+    tool_memory.remember(
+        "create_mesh", {"size": 2, "ratio": 1.2},
+        {"type": "object", "properties": {"size": {}, "ratio": {}}},
+    )
+    assert tool_memory.set_field("create_mesh", "size", 2.5) == {"ok": True, "value": 2.5}
+    assert tool_memory.set_field("create_mesh", "ratio", 2) == {"ok": True, "value": 2}
+    stored = json.loads(memory_path.read_text(encoding="utf-8"))["create_mesh"]["params"]
+    assert stored == {"ratio": 2, "size": 2.5}
+    assert isinstance(stored["ratio"], int)
+
+
+def test_set_field_rejects_non_scalars(memory_path):
+    tool_memory.remember(
+        "create_mesh", {"size": 2.0}, {"type": "object", "properties": {"size": {}}}
+    )
+    for bad in ([1, 2], {"a": 1}, None):
+        result = tool_memory.set_field("create_mesh", "size", bad)
+        assert result["reason"] == "invalid_value", bad
+
+
+def test_set_field_accepts_the_empty_string_that_is_already_there(memory_path):
+    """`window_title: ""` 是真实存在的合法值，空字符串不是"没填"。"""
+    _write(memory_path, STALE_ENTRY)
+    assert tool_memory.set_field(
+        "CaptureGridStarWindow", "window_title", "NNW-GridStar"
+    ) == {"ok": True, "value": "NNW-GridStar"}
+    assert tool_memory.set_field(
+        "CaptureGridStarWindow", "window_title", ""
+    ) == {"ok": True, "value": ""}
+
+
+def test_set_field_refreshes_updated_at(memory_path):
+    _write(memory_path, STALE_ENTRY)
+    assert tool_memory.set_field("CaptureGridStarWindow", "activate", False)["ok"] is True
+    stored = json.loads(memory_path.read_text(encoding="utf-8"))
+    assert stored["CaptureGridStarWindow"]["updated_at"] != "2026-10-10T22:01:57.108384"
+
+
+def test_coerce_widens_integral_floats_for_integer_params(memory_path):
+    """声明成 integer 的参数收到 12.0 同样会被服务端拒，落地前先收窄。"""
+    schema = {"type": "object", "properties": {"unit": {"type": "integer"}}}
+    assert tool_memory.remember("SetUnit", {"unit": 12.0}, schema) == {"unit": 12}
+    assert json.loads(memory_path.read_text(encoding="utf-8"))["SetUnit"]["params"]["unit"] == 12

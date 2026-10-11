@@ -36,6 +36,24 @@ def _rememberable(name: str, value) -> bool:
     return isinstance(value, (str, int, float, bool))
 
 
+def _family(value) -> str:
+    """值所属的类型族。
+
+    bool 必须排在 int 前面判断：Python 里 True 就是 1，顺序反了会把布尔字段
+    当成数字字段，于是 True 可以被改写成 0 而不报错。
+    """
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    return "other"
+
+
+_SCALAR_FAMILIES = ("boolean", "number", "string")
+
+
 def _properties(schema: Optional[Mapping[str, object]]) -> dict:
     if not isinstance(schema, Mapping):
         return {}
@@ -62,6 +80,10 @@ def _coerce(value, schema: Mapping[str, object]):
     try:
         if kind == "integer" and isinstance(value, str):
             return int(value.strip())
+        if kind == "integer" and isinstance(value, float) and value.is_integer():
+            # 设置页只能保证"数字还是数字"，改不出 float 与 int 的差别。声明为
+            # integer 的参数收到 12.0 同样会被服务端拒绝，这里顺手收成 12。
+            return int(value)
         if kind == "number" and isinstance(value, str):
             return float(value.strip())
         if kind == "boolean" and isinstance(value, str):
@@ -226,6 +248,43 @@ def delete_fields(tool: str, fields) -> int:
             data.pop(tool, None)
         _save(data)
     return removed
+
+
+def set_field(tool: str, field: str, value) -> Dict[str, object]:
+    """改写某个已记住字段的值。
+
+    只改值，不新增字段。新键能不能被工具接受要由 schema 说了算，而设置页拿不到
+    schema，猜错一个键就会让服务端以 Unexpected keyword argument 拒绝整次调用
+    （CaptureGridStarWindow 就这样被拦下过四次）。想记一个新参数，走正常的工具
+    审批流程。
+
+    新值必须与旧值同族：整数改成文本之后，服务端会因为类型不符拒掉调用，而现象
+    只是一个"工具调用失败"，很难倒推出是记忆里存了个字符串。这条边界挡的就是它。
+
+    返回 {"ok": True, "value": 新值} 或 {"ok": False, "reason": ...}，
+    reason 取 not_found / type_mismatch / invalid_value。不抛异常，调用方
+    负责把它翻译成 HTTP 语义。
+    """
+    tool = str(tool or "").strip()
+    field = str(field or "").strip()
+    if not tool or not field:
+        return {"ok": False, "reason": "not_found"}
+    family = _family(value)
+    if family not in _SCALAR_FAMILIES:
+        return {"ok": False, "reason": "invalid_value"}
+    data = _load()
+    entry = data.get(tool)
+    values = entry.get("params") if isinstance(entry, dict) else None
+    if not isinstance(values, dict) or field not in values:
+        return {"ok": False, "reason": "not_found"}
+    if _family(values[field]) != family:
+        return {"ok": False, "reason": "type_mismatch", "expected": _family(values[field])}
+    values[field] = value
+    entry["params"] = values
+    entry["updated_at"] = datetime.now().isoformat()
+    data[tool] = entry
+    _save(data)
+    return {"ok": True, "value": value}
 
 
 def counts() -> Dict[str, int]:

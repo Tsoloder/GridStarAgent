@@ -756,6 +756,25 @@ async def memory_tool_parameter_field_delete(tool: str, field_name: str):
     return Response(status_code=204)
 
 
+@app.patch("/memory/tool-parameters/{tool}/{field_name}")
+async def memory_tool_parameter_field_update(tool: str, field_name: str, body: dict = None):
+    """改写一条已记住的参数值。
+
+    只改值，不新增字段：设置页拿不到 schema，编不出一个能被工具接受的键名。
+    """
+    if _unaddressable_name(tool) or _unaddressable_name(field_name):
+        return JSONResponse(
+            {"error": "工具名或字段名包含无法在路径中传递的字符", "code": "invalid_request"},
+            status_code=400,
+        )
+    if not isinstance(body, dict) or "value" not in body:
+        return JSONResponse(
+            {"error": "请求体需要包含 value", "code": "invalid_request"},
+            status_code=400,
+        )
+    return _memory_call(MemoryService.set_tool_field, tool, field_name, body["value"])
+
+
 @app.get("/memory/status")
 async def memory_status():
     return _memory_call(MemoryService.maintenance_status)

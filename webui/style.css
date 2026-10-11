@@ -653,6 +653,10 @@
 .memory-field>code{color:var(--text-bright);font-family:Consolas,monospace;overflow-wrap:break-word}
 .memory-field-value{color:var(--cyan)}
 .memory-field>button{margin-left:auto;flex:none}
+.memory-field-input{flex:1;min-width:0;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--inset);color:var(--text-bright);padding:3px 7px;font:11px Consolas,monospace;outline:none}
+.memory-field-input:focus{border-color:var(--cyan);box-shadow:0 0 0 2px var(--cyan-glow)}
+.memory-field-type{flex:none;color:var(--muted-2);font-size:10px}
+.link-button.approve{color:var(--ok-text)}
 .link-button{border:0;background:none;color:var(--cyan);padding:2px 4px;font-size:11px}
 .link-button:hover{text-decoration:underline}
 .link-button.danger{color:var(--err-text)}
@@ -679,6 +683,11 @@
   .memory-detail-dialog{width:100%;height:100%;max-height:none;border:0;border-radius:0}
   .memory-detail-actions>*{flex:1}
   .memory-detail-spacer{display:none}
+  .memory-field{flex-wrap:wrap}
+  .memory-field-input{flex-basis:100%;order:1;margin:2px 0}
+  .memory-field-type{order:2;margin-right:auto}
+  .memory-field.editing>button{order:3}
+  .memory-field.editing>button:first-of-type{margin-left:0}
 }
 @media(max-width:359px){
   .memory-card-head{flex-wrap:wrap}

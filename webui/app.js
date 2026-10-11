@@ -34,7 +34,8 @@ const state = {
   // 记忆面板：影子期只采集与审核，所有操作立即落盘，不写入 settings.draft
   memory: {loaded:false,loading:false,error:"",summary:null,items:[],page:1,pageSize:20,total:0,
     facets:{scopes:[],task_types:[]},selected:new Set(),detail:null,tools:{tools:[],tool_count:0,field_count:0},
-    maint:{state:"idle",step:null,last_result:null,last_error:null},poll:null,busy:false},
+    maint:{state:"idle",step:null,last_result:null,last_error:null},poll:null,busy:false,
+    editing:null,openTools:new Set()},
   traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
 const el = {
@@ -2512,11 +2513,62 @@ function memoryRenderTools() {
     host.innerHTML = `<p class="memory-empty">还没有记住的工具参数。你在工具审批中确认参数后，这里会出现记录。</p>`;
     return;
   }
+  // 记住展开态：重渲染会把 <details> 收回折叠，正在编辑的那一行会连同输入框一起消失
+  mem.openTools.forEach(name => { if (!tools.some(tool => tool.tool === name)) mem.openTools.delete(name); });
   host.innerHTML = tools.map(tool => {
     const fields = Object.entries(tool.fields || {});
-    const rows = fields.map(([name, value]) => `<li class="memory-field"><code>${escapeHtml(name)}</code><span>=</span><code class="memory-field-value">${escapeHtml(memoryFieldValue(value))}</code><button type="button" class="link-button" data-memory-field="${escapeHtml(name)}" data-memory-tool="${escapeHtml(tool.tool)}">删除</button></li>`).join("");
-    return `<details class="memory-tool" data-memory-tool-row="${escapeHtml(tool.tool)}"><summary><span class="memory-tool-name">${escapeHtml(tool.tool)}</span><span class="memory-tool-meta">${fields.length} 个字段 · 更新于 ${escapeHtml(memoryTime(tool.updated_at))}</span><button type="button" class="link-button danger" data-memory-clear-tool="${escapeHtml(tool.tool)}">清除</button></summary><ul class="memory-fields">${rows}</ul></details>`;
+    const rows = fields.map(([name, value]) => memoryFieldRow(tool.tool, name, value)).join("");
+    const open = mem.openTools.has(tool.tool) ? " open" : "";
+    return `<details class="memory-tool"${open} data-memory-tool-row="${escapeHtml(tool.tool)}"><summary><span class="memory-tool-name">${escapeHtml(tool.tool)}</span><span class="memory-tool-meta">${fields.length} 个字段 · 更新于 ${escapeHtml(memoryTime(tool.updated_at))}</span><button type="button" class="link-button danger" data-memory-clear-tool="${escapeHtml(tool.tool)}">清除</button></summary><ul class="memory-fields">${rows}</ul></details>`;
   }).join("");
+  const input = $(".memory-field-input", host);
+  if (input) { input.focus(); input.select(); }
+}
+
+function memoryFieldRow(tool, name, value) {
+  const mem = memoryState();
+  const editing = mem.editing && mem.editing.tool === tool && mem.editing.field === name;
+  const label = escapeHtml(name);
+  if (editing) {
+    return `<li class="memory-field editing" data-memory-field-row="${label}"><code>${label}</code><span>=</span>` +
+      `<input type="text" class="memory-field-input" aria-label="${label}" value="${escapeHtml(memoryFieldEditText(value))}">` +
+      `<span class="memory-field-type">${escapeHtml(memoryFieldType(value))}</span>` +
+      `<button type="button" class="link-button approve" data-memory-save-field>保存</button>` +
+      `<button type="button" class="link-button" data-memory-cancel-field>取消</button></li>`;
+  }
+  return `<li class="memory-field" data-memory-field-row="${label}"><code>${label}</code><span>=</span>` +
+    `<code class="memory-field-value">${escapeHtml(memoryFieldValue(value))}</code>` +
+    `<button type="button" class="link-button" data-memory-edit-field>编辑</button>` +
+    `<button type="button" class="link-button" data-memory-field>删除</button></li>`;
+}
+
+// 编辑框里放的是"可以直接改的字面量"：文本不带引号（否则 10.76.19.98 得连引号一起改），
+// 数字与布尔按原样字符串给出。
+function memoryFieldEditText(value) {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return "";
+  return String(value);
+}
+
+function memoryFieldType(value) {
+  if (typeof value === "boolean") return "布尔";
+  if (typeof value === "number") return "数字";
+  if (typeof value === "string") return "文本";
+  return "未知";
+}
+
+// 按原类型把输入文本还原成值。类型由原值决定，用户在界面上改不出类型，
+// 后端还会再核一次同类性，两道都挡在"数字字段被改成文本"这个故障前面。
+function memoryParseFieldValue(text, original) {
+  if (typeof original === "string") return text;
+  const raw = String(text).trim();
+  if (typeof original === "boolean") {
+    if (/^(true|1|yes|on)$/i.test(raw)) return true;
+    if (/^(false|0|no|off)$/i.test(raw)) return false;
+    throw new Error("布尔字段只能填 true 或 false");
+  }
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(raw)) throw new Error("数字字段只能填数字");
+  return Number(raw);
 }
 
 function memoryFieldValue(value) {
@@ -2730,6 +2782,62 @@ async function memoryOpenDetail(id) {
 
 // -- 工具参数删除 -----------------------------------------------------------
 
+// 字段行的身份从行本身取：工具名在所属 <details> 上，字段名在 <li> 上。
+// 这样按钮只需要带自己的动作属性，不必每个都重复两个 data 值。
+function memoryFieldIdentity(node) {
+  const row = node && node.closest ? node.closest("[data-memory-field-row]") : null;
+  const toolRow = row && row.closest("[data-memory-tool-row]");
+  if (!row || !toolRow) return null;
+  return {tool: toolRow.dataset.memoryToolRow, field: row.dataset.memoryFieldRow, row};
+}
+
+function memoryStoredValue(tool, field) {
+  const mem = memoryState();
+  const entry = ((mem.tools && mem.tools.tools) || []).find(item => item.tool === tool);
+  return entry ? (entry.fields || {})[field] : undefined;
+}
+
+function memoryStartFieldEdit(tool, field) {
+  const mem = memoryState();
+  mem.editing = {tool, field};
+  mem.openTools.add(tool);
+  memoryRenderTools();
+}
+
+function memoryCancelFieldEdit() {
+  memoryState().editing = null;
+  memoryRenderTools();
+}
+
+async function memorySaveField(tool, field, row) {
+  const mem = memoryState();
+  const original = memoryStoredValue(tool, field);
+  const input = row ? $(".memory-field-input", row) : null;
+  let value;
+  try {
+    value = memoryParseFieldValue(input ? input.value : "", original);
+  } catch (error) {
+    showToast(error.message);
+    if (input) input.focus();
+    return;
+  }
+  if (value === original) { mem.editing = null; memoryRenderTools(); return; }
+  try {
+    await request(`/memory/tool-parameters/${encodeURIComponent(tool)}/${encodeURIComponent(field)}`, {
+      method:"PATCH",
+      body: JSON.stringify({value}),
+    });
+  } catch (error) {
+    // 保持编辑态：值有问题时让人直接改，而不是从头再点一次
+    showToast(error.message);
+    if (input) input.focus();
+    return;
+  }
+  mem.editing = null;
+  await memoryReloadTools();
+  showToast("已更新");
+}
+
 async function memoryDeleteField(tool, field) {
   const ok = await showDialog({
     title: "删除记住的参数",
@@ -2872,9 +2980,27 @@ el.memoryList.addEventListener("change", event => {
 el.memoryTools.addEventListener("click", event => {
   const clear = event.target.closest("[data-memory-clear-tool]");
   if (clear) { event.preventDefault(); memoryClearTool(clear.dataset.memoryClearTool); return; }
-  const field = event.target.closest("[data-memory-field]");
-  if (field) { event.preventDefault(); memoryDeleteField(field.dataset.memoryTool, field.dataset.memoryField); }
+  const identity = memoryFieldIdentity(event.target);
+  if (!identity) return;
+  if (event.target.closest("[data-memory-edit-field]")) { event.preventDefault(); memoryStartFieldEdit(identity.tool, identity.field); return; }
+  if (event.target.closest("[data-memory-save-field]")) { event.preventDefault(); memorySaveField(identity.tool, identity.field, identity.row); return; }
+  if (event.target.closest("[data-memory-cancel-field]")) { event.preventDefault(); memoryCancelFieldEdit(); return; }
+  if (event.target.closest("[data-memory-field]")) { event.preventDefault(); memoryDeleteField(identity.tool, identity.field); }
 });
+el.memoryTools.addEventListener("keydown", event => {
+  if (!event.target.closest || !event.target.closest(".memory-field-input")) return;
+  const identity = memoryFieldIdentity(event.target);
+  if (!identity) return;
+  if (event.key === "Enter") { event.preventDefault(); memorySaveField(identity.tool, identity.field, identity.row); }
+  else if (event.key === "Escape") { event.preventDefault(); memoryCancelFieldEdit(); }
+});
+// toggle 不冒泡，必须用捕获阶段监听，否则重渲染一次展开态就丢了
+el.memoryTools.addEventListener("toggle", event => {
+  const row = event.target.closest ? event.target.closest("[data-memory-tool-row]") : null;
+  if (!row) return;
+  if (row.open) memoryState().openTools.add(row.dataset.memoryToolRow);
+  else memoryState().openTools.delete(row.dataset.memoryToolRow);
+}, true);
 
 // --- 用量统计面板：按供应商/模型聚合历史 token 消耗 ---
 const USAGE_PRESETS = [

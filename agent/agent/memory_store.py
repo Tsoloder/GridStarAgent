@@ -57,6 +57,14 @@ _STORE_MESSAGES = {
     "internal": "经验库出现内部错误",
 }
 
+#: 参数记忆编辑时提示用的类型名，与 tool_memory._family 的返回值一一对应。
+_FAMILY_LABELS = {
+    "boolean": "布尔值",
+    "number": "数字",
+    "string": "文本",
+    "other": "非标量值",
+}
+
 
 class MemoryFault(Exception):
     """带 HTTP 语义的记忆子系统错误。"""
@@ -397,6 +405,30 @@ class MemoryService:
         removed = tool_memory.delete_fields(str(tool), [str(field_name)])
         if not removed:
             raise _fault("not_found", "该字段已不存在", 404)
+
+    def set_tool_field(self, tool: str, field_name: str, value: Any) -> dict:
+        """改写一条已记住的参数值。
+
+        与删除一样不受总开关约束：记忆关掉之后，仍然要能收拾它之前留下的数据。
+        """
+        result = tool_memory.set_field(str(tool), str(field_name), value)
+        reason = str(result.get("reason") or "")
+        if reason == "not_found":
+            raise _fault("not_found", "该字段已不存在，可能刚刚被删掉", 404)
+        if reason == "type_mismatch":
+            expected = _FAMILY_LABELS.get(str(result.get("expected")), "原类型")
+            raise _fault(
+                "invalid_request",
+                "该字段是%s，只能改成同一类型的值" % expected,
+                400,
+            )
+        if reason == "invalid_value":
+            raise _fault("invalid_request", "值只能是文本、数字或布尔", 400)
+        return {
+            "tool": str(tool),
+            "field": str(field_name),
+            "value": result.get("value"),
+        }
 
     def clear_tool_parameters(self) -> dict:
         """清空全部工具参数记忆，返回被删掉的工具数与字段数。"""

@@ -331,6 +331,45 @@ def test_clear_tool_parameters_reports_before_counts(service):
     assert service.list_tool_parameters()["tools"] == []
 
 
+def test_set_tool_field_returns_the_new_value(service):
+    tool_memory.remember("create_mesh", {"size": 2.0},
+                         {"type": "object", "properties": {"size": {}}})
+    assert service.set_tool_field("create_mesh", "size", 4.5) == {
+        "tool": "create_mesh", "field": "size", "value": 4.5,
+    }
+    assert service.list_tool_parameters()["tools"][0]["fields"] == {"size": 4.5}
+
+
+def test_set_tool_field_faults_carry_actionable_messages(service):
+    """错误文案要能直接显示给用户，所以得说清"为什么不行"，而不是回一个码。"""
+    tool_memory.remember("create_mesh", {"size": 2.0, "clean": False},
+                         {"type": "object", "properties": {"size": {}, "clean": {}}})
+    with pytest.raises(MemoryFault) as excinfo:
+        service.set_tool_field("create_mesh", "missing", 1)
+    assert (excinfo.value.code, excinfo.value.status) == ("not_found", 404)
+    assert "字段已不存在" in excinfo.value.message
+
+    with pytest.raises(MemoryFault) as excinfo:
+        service.set_tool_field("create_mesh", "size", "很大")
+    assert (excinfo.value.code, excinfo.value.status) == ("invalid_request", 400)
+    assert "数字" in excinfo.value.message
+
+    with pytest.raises(MemoryFault) as excinfo:
+        service.set_tool_field("create_mesh", "size", [1])
+    assert excinfo.value.status == 400
+    assert "文本、数字或布尔" in excinfo.value.message
+
+
+def test_set_tool_field_works_while_memory_is_switched_off(service):
+    """关掉记忆后仍要能收拾它留下的数据，否则用户只能去翻数据目录。"""
+    tool_memory.remember("create_mesh", {"size": 2.0},
+                         {"type": "object", "properties": {"size": {}}})
+    service.patch_config({"enabled": False})
+    assert service.enabled is False
+    assert service.set_tool_field("create_mesh", "size", 3)["value"] == 3
+    service.delete_tool_field("create_mesh", "size")
+
+
 # --------------------------------------------------------------- 维护
 
 
