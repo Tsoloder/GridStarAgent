@@ -129,6 +129,126 @@ def test_screenshot_note_tells_the_truth_about_vision():
     assert "不会送达模型" in blocked
     assert "a.png" in blocked and "test/text-only" in blocked
     assert "不要重复截图" in blocked
+    # 看不到图时的退路是"问用户"，不是"拿工程数据猜"
+    assert "ask_user_question" in blocked
+    assert "改用工程数据" not in blocked
+
+
+@pytest.mark.asyncio
+async def test_domain_detection_names_the_screenshot_as_the_only_evidence(tmp_path, monkeypatch):
+    """模型类型只能看主视口截图定，参数记忆不是依据。
+
+    现场：真实的导弹参数（growthRate 1.2 / controlLayer 50）躺在
+    <tool_parameter_memory> 里，模型据此宣称"从当前工程已确认的参数记录判断，
+    当前是导弹类模型"——而主视口截图其实已经送达（该轮请求比上一轮多出约
+    1100 input token，正好是一张 2560x1552 图片的价钱）。旧文案只写了
+    "通过视觉分析主视口的模型是飞机还是导弹"，既没说这是唯一依据，
+    也没说参数记忆不算依据，于是模型挑了旁边那个更好读的文本线索。
+    """
+    import session as session_mod
+    import tool_memory
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(tool_memory, "MEMORY_PATH", tmp_path / "tool_memory.json")
+    tool_memory.remember("GenerateANisoDomainGrid", {"controlLayer": 50, "growthRate": 1.2})
+
+    runtime = _ScriptedRuntime([_text_events("好的。")])
+    await _run_direct(runtime, "帮我生成表面网格")
+    prompt = runtime.system_prompts[0]
+
+    # 参数记忆确实作为独立段落注入了，否则这条测试什么也没验到
+    # （注意 agent_loop 里 <domain_detection> 排在 <tool_parameter_memory> 之前，
+    #  用 "controlLayer" in prompt 判断会被 domain_detection 自己的措辞蒙混过去）
+    assert '<tool name="GenerateANisoDomainGrid">' in prompt
+    assert '"controlLayer": 50' in prompt
+
+    assert "<domain_detection>" in prompt
+    assert "这是唯一的判断依据" in prompt
+    # 显式点名参数记忆：不点名，模型会把它归进"工程数据"这一类合法线索
+    assert "不绑定任何工程" in prompt
+    assert "不要用它们「认出」这次在做什么" in prompt
+    # 先观察再分类：说不清特征就不许下结论
+    assert "说不清特征就不要下结论" in prompt
+    # 旧退路把"改用工程数据判断"写成了正常路径，必须消失
+    assert "改用工程数据" not in prompt
+    # 看不到图时问用户，并保持原有的 set_active_category 链路
+    assert "ask_user_question" in prompt
+    assert "set_active_category" in prompt
+    # 截到一张被别的窗口压住的图时，先激活再重截，而不是硬着头皮下结论
+    assert "occluded_warning" in prompt
+    assert "ActivateGridStarWindow" in prompt
+
+
+@pytest.mark.asyncio
+async def test_screenshot_result_keeps_the_tool_own_field_report(tmp_path, monkeypatch):
+    """截图工具如实报出的现场字段必须原样送到模型手里，只摘掉 base64。
+
+    现场：GridStar 被压在别的窗口下面，CaptureGridStarWindow 老老实实回了
+    occluded_warning（"截图时 GridStar 不是前台窗口，画面里可能包含压在上面的
+    其它窗口…先调用 ActivateGridStarWindow"）和 is_foreground=false。
+    旧实现把 result 整块重建成 {width,height,format,note,image_delivered}，
+    这些字段连同 base64 一起没了：模型拿到一张根本没有 GridStar 视口的图，
+    也没有任何解释，而 <domain_detection> 偏偏叫它去读 result 里的
+    is_foreground——那个键已经不存在了。于是它拿提示词里的参数记忆猜类型。
+    """
+    import base64
+    import json
+
+    import agent_loop
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(agent_loop, "UPLOADS_DIR", tmp_path / "uploads")
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 64).decode("ascii")
+    shot = json.dumps({
+        "status": "success",
+        "result": {
+            "image": png, "width": 2560, "height": 1552, "format": "png",
+            "method": "region",
+            "capture_rect": {"left": 0, "top": 0, "width": 2560, "height": 1552},
+            "coord_space": {"max": 1000},
+            "window": {"hwnd": 134538, "is_iconic": False},
+            "is_foreground": False,
+            "occluded_warning": "截图时 GridStar 不是前台窗口，画面里可能包含压在上面的其它窗口",
+        },
+    })
+
+    runtime = _ScriptedRuntime([
+        _tool_call_events("CaptureGridStarWindow", {}),
+        _text_events("看到了。"),
+        _text_events("看到了。"),
+    ])
+    # 还原事故现场：当时用的 deepseek-v4.1-flash 是 capabilities.vision = true，
+    # 图片确实送达了——正因为送到了，模型才会拿着一张没有 GridStar 的截图去找别的线索。
+    vision_config = config_from_dict({
+        "version": 1,
+        "default_model": "test/test-model",
+        "providers": [{
+            "id": "test", "name": "Test", "base_url": "http://localhost:11434",
+            "api_key": "test-key", "default_api": "openai-chat",
+        }],
+        "models": [{"provider": "test", "id": "test-model", "context_window": 32000,
+                    "capabilities": {"vision": True}}],
+    })
+    events = await _run_direct(
+        runtime, "帮我生成表面网格", interaction_mode="auto", config=vision_config,
+        mcp=MockMcpBridge({"CaptureGridStarWindow": shot}),
+    )
+    result = next(e for e in events if e["type"] == "tool_result")["result"]
+    data = json.loads(result)["result"]
+
+    # base64 必须摘掉：留着会让会话文件背上几十万字符
+    assert "image" not in data
+    # 现场字段一个都不能少，模型全靠它们判断"这张图能不能用"
+    assert data["is_foreground"] is False
+    assert data["occluded_warning"]
+    assert data["capture_rect"]["width"] == 2560
+    assert data["coord_space"]["max"] == 1000
+    assert data["method"] == "region"
+    assert data["window"]["hwnd"] == 134538
+    assert data["image_delivered"] is True
+    assert "图片形式发送" in data["note"]
 
 
 def _patch_stream_runtime(monkeypatch, agent_loop, stream_chat):
@@ -367,11 +487,11 @@ def _tool_call_events(name: str, args: dict) -> list:
 
 
 async def _run_direct(runtime, message, ledger=None, mcp=None, display_content="",
-                      interaction_mode="manual"):
+                      interaction_mode="manual", config=None):
     import agent_loop
 
     return [event async for event in agent_loop.run_agent_loop(
-        _make_session(None), message, "base", _make_config(), mcp or MockMcpBridge({}),
+        _make_session(None), message, "base", config or _make_config(), mcp or MockMcpBridge({}),
         MockContextManager(), MockSkillRegistry(), model_runtime=runtime, ledger=ledger,
         display_content=display_content, interaction_mode=interaction_mode,
     )]

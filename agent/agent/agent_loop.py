@@ -490,7 +490,8 @@ def _screenshot_note(model_key: str, path: str, sees_images: bool) -> str:
     return (
         "截图已保存到 uploads/%s，但不会送达模型：当前模型 %s 被配置为不支持图片输入"
         "（capabilities.vision=false），网关会把图片静默丢掉，你看到的只有这段文字。"
-        "不要重复截图；改用工程数据（模型几何参数、对象列表）判断，"
+        "不要重复截图；也不要拿已确认参数、工程名或历史会话去猜模型类型——"
+        "猜错会把整个流程带偏。用 ask_user_question 直接问用户当前是飞机还是导弹，"
         "或请用户在设置里切换到支持视觉（Vision）的模型。"
         % (os.path.basename(path), model_key)
     )
@@ -693,9 +694,25 @@ async def run_agent_loop(
         "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（无参数，直接调用即可；"
         "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
         "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）\n"
-        "2. 通过视觉分析主视口的模型是飞机还是导弹\n"
-        "（若截图结果的 note 说「不会送达模型」，说明当前模型不支持图片输入，"
-        "不要再重复截图：改用工程数据判断，或请用户在设置里切换到带 Vision 的模型）\n"
+        "2. 看主视口里的模型是飞机还是导弹。**这是唯一的判断依据。**\n"
+        "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
+        "进气道 / 大展弦比机翼 等），再据此定类型；说不清特征就不要下结论\n"
+        "**先确认这张图里真的有 GridStar 的主视口**：结果里 is_foreground 为 false、"
+        "或带 occluded_warning 时，说明有别的窗口压在 GridStar 上面，"
+        "你看到的那块内容不是 GridStar 的画面；先调用 ActivateGridStarWindow 把它切到"
+        "前台，再重新截一次，拿到能看清主视口的图再判断。图里找不到三维视口时同样不要"
+        "下结论，重复这一步；实在拿不到干净画面就问用户，绝不要退回去猜\n"
+        "以下都不是依据，不得用来推断或「印证」类型：\n"
+        "  - <tool_parameter_memory> 里的已确认参数。它不绑定任何工程，是历次调用最后"
+        "写入的值：上次做过导弹，growthRate / controlLayer 就会一直躺在那儿，"
+        "换成机翼工程也不会变\n"
+        "  - 历史会话、记忆库里的经验与事实、工程名与文件路径\n"
+        "理由：这些参数本身是**按几何形状选出来的结果**，拿它反推类型是把因果倒过来。"
+        "就算一张图都没看清，也宁可问用户，不要用它们「认出」这是什么模型\n"
+        "（只有截图结果的 note 明确说「不会送达模型」时才走退路：不要重复截图，"
+        "也不要靠参数记录或工程名猜类型——猜错会把整个流程带偏；"
+        "用 ask_user_question 直接问用户当前是飞机还是导弹，"
+        "或请用户在设置里切换到支持视觉（Vision）的模型）\n"
         "3. 根据识别结果调用 set_active_category 设置正确分类\n"
         "4. 通过 / 菜单或 read_skill 加载对应领域的技能再开始工作\n"
         "需要操作界面时：GridStar 不提供 UI 自动化控件，GetUIElementInfo 返回 "
@@ -750,6 +767,9 @@ async def run_agent_loop(
     if memory_catalog:
         system_parts.append(
             memory_catalog + "\n仅把这些已确认参数作为默认建议；当前用户明确给出的参数优先。"
+            "注意适用范围：这些值是历次调用最后写入的结果，不绑定任何工程，"
+            "不能用它们推断当前工程是什么（模型类型、部件划分、工况都必须来自"
+            "当前工程的真实数据和截图）。不要用它们「认出」这次在做什么。"
         )
     # 工具发现机制说明：内容固定（不随已启用分组变化），避免破坏 system 前缀缓存
     if hasattr(mcp, "tool_groups") and mcp.tool_groups():
@@ -1531,13 +1551,21 @@ async def run_agent_loop(
                             try:
                                 _parsed = json.loads(result)
                                 if isinstance(_parsed, dict) and isinstance(_parsed.get("result"), dict):
-                                    _parsed["result"] = {
-                                        "width": _parsed["result"].get("width"),
-                                        "height": _parsed["result"].get("height"),
-                                        "format": _parsed["result"].get("format", "png"),
-                                        "note": _screenshot_note(call_model_id, _image_path, _sees),
-                                        "image_delivered": _sees,
-                                    }
+                                    # 只摘掉 base64，其余字段原样留着。
+                                    # 早先这里是整块重建 result（只留 width/height/format），
+                                    # 把截图工具如实报出的现场信息一起丢了：is_foreground、
+                                    # occluded_warning、capture_rect、method、restore_note。
+                                    # 后果实测过：GridStar 被压在别的窗口下面时，工具明明回了
+                                    # 「截图时 GridStar 不是前台窗口，画面里可能包含压在上面的
+                                    # 其它窗口，需要干净画面时先调用 ActivateGridStarWindow」，
+                                    # 模型却一个字都看不到——只拿到一张没有 GridStar 视口的图，
+                                    # 也没有任何解释，只好拿提示词里的参数记忆去猜模型类型。
+                                    _payload = _parsed["result"]
+                                    _payload.pop("image", None)
+                                    _payload["note"] = _screenshot_note(
+                                        call_model_id, _image_path, _sees)
+                                    _payload["image_delivered"] = _sees
+                                    _parsed["result"] = _payload
                                     result = json.dumps(_parsed, ensure_ascii=False)
                             except (json.JSONDecodeError, TypeError):
                                 pass
