@@ -1,39 +1,63 @@
 语音转文字（voice_asr）模块第三方组件与许可声明
 ================================================
 
-本模块自身代码版权归 GridStarAgent 项目所有。运行时通过子进程调用本机已安装的
-第三方组件，未在仓库内再分发其代码或模型权重。若日后对外再分发下列组件，
-须随附其原始版权与许可声明。
+本模块自身代码（含 native/asr_shim.cpp）版权归 GridStarAgent 项目所有。
+
+与旧版本声明的区别：本模块已从「子进程调用本机已安装的 whisper-cli.exe」改为
+「进程内加载 whisper.dll」。因此本仓库现在会**实际再分发**下列第三方二进制与
+模型权重（内网离线包中随 voice_asr/runtime/ 一并打包），不再是仅在本机引用。
 
 ------------------------------------------------
-1. whisper.cpp（含 ggml）
+1. whisper.cpp（含 ggml 张量库）
 ------------------------------------------------
 来源：https://github.com/ggml-org/whisper.cpp
+版本：v1.8.3（运行时自检 whisper_version() 返回 "1.8.3"）
 许可：MIT License
 版权：Copyright (c) 2023-2026 The ggml authors
+许可全文：voice_asr/runtime/include/LICENSE.whisper.cpp（随包分发）
 
-本机调用路径（CPU 构建）：
-  D:\whiseper_cpp\build_cpu\bin\Release\whisper-cli.exe
+随包分发的文件：
+  voice_asr/runtime/whisper.dll       478,720 字节
+  voice_asr/runtime/ggml.dll           56,832 字节
+  voice_asr/runtime/ggml-base.dll     536,064 字节
+  voice_asr/runtime/ggml-cpu.dll      730,624 字节
+  voice_asr/runtime/include/whisper.h 等 5 个头文件（仅编译期使用）
 
-说明：本模块通过子进程调用 whisper-cli.exe 完成转写，使用固定参数列表
-（非 shell=True），不修改、不再分发其二进制。
+说明：上述 DLL 原件取自 GridStar 历史包
+  D:\TRAE_project\GridStar-history-package\GS_Pack-20261010155413\
+未做任何二进制修改，仅原样复制。
 
 ------------------------------------------------
-2. OpenAI Whisper 模型（ggml-base.bin）
+2. OpenAI Whisper 模型权重（ggml-base.bin）
 ------------------------------------------------
-来源：https://github.com/openai/whisper （模型权重经 ggml 格式转换）
+来源：https://github.com/openai/whisper （权重经 whisper.cpp 转换为 ggml 格式）
 许可：MIT License
 版权：Copyright (c) 2022 OpenAI
 
-本机模型路径：
-  D:\whiseper_cpp\models\ggml-base.bin
+随包分发的文件：
+  voice_asr/runtime/models/ggml-base.bin  147,951,465 字节（约 141 MB）
 
-说明：Whisper 代码与模型权重同为 MIT，可自由商用。本模块仅在本机读取该
-模型文件供 whisper-cli 使用，不再分发。
+说明：Whisper 代码与模型权重同为 MIT，可自由商用、可再分发，须保留版权声明。
+本模块仅在本机读取该模型供 whisper.dll 推理使用。
+
+------------------------------------------------
+3. GridStarAgent 自研 shim（非第三方）
+------------------------------------------------
+voice_asr/native/asr_shim.cpp / asr_shim.h
+voice_asr/native/bin/asr_shim.dll（本机构建产物）
+
+作用：用真正的 whisper.h 在 C++ 侧编译，把 whisper_full_params 结构体的
+布局复杂度冻结在编译期，对 Python 只暴露若干纯标量参数函数，避免 Python
+侧手写结构体导致的 ABI 错位。源码随包分发，可自行重新编译
+（voice_asr/native/build_shim.bat）。
 
 ------------------------------------------------
 许可兼容性备注
 ------------------------------------------------
-- 本方案不使用 ffmpeg（音频在浏览器端编码为 WAV），规避 GPL/LGPL 分发义务。
-- 使用 whisper.cpp 的 CPU 构建，不涉及 CUDA 运行时的再分发。
-- whisper.cpp 与 Whisper 模型均为 MIT，与本项目集成无商业许可限制。
+- 不使用 ffmpeg：音频在浏览器端用 Web Audio 编码为 16kHz/16bit/单声道 WAV，
+  规避 GPL/LGPL 分发义务。
+- 不打包 CUDA / ggml-cuda.dll：包内 whisper.dll 虽为 CUDA 构建，但
+  无 GPU 时自动回落 CPU（运行时日志 whisper_backend_init_gpu: no GPU found），
+  故不涉及 NVIDIA CUDA 运行时的再分发。
+- whisper.cpp 与 Whisper 模型均为 MIT，与本项目的商业使用无冲突。
+- 如需在对外产品中再分发，请保留本文件及 LICENSE.whisper.cpp 全文。

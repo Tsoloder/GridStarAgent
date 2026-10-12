@@ -10,10 +10,15 @@
     │   ├── install_offline.bat         (内网一键安装)
     │   └── requirements.txt            (指向 agent/agent/requirements.txt 的副本)
 
+语音识别（voice_asr）的二进制资产不在 git 里（见 .gitignore），由本脚本单独复制：
+``voice_asr/runtime/``（whisper.dll、ggml*.dll、models/ggml-base.bin 147MB）与
+``voice_asr/native/bin/asr_shim.dll``。没有它们内网机器上 /asr 会一直未就绪。
+
 用法::
 
-    python package_intranet.py                      # 源码 + 离线依赖 (当前平台)
-    python package_intranet.py --no-wheels          # 只打包源码
+    python package_intranet.py                      # 源码 + 语音资产 + 离线依赖 (当前平台)
+    python package_intranet.py --no-wheels          # 源码 + 语音资产
+    python package_intranet.py --no-asr             # 不带语音资产（省约 145MB）
     python package_intranet.py --python-version 311 --platform win_amd64
 """
 
@@ -108,6 +113,45 @@ def copy_sources(stage: Path) -> int:
     return count
 
 
+# --- 语音识别（voice_asr）二进制资产 ---
+# 这些文件被 .gitignore 排除（147MB 模型 + 上游 DLL + 本机构建的 shim），
+# 走 git ls-files 收不到，必须单独复制进离线包，否则内网机器上 /asr 永远未就绪。
+ASR_ASSET_DIRS = (
+    ROOT / "voice_asr" / "runtime",      # whisper.dll / ggml*.dll / models/ggml-base.bin
+    ROOT / "voice_asr" / "native" / "bin",  # asr_shim.dll
+)
+# 模型缺失时不必让打包失败，但必须显式告警：这是「装完发现语音不能用」的根因
+ASR_REQUIRED = (
+    ROOT / "voice_asr" / "runtime" / "models" / "ggml-base.bin",
+    ROOT / "voice_asr" / "runtime" / "whisper.dll",
+    ROOT / "voice_asr" / "native" / "bin" / "asr_shim.dll",
+)
+
+
+def copy_asr_assets(stage: Path) -> tuple[int, int]:
+    """复制 voice_asr 的原生资产。返回 (文件数, 总字节数)。"""
+    count = 0
+    total = 0
+    for base in ASR_ASSET_DIRS:
+        if not base.is_dir():
+            continue
+        for src in sorted(base.rglob("*")):
+            if not src.is_file():
+                continue
+            rel = src.relative_to(ROOT)
+            dst = stage / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            count += 1
+            total += src.stat().st_size
+    return count, total
+
+
+def check_asr_assets() -> list[Path]:
+    """返回缺失的关键语音资产（空列表 = 齐全）。"""
+    return [p for p in ASR_REQUIRED if not p.is_file()]
+
+
 def download_wheels(wheel_dir: Path, pyver: str, platform: str) -> int:
     wheel_dir.mkdir(parents=True, exist_ok=True)
     base = [
@@ -144,6 +188,8 @@ def build_zip(stage: Path, zip_base: Path) -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description="生成内网离线分发包")
     ap.add_argument("--no-wheels", action="store_true", help="只打包源码，不下载依赖")
+    ap.add_argument("--no-asr", action="store_true",
+                    help="不打包语音识别资产（whisper DLL 与 147MB 模型）")
     ap.add_argument("--python-version", default="313", help="目标 Python 版本，如 311 / 313")
     ap.add_argument("--platform", default="win_amd64", help="目标平台，如 win_amd64 / manylinux2014_x86_64")
     ap.add_argument("--out", default=None, help="输出 zip 路径")
@@ -163,6 +209,22 @@ def main() -> None:
     n_src = copy_sources(stage)
     print(f"== 源码归档: {n_src} 个文件 -> {stage}")
 
+    n_asr = 0
+    asr_mb = 0.0
+    if args.no_asr:
+        print("== 语音识别资产: 已按 --no-asr 跳过（内网将无法使用语音输入）==")
+    else:
+        missing = check_asr_assets()
+        if missing:
+            print("== 警告: 语音识别关键资产缺失，内网装好后 /asr 将一直未就绪 ==")
+            for p in missing:
+                print(f"   缺: {p.relative_to(ROOT).as_posix()}")
+            print("   补齐办法: python voice_asr/native/sync_runtime.py"
+                  "（从 GS 安装包同步）后重新打包")
+        n_asr, asr_bytes = copy_asr_assets(stage)
+        asr_mb = asr_bytes / 1024 / 1024
+        print(f"== 语音识别资产: {n_asr} 个文件, {asr_mb:.1f} MB")
+
     n_wheel = 0
     if not args.no_wheels:
         n_wheel = download_wheels(stage / "wheels", args.python_version, args.platform)
@@ -175,7 +237,9 @@ def main() -> None:
     print("\n==== 打包完成 ====")
     print(f"  文件: {zip_path}")
     print(f"  大小: {size_mb:.1f} MB")
-    print(f"  源码: {n_src} 文件" + (f" | 依赖: {n_wheel} wheel" if n_wheel else " | 依赖: 未包含"))
+    print(f"  源码: {n_src} 文件"
+          + (f" | 语音: {n_asr} 文件 ({asr_mb:.1f} MB)" if n_asr else " | 语音: 未包含")
+          + (f" | 依赖: {n_wheel} wheel" if n_wheel else " | 依赖: 未包含"))
 
 
 if __name__ == "__main__":

@@ -1841,8 +1841,12 @@ def _do_cleanup(bg: BackgroundSession):
 
 # --- 语音转文字（voice_asr）模块挂载 ---
 # voice_asr 位于项目根，需将 PROJECT_ROOT 加入 sys.path 才能导入。
+# 本文件在 agent/agent/app.py，故项目根是 parents[1]。
+# 用 absolute() 而非 resolve()：以 `python app.py` 方式启动时 __file__ 是相对路径，
+# resolve() 会拿它去拼当前工作目录，cwd 一变项目根就算错，而守卫只告警，
+# 症状是 /asr 静默消失（用别的 cwd 拉起服务时必现）。
 # 守卫式导入：挂载失败仅告警，不影响主应用启动（沿用 mcp_bridge/litellm 风格）。
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).absolute().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 try:
@@ -1851,7 +1855,8 @@ try:
     app.include_router(voice_router)
     logger.info("voice_asr mounted: POST /asr, GET /asr/health")
 except Exception as exc:  # noqa: BLE001 - 挂载失败不应阻断主应用
-    logger.warning("voice_asr not mounted: %s", exc)
+    # 用 exc_info 留痕：静默降级会让 /asr 消失得无迹可寻
+    logger.warning("voice_asr not mounted: %s", exc, exc_info=True)
 
 
 if __name__ == "__main__":

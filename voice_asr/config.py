@@ -1,7 +1,16 @@
-"""voice_asr 配置层。
+"""voice_asr 配置：路径解析与环境变量覆盖。
 
-所有配置项均支持环境变量覆盖，避免写死路径。
-注意：本机 whisper.cpp 目录名实际为 ``whiseper_cpp``（含拼写），勿擅改默认值。
+运行时资产（whisper.dll / ggml*.dll / 模型）不进 git，它们放在
+``voice_asr/runtime/``，由 ``native/sync_runtime.py`` 从 GS 包同步过来。
+这样整个语音模块是自包含的：拷走 voice_asr/ 就能跑，不依赖 D:\\whiseper_cpp
+这类开发机上的外部目录。
+
+环境变量：
+    WHISPER_MODEL     模型权重路径（默认 runtime/models/ggml-base.bin）
+    WHISPER_DLL       包内 whisper.dll 路径（默认 runtime/whisper.dll）
+    WHISPER_LANG      识别语言，填 auto 走自动检测，默认 zh
+    WHISPER_THREADS   解码线程数，默认 min(8, 物理核数)
+    ASR_MAX_BYTES     单次上传上限，默认 15MB
 """
 
 from __future__ import annotations
@@ -10,57 +19,97 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-# 默认值（可被同名环境变量覆盖）
-DEFAULT_CLI = r"D:\whiseper_cpp\build_cpu\bin\Release\whisper-cli.exe"
-DEFAULT_MODEL = r"D:\whiseper_cpp\models\ggml-base.bin"
+# --- 默认值 -------------------------------------------------------------------
+
 DEFAULT_LANG = "zh"
 DEFAULT_TIMEOUT = 120
-DEFAULT_MAX_BYTES = 15 * 1024 * 1024  # 15728640，约 15MB
+DEFAULT_MAX_BYTES = 15 * 1024 * 1024
+
+# 浏览器端录音统一编码成 16kHz 单声道 16bit WAV，后端按这个采样率转 float32
+SAMPLE_RATE = 16000
+
+_MODEL_REL = Path("runtime") / "models" / "ggml-base.bin"
+_DLL_REL = Path("runtime") / "whisper.dll"
+_SHIM_REL = Path("native") / "bin" / "asr_shim.dll"
+
+# voice_asr/config.py -> voice_asr/ -> 项目根
+_MODULE_DIR = Path(__file__).resolve().parent
+
+
+def module_dir() -> Path:
+    return _MODULE_DIR
+
+
+def runtime_dir() -> Path:
+    """运行时资产目录。默认取模块内的 runtime/，可用 WHISPER_RUNTIME 覆盖。"""
+    override = os.environ.get("WHISPER_RUNTIME")
+    if override:
+        return Path(override)
+    return _MODULE_DIR / "runtime"
+
+
+def shim_dll_path() -> Path:
+    return _MODULE_DIR / _SHIM_REL
+
+
+def model_path() -> Path:
+    override = os.environ.get("WHISPER_MODEL")
+    if override:
+        return Path(override)
+    return _MODULE_DIR / _MODEL_REL
+
+
+def whisper_dll_path() -> Path:
+    override = os.environ.get("WHISPER_DLL")
+    if override:
+        return Path(override)
+    return _MODULE_DIR / _DLL_REL
 
 
 def _env_int(name: str, default: int) -> int:
-    """读取整型环境变量，非法值回退默认。"""
+    """读整数环境变量；缺失或非法一律回退默认值。"""
     raw = os.environ.get(name)
-    if raw is None or raw.strip() == "":
+    if raw is None or not raw.strip():
         return default
     try:
-        value = int(raw)
+        return int(raw.strip())
     except ValueError:
         return default
-    return value if value > 0 else default
+
+
+def _default_threads() -> int:
+    """默认线程数：不超过 8，也不超过物理核数。"""
+    return max(1, min(8, os.cpu_count() or 4))
 
 
 @dataclass(frozen=True)
 class Settings:
-    """ASR 运行配置（不可变）。"""
-
-    cli: str
     model: str
     lang: str
-    timeout: int
+    threads: int
     max_bytes: int
-
-    def cli_exists(self) -> bool:
-        return Path(self.cli).is_file()
+    timeout: int = DEFAULT_TIMEOUT
 
     def model_exists(self) -> bool:
         return Path(self.model).is_file()
 
+    def shim_exists(self) -> bool:
+        return shim_dll_path().is_file()
+
     def is_ready(self) -> bool:
-        """CLI 与模型都存在时才视为就绪。"""
-        return self.cli_exists() and self.model_exists()
+        """三项齐备才算就绪：shim 组件、包内 whisper.dll、模型权重。"""
+        return self.shim_exists() and whisper_dll_path().is_file() and self.model_exists()
 
 
 def load_settings() -> Settings:
-    """从环境变量加载配置（每次调用都重新读取，便于测试注入）。"""
+    """读取当前环境变量生成配置。每次调用都重新读，便于测试与热改。"""
     return Settings(
-        cli=os.environ.get("WHISPER_CLI", DEFAULT_CLI),
-        model=os.environ.get("WHISPER_MODEL", DEFAULT_MODEL),
-        lang=os.environ.get("WHISPER_LANG", DEFAULT_LANG),
-        timeout=_env_int("WHISPER_TIMEOUT", DEFAULT_TIMEOUT),
+        model=str(model_path()),
+        lang=os.environ.get("WHISPER_LANG", DEFAULT_LANG).strip() or DEFAULT_LANG,
+        threads=_env_int("WHISPER_THREADS", _default_threads()),
         max_bytes=_env_int("ASR_MAX_BYTES", DEFAULT_MAX_BYTES),
+        timeout=_env_int("WHISPER_TIMEOUT", DEFAULT_TIMEOUT),
     )
 
 
-# 模块级默认配置实例；测试可 monkeypatch 或直接调用 load_settings()。
 settings = load_settings()

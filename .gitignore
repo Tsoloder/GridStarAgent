@@ -37,3 +37,16 @@ _qt_verify/verify.pro
 
 # 现场验证脚本的运行产物（截图等，每次运行重新生成）
 verify/out/
+
+# 语音识别（voice_asr）的原生运行时与模型：二进制资产，不进 git。
+#   runtime/whisper.dll|ggml*.dll + models/ggml-base.bin（147MB，来自 GS 安装包）
+#   native/bin/asr_shim.dll（由 native/build_shim.bat 本机构建）
+# runtime/include/*.h 是纯文本上游头文件，保持跟踪：它们是重建 shim 的依据。
+# 这些资产由 package_intranet.py 单独复制进离线包，因此 git 忽略不影响内网分发。
+voice_asr/runtime/*.dll
+voice_asr/runtime/models/
+voice_asr/native/bin/
+
+# 语音识别调研期的临时探针与测试素材（ABI dump、探针脚本、测试 wav）。
+# 其中真正要长期保留的已迁到 voice_asr/native/（构建脚本）与 runtime/（资产）。
+preview/
