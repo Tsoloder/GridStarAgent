@@ -15,22 +15,6 @@ allowed-tools: []
 
 ## 开始任务前
 
-### 步骤 0：自动识别模型领域
-
-**每次开始网格生成任务前，必须先执行以下领域识别流程：**
-
-1. 调用 `CaptureGridStarWindow` 截取 GridStar 主窗口截图（无参数，直接调用）。
-2. 通过视觉分析截图中的主视口模型，判断当前加载的模型类型：
-   - **飞机模型**：有机翼、机身、尾翼、发动机吊舱等部件特征
-   - **导弹模型**：有弹体、弹翼（短而窄）、尾翼（舵面）、无发动机吊舱等特征
-3. 根据识别结果调用 `set_active_category` 设置正确的分类：
-   - 飞机模型 → `set_active_category(category="aircraft")`
-   - 导弹模型 → `set_active_category(category="missile")`
-   - 无法识别 → `set_active_category(category="")`（不限制）
-4. 设置完成后，如果实际领域与本技能不匹配（例如检测到导弹但当前是飞机技能），应调用 `read_skill` 读取正确领域的技能后重新开始。
-
-**领域识别之外的界面操作纪律**：`CaptureGridStarWindow` 按进程名（默认 `gridstar.exe`）定位窗口，不靠标题，返回的 `result.window` 里带 `is_foreground` / `is_iconic` / `input_blocked` 等诚实字段，先读这些字段再决定下一步。GridStar 是 Qt 程序、不暴露 UI 自动化控件，`GetUIElementInfo` 返回 0 个控件是正常现象，`ClickUIElement` / `TypeTextInUIElement` 在它身上用不了；要看某处、点某处时，用 `ClickAtPoint` / `DragAtPoint` / `ScrollAtPoint` 按截图上的 **0-1000 归一化坐标**操作（相对 `capture_rect`，左上 0、右下 1000）。坐标工具只保证光标落到目标像素，是否被响应必须重新截图确认。工具报「更高权限 / 完整性级别 / UIPI」时不要重试，直接告诉用户需要以与 GridStar 相同的权限运行本服务。
-
 ### 常规步骤
 
 1. 从实时 MCP 工具列表识别可用工具和 Schema，不凭本文示例虚构工具；每个工具用实时 Schema 构造参数。
