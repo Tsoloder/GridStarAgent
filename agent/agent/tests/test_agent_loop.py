@@ -264,6 +264,85 @@ async def test_domain_detection_names_the_screenshot_as_the_only_evidence(tmp_pa
     assert "ActivateGridStarWindow" in prompt
 
 
+def _vision_config(vision: bool):
+    """一份 capabilities.vision 明确的配置，用来验领域识别那段提示词怎么注入。"""
+    return config_from_dict({
+        "version": 1,
+        "default_model": "test/vision-model",
+        "providers": [{
+            "id": "test", "name": "Test", "base_url": "http://localhost:11434",
+            "api_key": "test-key", "default_api": "openai-chat",
+        }],
+        "models": [{"provider": "test", "id": "vision-model", "context_window": 32000,
+                    "capabilities": {"vision": vision}}],
+    })
+
+
+@pytest.mark.asyncio
+async def test_visionless_model_is_asked_for_the_skill_domain(tmp_path, monkeypatch):
+    """模型看不了图时，领域识别的那条主路径必须被就地换掉，改由用户给领域。
+
+    现场：<domain_detection> 的第 2 步写的是「看主视口里的模型是飞机还是导弹。
+    **这是唯一的判断依据。**」。模型被配置成 capabilities.vision=false（网关会
+    静默丢图）时，这一步无法执行，而主路径旁边全是更好读的文本线索（工程名、
+    <tool_parameter_memory>、历史会话），模型于是挑一个凑结论——识别结果直接
+    决定后面套哪个领域的 Skill 与参数，猜错整条流程都偏。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    runtime = _ScriptedRuntime([_text_events("好的。")])
+    await _run_direct(runtime, "帮我生成表面网格", config=_vision_config(False))
+    prompt = runtime.system_prompts[0]
+
+    assert "<vision_disabled_domain_detection>" in prompt
+    assert "capabilities.vision=false" in prompt
+    assert "ask_user_question" in prompt
+    assert "set_active_category" in prompt
+    # 分类的取值必须与界面的「专业分类」下拉一致，否则用户选的与模型设的不是一回事
+    assert '"aircraft"' in prompt and '"missile"' in prompt
+    assert "专业分类" in prompt
+    # 退路要指出界面位置，而不是让用户自己去猜在哪儿选
+    assert "/ 菜单" in prompt or "/` 菜单" in prompt
+    # auto 模式不能被"计划收尾前不得停下询问"挡回来
+    assert "auto" in prompt
+    # 用户上传的图片同样看不到：不许假装看过
+    assert "不要假装看过" in prompt
+    # 截图那一步要被显式降级，否则模型仍会按主路径反复截图
+    assert "不要为了识别模型类型去调 CaptureGridStarWindow 看图" in prompt
+    assert "不要反复截图" in prompt
+    # 硬闸门段落必须排在通用识别引导之前：反过来的话模型先读到的是"看主视口判断"
+    assert prompt.index("<vision_disabled_domain_detection>") < prompt.index("<domain_detection>")
+    assert "不要截图" in prompt
+    # 问用户时别把问题写死成"是飞机还是导弹"：要说清缺的是领域/技能分类
+    assert "无法自动识别模型类型" in prompt
+    # 旧措辞：把"改用工程数据判断"写成正常路径
+    assert "改用工程数据" not in prompt
+
+    # 用户给出的领域就是"用哪个领域的 Skill"，提示词里要说清这一点
+    assert "请用户给出本次按哪个领域处理" in prompt
+
+
+@pytest.mark.asyncio
+async def test_image_capable_model_keeps_the_original_domain_path(tmp_path, monkeypatch):
+    """能看图的模型拿到的仍是原来那段：新闸门只该在看不到图时出现。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    runtime = _ScriptedRuntime([_text_events("好的。")])
+    await _run_direct(runtime, "帮我生成表面网格", config=_vision_config(True))
+    prompt = runtime.system_prompts[0]
+
+    assert "<domain_detection>" in prompt
+    assert "这是唯一的判断依据" in prompt
+    assert "<vision_disabled_domain_detection>" not in prompt
+    assert "capabilities.vision=false" not in prompt
+    # 主路径的第 2 步不该被"改用问用户"的插入语污染
+    assert "不要截图" not in prompt
+
+
 @pytest.mark.asyncio
 async def test_screenshot_result_keeps_the_tool_own_field_report(tmp_path, monkeypatch):
     """截图工具如实报出的现场字段必须原样送到模型手里，只摘掉 base64。

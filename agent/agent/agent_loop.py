@@ -498,6 +498,43 @@ def _screenshot_note(model_key: str, path: str, sees_images: bool) -> str:
     )
 
 
+def _vision_disabled_domain_gate(model_key: str) -> str:
+    """模型看不到图时，把领域识别的第 2 步（看主视口定飞机/导弹）就地换掉。
+
+    只靠 <domain_detection> 末尾那句括号说明不够：主路径写的是「看主视口里的模型
+    是飞机还是导弹。**这是唯一的判断依据。**」，模型会照主路径走，然后要么反复
+    截图，要么拿旁边更好读的文本线索（工程名、参数记忆）凑一个结论。这里把退路
+    提成一份独立契约，说清缺的分类该由用户给，并顺带堵掉"假装看过"用户上传的图。
+
+    只在 capabilities.vision 为 false 时注入：能看图的模型拿到的是原来那份段落。
+    这份段落跟着模型走、不随会话状态变，不会破坏 system 前缀缓存。
+    """
+    return (
+        "<vision_disabled_domain_detection>\n"
+        "当前模型 %s 的 capabilities.vision=false：图片不会送达你，你只能收到截图"
+        "结果的文字元数据。因此这次的领域识别不走下面的截图第 2 步，改走这一段：\n"
+        "1. 不要为了识别模型类型去调 CaptureGridStarWindow 看图。截图可以调"
+        "（操作界面仍然需要它），但不要指望从图里读出模型类型，更不要反复截图。\n"
+        "2. 也不要拿工程名、文件名、已确认参数（<tool_parameter_memory>）、历史会话"
+        "或记忆库来猜类型：那些是按几何形状选出来的结果，拿它们反推类型是把因果倒过来。\n"
+        "3. 用 ask_user_question 问一轮，请用户给出本次按哪个领域处理（也就是用哪个"
+        "领域的 Skill）：\n"
+        "   问题示例：「当前模型看不了截图，无法自动识别模型类型，请确认本次按哪个领域处理」\n"
+        "   选项：Aircraft 飞机（value: \"aircraft\"）/ Missile 导弹（value: \"missile\"）/ "
+        "不确定，先不定分类（value: \"\"）\n"
+        "4. 用户答完调用 set_active_category（aircraft / missile；选「不确定」就传空串，"
+        "不限制分类），再加载该分类下的 Skill 开工。用户若顺手说了具体用哪个 Skill，"
+        "以用户的说法为准，仍要 read_skill 把文档读进来。\n"
+        "5. 用户没回答、或说不知道时不得擅自开工：说明当前缺分类，请用户在界面顶部的"
+        "「专业分类」里选好，再在 / 菜单里选该领域的 Skill；说完停下等用户。\n"
+        "6. 用户上传了图片附件时同样看不到内容：不要假装看过，也不要据文件名猜图片里"
+        "是什么，直接告诉用户当前模型不支持图片输入，请他用文字说明。\n"
+        "7. auto 模式下这一轮照问：缺无法推导的必填信息是 ask_user_question 允许的"
+        "停顿场景，不算违反 auto 模式的「不得停下询问」；问完继续往下做。\n"
+        "</vision_disabled_domain_detection>"
+    ) % model_key
+
+
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompt"
 
 
@@ -697,10 +734,24 @@ async def run_agent_loop(
             skill_registry.read_skill(skill_id), selected_params.get(skill_id, {})
         ))
 
+    # 本轮实际调用的模型：系统提示词里要按它判断"能不能看图"，
+    # 所以这里的取值必须与循环内每轮的 call_model_id 完全一致。
+    call_model_id = model_override or session.ResolvedModelId(config.default_model)
+    _sees_images = _model_sees_images(config, call_model_id)
+    # 看不到图时，第 2 步的"看主视口"没有可执行的内容：就地换成问用户。
+    # 能看图时不贴这段，主路径保持原样。
+    _step2_without_vision = "" if _sees_images else (
+        "（图片不会送达你：这一步换 <vision_disabled_domain_detection> 里的问法，"
+        "不要截图。）\n"
+    )
     system_parts = []
     if base_system_prompt:
         system_parts.append(base_system_prompt)
     system_parts.append(skill_registry.catalog_prompt(selected_ids))
+    # 模型看不了图时，先立一份"问用户要领域"的契约，再把通用识别引导贴上：
+    # 顺序反过来的话，模型会先读到"看主视口判断飞机还是导弹"这条主路径。
+    if not _sees_images:
+        system_parts.append(_vision_disabled_domain_gate(call_model_id))
     # 通用领域识别引导：不依赖技能是否选中，模型始终知道该截图识别模型类型
     system_parts.append(
         "<domain_detection>\n"
@@ -712,7 +763,8 @@ async def run_agent_loop(
         "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
         "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）\n"
         "2. 看主视口里的模型是飞机还是导弹。**这是唯一的判断依据。**\n"
-        "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
+        + _step2_without_vision
+        + "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
         "进气道 / 大展弦比机翼 等），再据此定类型；说不清特征就不要下结论\n"
         "**先确认这张图里真的有 GridStar 的主视口**：结果里 is_foreground 为 false、"
         "或带 occluded_warning 时，说明有别的窗口压在 GridStar 上面，"
@@ -729,7 +781,8 @@ async def run_agent_loop(
         "（只有截图结果的 note 明确说「不会送达模型」时才走退路：不要重复截图，"
         "也不要靠参数记录或工程名猜类型——猜错会把整个流程带偏；"
         "用 ask_user_question 直接问用户当前是飞机还是导弹，"
-        "或请用户在设置里切换到支持视觉（Vision）的模型）\n"
+        "或请用户在设置里切换到支持视觉（Vision）的模型。"
+        "这时顺便问清本次按哪个领域处理，问完再往下走）\n"
         "3. 根据识别结果调用 set_active_category 设置正确分类\n"
         "4. 通过 / 菜单或 read_skill 加载对应领域的技能再开始工作\n"
         "需要操作界面时：GridStar 不提供 UI 自动化控件，GetUIElementInfo 返回 "
@@ -745,7 +798,8 @@ async def run_agent_loop(
     if selected_category:
         system_parts.append(
             "<selected_category>%s</selected_category>\n"
-            "当前专业分类为 %s，优先使用该分类下的技能和参考知识。"
+            "当前专业分类为 %s（用户在界面的「专业分类」里选的，或前几轮已经确认过），"
+            "优先使用该分类下的技能和参考知识；分类已定，不要再问用户本次按哪个领域处理。"
             % (selected_category, selected_category)
         )
     if selected_bodies:
@@ -871,7 +925,6 @@ async def run_agent_loop(
             yield {"type": "error", "message": "Max turns reached", "retryable": False}
             return
 
-        call_model_id = model_override or session.ResolvedModelId(config.default_model)
         compressed_messages = await ctx_mgr.compress(
             session.messages, session.id, config, call_model_id, model_runtime
         )
