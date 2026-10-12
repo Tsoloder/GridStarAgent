@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import io
 import json
 import logging
 import os
@@ -31,6 +32,13 @@ import threading
 import time
 from ctypes import wintypes
 from typing import Callable, Optional
+
+try:  # Pillow 只用来在回拍图上画十字标记；缺失时退化成不带标记的原图
+    from PIL import Image as _PILImage
+    from PIL import ImageDraw as _PILImageDraw
+except ImportError:  # pragma: no cover - 取决于运行环境
+    _PILImage = None
+    _PILImageDraw = None
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +146,20 @@ _PASTE_SETTLE_S = 0.08
 _UI_SETTLE_S = 0.12
 # 等待窗口从最小化状态还原的上限
 _RESTORE_TIMEOUT_S = 1.0
+
+# 坐标操作后的回拍：等界面把点击后果画出来，再抓一块点击点周围的局部图。
+# 整窗回拍一张 1920x1392 大约 1.9k token，而视觉模型的上下文只有 32k，连点几次
+# 就把预算吃光；720x540 的局部图约 0.8k token，且足够看清按下的那个按钮变了没有。
+_POST_SHOT_SETTLE_S = 0.35
+_POST_SHOT_MAX_W = 720
+_POST_SHOT_MAX_H = 540
+_POST_SHOT_MARK_R = 14
+
+# 最近一次截图的坐标基准。截图时记下来，坐标操作时拿它和当前窗口矩形比对：
+# 窗口在截图之后被挪动或改了大小时，同一个归一化坐标会落到画面里的另一个位置，
+# 而工具回报里只有当前矩形，模型无从知道基准已经漂了。这里把它点破。
+_LAST_BASIS: Optional[tuple] = None
+_BASIS_LOCK = threading.Lock()
 
 # UIA 调用超时：超过则判定该 STA 线程卡死，重建工作线程
 _UIA_CALL_TIMEOUT_S = float(os.environ.get("GRIDSTAR_UIA_TIMEOUT", "20"))
@@ -1030,6 +1052,207 @@ def _grab_png(region: dict) -> bytes:
         return mss.tools.to_png(shot.rgb, shot.size)
 
 
+def _rect_key(rect: Optional[dict]) -> Optional[tuple]:
+    """把矩形压成一个可比较的元组，None 表示「没有基准」。"""
+    if not isinstance(rect, dict):
+        return None
+    try:
+        return (int(rect["left"]), int(rect["top"]),
+                int(rect["width"]), int(rect["height"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _mark_basis(info: dict, region: dict) -> None:
+    """截图成功后记下这次用的坐标基准。"""
+    global _LAST_BASIS
+    key = _rect_key(region)
+    with _BASIS_LOCK:
+        _LAST_BASIS = (int(info.get("hwnd") or 0), key) if key else None
+
+
+def _basis_check(info: dict, region: dict) -> dict:
+    """把「本次点击的基准与上次截图是否一致」讲清楚。"""
+    current = _rect_key(region)
+    with _BASIS_LOCK:
+        last = _LAST_BASIS
+    if not last or last[1] is None:
+        return {
+            "status": "no_capture",
+            "current_rect": dict(region),
+            "note": (
+                "本会话还没有可对照的截图基准，无法判断你手上的坐标是不是来自本窗口的当前"
+                "画面。定位前请先用 CaptureGridStarWindow 截一张图。"
+            ),
+        }
+    last_hwnd, last_rect = last
+    if last_hwnd == int(info.get("hwnd") or 0) and last_rect == current:
+        return {
+            "status": "fresh",
+            "current_rect": dict(region),
+            "captured_rect": {
+                "left": last_rect[0], "top": last_rect[1],
+                "width": last_rect[2], "height": last_rect[3],
+            },
+            "note": "本次操作的坐标基准与最近一次截图完全一致，截图上的位置可以直接换算成点击坐标。",
+        }
+    captured = {"left": last_rect[0], "top": last_rect[1],
+                "width": last_rect[2], "height": last_rect[3]}
+    result = {
+        "status": "stale",
+        "current_rect": dict(region),
+        "captured_rect": captured,
+        "captured_hwnd": last_hwnd,
+        "note": (
+            "警告：坐标基准已经漂了。你手上的归一化坐标来自最近一次截图时的矩形 "
+            "%s，而本次操作实际使用的矩形是 %s。同一个归一化坐标现在会落到画面里的另一个"
+            "位置，继续按记下来的坐标点，点的就不是截图上的那一个控件。请重新调用 "
+            "CaptureGridStarWindow 截图并重新定位；如果你确实要按旧基准操作，先把窗口恢复成"
+            "%s 再重试。" % (captured, dict(region), captured)
+        ),
+    }
+    if last_hwnd != int(info.get("hwnd") or 0):
+        result["hwnd_changed"] = True
+        result["note"] += "（另外，当前匹配到的窗口 hwnd=%s 与截图时的 hwnd=%s 不是同一个窗口。）" % (
+            int(info.get("hwnd") or 0), last_hwnd)
+    return result
+
+
+def _coerce_flag(value, default: bool = False) -> bool:
+    """把工具参数里的布尔开关读成真正的布尔。
+
+    模型经常把 false 写成字符串 "false"、"0"、"no"，或者干脆写成 null。
+    这些全都是假值，但直接 bool("false") 会得到 True——危险方向正好相反的那一边
+    （dry_run 被当成 True 就等于不点，post_shot 被当成 False 就等于不回拍）。
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("false", "0", "no", "off", "none", "null", ""):
+            return False
+        if text in ("true", "1", "yes", "on"):
+            return True
+    return bool(value)
+
+
+def _pointer_evidence(px: int, py: int) -> dict:
+    """预演时回报「这个像素上压着谁」。
+
+    只在 dry_run 里用，作为点击前的一次证据固化：事后争论「当时那个位置上是哪个
+    按钮」时，这份记录比回忆可靠。用 WindowFromPoint 而不是 GetCursorPos，是为了
+    不受之后用户自己挪动鼠标的影响。
+    """
+    try:
+        hwnd = int(win32gui.WindowFromPoint((int(px), int(py))) or 0)
+        root = int(win32gui.GetAncestor(hwnd, win32con.GA_ROOT) or hwnd) if hwnd else 0
+        cls = win32gui.GetClassName(hwnd) if hwnd else ""
+        title = win32gui.GetWindowText(hwnd) if hwnd else ""
+        pid = _window_pid(hwnd) if hwnd else None
+    except Exception as exc:  # noqa: BLE001 - 取证失败不该让预演失败
+        return {"ok": False, "error": "在目标像素上做命中测试失败：%s" % exc}
+    return {
+        "ok": True,
+        "pixel": {"x": int(px), "y": int(py)},
+        "hwnd_under_point": hwnd,
+        "root_hwnd_under_point": root,
+        "pid_under_point": pid,
+        "class_name_under_point": cls,
+        "title_under_point": (title or "")[:80],
+    }
+
+
+def _point_crop(px: int, py: int, region: dict) -> dict:
+    """围绕一个屏幕像素裁一块局部矩形，并夹回窗口区域。
+
+    回拍只截局部，是为了 token：整窗图会把上下文吃光，而验证「按下去的是不是那个
+    按钮」只需要点击点周围这一小块。
+    """
+    scale = min(1.0, _POST_SHOT_MAX_W / max(1, region["width"]),
+                _POST_SHOT_MAX_H / max(1, region["height"]))
+    width = max(64, int(round(region["width"] * scale)))
+    height = max(64, int(round(region["height"] * scale)))
+    width = min(width, region["width"])
+    height = min(height, region["height"])
+    left = min(max(int(px) - width // 2, region["left"]),
+               region["left"] + region["width"] - width)
+    top = min(max(int(py) - height // 2, region["top"]),
+              region["top"] + region["height"] - height)
+    return {"left": left, "top": top, "width": width, "height": height}
+
+
+def _mark_and_encode_png(png_bytes: bytes, px: int, py: int, sub: dict) -> tuple:
+    """在回拍图的操作点上画十字，再编码成 base64。
+
+    Returns:
+        (base64 字符串, 降级原因)。降级原因非空表示标记没画上（缺 Pillow 或解码失败），
+        此时返回的是不带标记的原图，调用方必须把原因如实告诉模型，否则模型会以为
+        自己看到的那张图上没有十字是因为点没落对位置。
+    """
+    if _PILImage is None or _PILImageDraw is None:
+        return base64.b64encode(png_bytes).decode("utf-8"), "未安装 Pillow，回拍图没有画点击点标记"
+    try:
+        with io.BytesIO(png_bytes) as buf:
+            image = _PILImage.open(buf)
+            image.load()
+            image = image.convert("RGB")
+            draw = _PILImageDraw.Draw(image)
+            cx = max(0, min(int(px) - sub["left"], sub["width"] - 1))
+            cy = max(0, min(int(py) - sub["top"], sub["height"] - 1))
+            red = (255, 0, 0)
+            draw.line([(cx - _POST_SHOT_MARK_R, cy), (cx + _POST_SHOT_MARK_R, cy)], fill=red, width=2)
+            draw.line([(cx, cy - _POST_SHOT_MARK_R), (cx, cy + _POST_SHOT_MARK_R)], fill=red, width=2)
+            out = io.BytesIO()
+            image.save(out, format="PNG")
+        return base64.b64encode(out.getvalue()).decode("utf-8"), ""
+    except Exception as exc:  # noqa: BLE001 - 标不上标记不该让整次操作失败
+        return (base64.b64encode(png_bytes).decode("utf-8"),
+                "在回拍图上画标记失败（%s），这张是没有标记的原图" % exc)
+
+
+def _point_shot(px: int, py: int, region: dict, tool: str, action: str) -> dict:
+    """操作之后的回拍：抓点击点周围的局部图，并在操作点上画一个十字。
+
+    返回的 payload 带 image / width / height，与 CaptureGridStarWindow 同形，
+    所以 agent 侧会把图存进 uploads 并在下一轮以图片形式发给模型。
+    """
+    sub = _point_crop(px, py, region)
+    payload = {
+        "view": "detail_around_point",
+        "region": dict(sub),
+        "image_scale": round(sub["width"] / float(max(1, region["width"])), 4),
+        "marked_pixel_in_image": {
+            "x": max(0, min(int(px) - sub["left"], sub["width"] - 1)),
+            "y": max(0, min(int(py) - sub["top"], sub["height"] - 1)),
+        },
+        "note": (
+            "这是 %s 之后立刻回拍的局部图（%sx%s，取自窗口 %s 内以操作点为中心的一块），"
+            "红十字符号就是本次操作点，操作点就在十字中心。图上的坐标不是整窗坐标，"
+            "不要拿它换算下一次点击；要重新定位请再调用 CaptureGridStarWindow。"
+            % (action, sub["width"], sub["height"], tool)
+        ),
+    }
+    try:
+        png_bytes = _grab_png(sub)
+        image_b64, degrade_reason = _mark_and_encode_png(png_bytes, px, py, sub)
+        payload["image"] = image_b64
+        payload["width"] = sub["width"]
+        payload["height"] = sub["height"]
+        payload["format"] = "png"
+        if degrade_reason:
+            payload["post_shot_warning"] = degrade_reason
+    except Exception as exc:  # noqa: BLE001 - 操作已经做完了，回拍失败不能报成操作失败
+        logger.warning("坐标操作回拍失败: %s", exc)
+        payload["post_shot_error"] = (
+            "操作已经执行，但操作后的回拍失败：%s。要确认结果请手动调用 CaptureGridStarWindow。" % exc
+        )
+    return payload
+
+
 def _buffer_dominant_ratio(data: bytes, sample_limit: int = 20000) -> float:
     """抽样统计「出现最多的那一种颜色占多大比例」，用来判断图是不是空白。
 
@@ -1276,6 +1499,7 @@ def _point_payload(info: dict, region: dict, x: float, y: float, coord_space: st
         ),
     }
     payload.update(extra)
+    payload["basis_check"] = _basis_check(info, region)
     return payload
 
 
@@ -2024,6 +2248,9 @@ def _capture_gridstar(window_title: str = "", activate: bool = True,
             "（前台 hwnd=%s）。需要干净画面时先调用 ActivateGridStarWindow。"
             % win32gui.GetForegroundWindow()
         )
+    # 记下这次截图的坐标基准：后续 ClickAtPoint / DragAtPoint / ScrollAtPoint 会拿它
+    # 和当时的窗口矩形比对，基准漂了就明说，而不是照旧坐标点到别的位置去。
+    _mark_basis(info, region)
     return _ok(payload)
 
 
@@ -2301,7 +2528,8 @@ def SendKeyboardShortcut(keys: str, window_title: str = "", allow_close: bool = 
 
 def ClickAtPoint(x: float, y: float, coord_space: str = "normalized",
                  button: str = "left", clicks: int = 1,
-                 window_title: str = "") -> str:
+                 window_title: str = "", dry_run: bool = False,
+                 post_shot: bool = True) -> str:
     """在 GridStar 窗口的指定画面坐标上点击。
 
     这条通道是为 GridStar 这类「不提供任何 UI 自动化控件」的程序准备的：它的 UIA
@@ -2312,9 +2540,14 @@ def ClickAtPoint(x: float, y: float, coord_space: str = "normalized",
     进程（否则 UIPI 会丢掉输入）、窗口已从最小化还原并确实处于前台、目标点落在
     截图矩形内、目标点上压着的确实是 GridStar 自己的窗口（否则事件会落到别人身上）。
 
-    注意：这里只能确认光标真的落到了目标像素，无法确认 GridStar 是否响应。点击
-    可能触发不可逆的操作（生成网格、删除几何），所以先用 CaptureGridStarWindow
-    看清画面再点，点完再截一张图确认结果。
+    坐标基准是「执行这一刻的窗口矩形」，不一定等于你上次截图时的矩形：如果窗口在
+    截图之后被挪动、最大化或还原，同一个归一化坐标会落到画面里的另一个位置。工具
+    回报里的 coord_space.rect 是本次实际用的基准；发现它与截图时的 capture_rect
+    不一致时，必须重新截图再定位。
+
+    默认会在点击后自动回拍一张点击点周围的局部图（带红十字标记），随结果一起返回。
+    这是本工具唯一的自我校验手段：看那张图确认按下去的是不是你要的按钮。点击可能
+    触发不可逆的操作（生成网格、删除几何），拿不准时先用 dry_run=True 预演。
 
     Args:
         x: 横坐标。默认 0-1000 归一化，0=左边缘，1000=右边缘。
@@ -2323,9 +2556,16 @@ def ClickAtPoint(x: float, y: float, coord_space: str = "normalized",
         button: "left"（默认）/ "right" / "middle"。右键常用于弹出上下文菜单。
         clicks: 点击次数，1（默认）单击、2 双击。
         window_title: 可选，进程匹配之后的标题过滤关键字。
+        dry_run: True 时只预演不点击：定位窗口、换算像素、做命中测试，然后回报
+            「会落在哪个像素、那个像素上是谁」，不注入任何鼠标事件。用于点击前的
+            二次确认，或只想核对坐标换算时。
+        post_shot: 是否在点击后自动回拍局部图，默认 True。置 False 只在明确不需要
+            看结果时用（例如连续的多次微调），省的是模型的图片预算。
 
     Returns:
-        JSON 字符串，含实际落点的屏幕像素、归一化回读值、注入事件条数与光标校验。
+        JSON 字符串，含实际落点的屏幕像素、归一化回读值、注入事件条数与光标校验；
+        post_shot 为真时还含回拍图（image / width / height，与 CaptureGridStarWindow
+        同形，会被自动送达模型）。
     """
     win_error = _pywin32_error("ClickAtPoint")
     if win_error:
@@ -2349,12 +2589,40 @@ def ClickAtPoint(x: float, y: float, coord_space: str = "normalized",
     if hit_error:
         return hit_error
 
+    preview = _coerce_flag(dry_run)
+    want_shot = _coerce_flag(post_shot, default=True)
+    if preview:
+        payload = _point_payload(
+            info, region, x, y, coord_space, px, py,
+            0, 0, _cursor_pos(),
+            {
+                "action": "click_at_point",
+                "dry_run": True,
+                "button": (button or "left").lower(),
+                "clicks": int(clicks),
+                "activated": bool(activated),
+                "dpi_aware": bool(_DPI_AWARE),
+                "dry_run_note": (
+                    "预演：没有注入任何鼠标事件，窗口没有收到这次点击。以上像素就是真正点击时会"
+                    "落到的那一个；确认无误后去掉 dry_run 再调用一次才会真的点下去。"
+                ),
+            },
+        )
+        payload["verified"] = "dry_run"
+        payload["verification_note"] = (
+            "这是预演，没有任何输入被注入，界面状态与调用前完全一样。"
+            "上面回报的像素就是真点时会落到的位置。"
+        )
+        payload["pointer_evidence"] = _pointer_evidence(px, py)
+        return _ok(payload)
+
     outcome = _mouse_click(px, py, button=button, clicks=int(clicks))
     payload = _point_payload(
         info, region, x, y, coord_space, px, py,
         outcome["injected"], outcome["expected"], outcome["cursor"],
         {
             "action": "click_at_point",
+            "dry_run": False,
             "button": outcome["button"],
             "clicks": outcome["clicks"],
             "activated": bool(activated),
@@ -2366,19 +2634,38 @@ def ClickAtPoint(x: float, y: float, coord_space: str = "normalized",
             "SendInput 只接受了 %s/%s 个事件，部分输入可能没进系统输入流。"
             % (outcome["injected"], outcome["expected"])
         )
+    if want_shot:
+        time.sleep(_POST_SHOT_SETTLE_S)
+        shot = _point_shot(px, py, region, "ClickAtPoint", "点击")
+        payload["post_shot"] = shot
+        payload.update({k: shot[k] for k in
+                        ("image", "width", "height", "format") if k in shot})
+        # 回拍失败的原因必须提到顶层：模型只看 image/width/height，藏在 post_shot
+        # 里的失败原因等于没报，它会以为图上没红十字符号是点没落对位置。
+        for key in ("post_shot_error", "post_shot_warning"):
+            if key in shot:
+                payload[key] = shot[key]
+        if "image" in shot:
+            payload["verified"] = "post_shot"
+            payload["verification_note"] = (
+                "点击已注入，并附上了点击点周围的回拍图（红十字符号即本次操作点）。"
+                "界面是否按预期变化，以那张图为准；要重新定位下一次点击请再截整窗图。"
+            )
     return _ok(payload)
 
 
 def DragAtPoint(from_x: float, from_y: float, to_x: float, to_y: float,
                 coord_space: str = "normalized", button: str = "left",
-                duration_ms: int = 400, window_title: str = "") -> str:
+                duration_ms: int = 400, window_title: str = "",
+                dry_run: bool = False, post_shot: bool = True) -> str:
     """在 GridStar 窗口里按下、拖动、松开（用于旋转/平移三维视图、拖拽对象）。
 
     拖动过程会分步投递中间的鼠标移动事件：三维视图的旋转角度是靠拖动过程中的
     移动累计出来的，只给起点和终点转不动。
 
     前置条件与 ClickAtPoint 相同（进程存在、UIPI 放行、窗口真的在前台、两点都在
-    截图矩形内）。和点击一样，这里无法确认 GridStar 是否真的响应了拖动。
+    截图矩形内）。坐标基准也相同：用的是执行这一刻的窗口矩形，窗口挪过就先重新
+    截图。拖动后同样无法从程序拿到回执，所以默认回拍一张终点周围的局部图。
 
     Args:
         from_x: 起点横坐标（默认 0-1000 归一化）。
@@ -2389,9 +2676,12 @@ def DragAtPoint(from_x: float, from_y: float, to_x: float, to_y: float,
         button: "left"（默认）/ "right" / "middle"。
         duration_ms: 拖动耗时，默认 400 毫秒（越长越平滑，上限 5000）。
         window_title: 可选，进程匹配之后的标题过滤关键字。
+        dry_run: True 时只预演不拖动：回报起点与终点会落在哪两个像素，不注入事件。
+        post_shot: 是否在拖动后自动回拍终点周围的局部图，默认 True。
 
     Returns:
-        JSON 字符串，含起点/终点的屏幕像素、注入事件条数与光标最终位置。
+        JSON 字符串，含起点/终点的屏幕像素、注入事件条数与光标最终位置；post_shot
+        为真时还含回拍图（image / width / height）。
     """
     win_error = _pywin32_error("DragAtPoint")
     if win_error:
@@ -2415,12 +2705,47 @@ def DragAtPoint(from_x: float, from_y: float, to_x: float, to_y: float,
         if hit_error:
             return hit_error
 
+    preview = _coerce_flag(dry_run)
+    want_shot = _coerce_flag(post_shot, default=True)
+    if preview:
+        payload = _point_payload(
+            info, region, to_x, to_y, coord_space, px1, py1,
+            0, 0, _cursor_pos(),
+            {
+                "action": "drag_at_point",
+                "dry_run": True,
+                "button": (button or "left").lower(),
+                "from_screen_pixel": {"x": px0, "y": py0},
+                "to_screen_pixel": {"x": px1, "y": py1},
+                "steps": None,
+                "duration_ms": int(duration_ms),
+                "activated": bool(activated),
+                "dpi_aware": bool(_DPI_AWARE),
+                "dry_run_note": (
+                    "预演：没有注入任何鼠标事件，窗口没有收到这次拖动。以上是起点与终点会落到的"
+                    "两个像素；确认无误后去掉 dry_run 再调用一次才会真的拖。"
+                ),
+            },
+        )
+        payload["point"]["input_from"] = {
+            "x": from_x, "y": from_y, "coord_space": (coord_space or "normalized").lower()
+        }
+        payload["verified"] = "dry_run"
+        payload["verification_note"] = (
+            "这是预演，没有任何输入被注入，界面状态与调用前完全一样。"
+            "上面回报的两个像素就是真拖时会用到的起点与终点。"
+        )
+        payload["pointer_evidence_from"] = _pointer_evidence(px0, py0)
+        payload["pointer_evidence_to"] = _pointer_evidence(px1, py1)
+        return _ok(payload)
+
     outcome = _mouse_drag(px0, py0, px1, py1, button=button, duration_ms=duration_ms)
     payload = _point_payload(
         info, region, to_x, to_y, coord_space, px1, py1,
         outcome["injected"], outcome["expected"], outcome["cursor"],
         {
             "action": "drag_at_point",
+            "dry_run": False,
             "button": outcome["button"],
             "from_screen_pixel": {"x": px0, "y": py0},
             "steps": outcome["steps"],
@@ -2437,17 +2762,33 @@ def DragAtPoint(from_x: float, from_y: float, to_x: float, to_y: float,
             "SendInput 只接受了 %s/%s 个事件，拖动可能不完整。"
             % (outcome["injected"], outcome["expected"])
         )
+    if want_shot:
+        time.sleep(_POST_SHOT_SETTLE_S)
+        shot = _point_shot(px1, py1, region, "DragAtPoint", "拖动终点")
+        payload["post_shot"] = shot
+        payload.update({k: shot[k] for k in
+                        ("image", "width", "height", "format") if k in shot})
+        for key in ("post_shot_error", "post_shot_warning"):
+            if key in shot:
+                payload[key] = shot[key]
+        if "image" in shot:
+            payload["verified"] = "post_shot"
+            payload["verification_note"] = (
+                "拖动已注入，并附上了终点周围的回拍图（红十字符号是松手的位置）。"
+                "视图是否真的转/移了，以那张图为准。"
+            )
     return _ok(payload)
 
 
 def ScrollAtPoint(x: float, y: float, amount: int,
-                  coord_space: str = "normalized", window_title: str = "") -> str:
+                  coord_space: str = "normalized", window_title: str = "",
+                  dry_run: bool = False, post_shot: bool = True) -> str:
     """在 GridStar 窗口的指定画面坐标上滚动滚轮（缩放视图、滚动列表）。
 
     滚轮消息发给光标下的窗口，所以会先把光标移到目标点再滚。
 
     前置条件与 ClickAtPoint 相同（进程存在、UIPI 放行、窗口真的在前台、点落在
-    截图矩形内）。
+    截图矩形内）；坐标基准也是执行这一刻的窗口矩形。
 
     Args:
         x: 横坐标（默认 0-1000 归一化）。
@@ -2455,9 +2796,12 @@ def ScrollAtPoint(x: float, y: float, amount: int,
         amount: 滚动格数，正数向上/向前（放大），负数向下/向后（缩小），非 0。
         coord_space: "normalized"（默认）或 "pixel"。
         window_title: 可选，进程匹配之后的标题过滤关键字。
+        dry_run: True 时只预演不滚动：回报落点像素与命中测试结果，不注入滚轮事件。
+        post_shot: 是否在滚动后自动回拍落点周围的局部图，默认 True。
 
     Returns:
-        JSON 字符串，含落点屏幕像素、实际滚动格数与光标位置。
+        JSON 字符串，含落点屏幕像素、实际滚动格数与光标位置；post_shot 为真时还含
+        回拍图（image / width / height）。
     """
     win_error = _pywin32_error("ScrollAtPoint")
     if win_error:
@@ -2484,6 +2828,31 @@ def ScrollAtPoint(x: float, y: float, amount: int,
     if hit_error:
         return hit_error
 
+    preview = _coerce_flag(dry_run)
+    want_shot = _coerce_flag(post_shot, default=True)
+    if preview:
+        payload = _point_payload(
+            info, region, x, y, coord_space, px, py,
+            0, 0, _cursor_pos(),
+            {
+                "action": "scroll_at_point",
+                "dry_run": True,
+                "amount": notches,
+                "notches": abs(notches),
+                "activated": bool(activated),
+                "dpi_aware": bool(_DPI_AWARE),
+                "dry_run_note": (
+                    "预演：没有注入滚轮事件，画面没有滚动。确认落点无误后去掉 dry_run 再调用。"
+                ),
+            },
+        )
+        payload["verified"] = "dry_run"
+        payload["verification_note"] = (
+            "这是预演，没有任何输入被注入，界面状态与调用前完全一样。"
+        )
+        payload["pointer_evidence"] = _pointer_evidence(px, py)
+        return _ok(payload)
+
     outcome = _mouse_wheel(px, py, notches)
 
     payload = _point_payload(
@@ -2491,6 +2860,7 @@ def ScrollAtPoint(x: float, y: float, amount: int,
         outcome["injected"], outcome["expected"], outcome["cursor"],
         {
             "action": "scroll_at_point",
+            "dry_run": False,
             "amount": outcome["amount"],
             "notches": outcome["notches"],
             "activated": bool(activated),
@@ -2502,4 +2872,19 @@ def ScrollAtPoint(x: float, y: float, amount: int,
             "SendInput 只接受了 %s/%s 个事件，部分滚动可能没生效。"
             % (outcome["injected"], outcome["expected"])
         )
+    if want_shot:
+        time.sleep(_POST_SHOT_SETTLE_S)
+        shot = _point_shot(px, py, region, "ScrollAtPoint", "滚动")
+        payload["post_shot"] = shot
+        payload.update({k: shot[k] for k in
+                        ("image", "width", "height", "format") if k in shot})
+        for key in ("post_shot_error", "post_shot_warning"):
+            if key in shot:
+                payload[key] = shot[key]
+        if "image" in shot:
+            payload["verified"] = "post_shot"
+            payload["verification_note"] = (
+                "滚轮已注入，并附上了落点周围的回拍图（红十字符号是落点）。"
+                "画面是否真的缩放/滚动了，以那张图为准。"
+            )
     return _ok(payload)
