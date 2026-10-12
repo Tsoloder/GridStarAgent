@@ -92,11 +92,11 @@ GridStarAgent/
 
 | 组件 | 要求 |
 | --- | --- |
-| Python | 3.10+（开发环境为 3.13） |
+| Python | **内网离线包按 3.12 打包**（`wheels/` 为 `cp312-win_amd64`）；开发机源码运行 3.10+ 即可。原因见 [内网离线分发](#内网离线分发) |
 | 依赖 | 见 [agent/agent/requirements.txt](file:///d:/TRAE_project/GridStarAgent/agent/agent/requirements.txt)：fastapi、uvicorn、fastmcp 3.x、openai、httpx、pypdf、openpyxl、requests、pywin32(Windows) |
 | GridStar 软件 | 本机运行，HTTP 接口监听 `127.0.0.1:1313`（否则工具调用返回连接失败） |
 | Qt 客户端（可选） | Qt 5.12.2 msvc2017_64 + MSVC x64（qmake / nmake） |
-| 语音输入（可选） | 本地 whisper.cpp 的 `whisper-cli` 与 ggml 模型 |
+| 语音输入（可选） | Windows x64。运行时依赖随包分发（`voice_asr/runtime/`），无需目标机另装 whisper 或 VC++ 运行时 |
 
 ---
 
@@ -224,10 +224,22 @@ build.bat shot     rem 构建后离屏截图到 QtChartWidget\shot.png
 
 `voice_asr` 通过本地 whisper.cpp 把录音 WAV 转成文字，由后端 `include_router` 同源挂载：
 
-- `GET /asr/health`：报告 CLI / 模型是否就绪，未就绪时前端自动禁用语音按钮。
-- `POST /asr`：multipart 上传 `audio`，返回转写文本。
+- `GET /asr/health`：报告 shim / 模型是否就绪（**不会触发加载 147MB 模型**），未就绪时前端自动禁用语音按钮。
+- `POST /asr`：multipart 上传 `audio`（16kHz / 16bit / 单声道 WAV），返回转写文本。
 
-配置项均可用环境变量覆盖：`WHISPER_CLI`、`WHISPER_MODEL`、`WHISPER_LANG`（默认 `zh`）、`WHISPER_TIMEOUT`、`ASR_MAX_BYTES`。
+实现是进程内调用 `asr_shim.dll`，不再依赖外部 `whisper-cli.exe`：模型常驻内存，冷启动加载约 0.24s，5 秒中文音频转写约 1.3–1.6s（RTF ≈ 0.3）。
+
+运行时资产（都被 `.gitignore` 排除，需单独同步）：
+
+| 路径 | 内容 | 大小 |
+| --- | --- | --- |
+| `voice_asr/runtime/` | whisper.dll、ggml*.dll、VC 运行时 4 件 | 2.6 MB |
+| `voice_asr/runtime/models/` | `ggml-base.bin` | 147 MB |
+| `voice_asr/native/bin/` | `asr_shim.dll`（`native/build_shim.bat` 构建） | 0.16 MB |
+
+补齐办法：`python voice_asr/native/sync_runtime.py`（从 GS 安装包同步 DLL 与模型）。
+
+配置项均可用环境变量覆盖：`WHISPER_MODEL`、`WHISPER_DLL`、`WHISPER_RUNTIME`、`WHISPER_LANG`（默认 `zh`）、`WHISPER_THREADS`、`WHISPER_TIMEOUT`、`ASR_MAX_BYTES`。
 
 ---
 
@@ -250,12 +262,39 @@ python -m pytest voice_asr/tests -q
 ## 内网离线分发
 
 ```bash
-python package_intranet.py                          # 源码 + 当前平台离线依赖
+python package_intranet.py                          # 源码 + 当前平台离线依赖（默认 3.12）
 python package_intranet.py --no-wheels               # 只打包源码
-python package_intranet.py --python-version 311 --platform win_amd64
+python package_intranet.py --python-version 313 --platform win_amd64
 ```
 
-产物为 `dist/GridStarAgent_intranet_<日期>.zip`，内含源码、`wheels/`、`requirements.txt` 与 `install_offline.bat`（创建 venv 并以 `--no-index` 离线安装）。
+产物为 `dist/GridStarAgent_intranet_<日期>.zip`，内含源码、`wheels/`、`requirements.txt`、`voice_asr` 运行时资产与 `install_offline.bat`（创建 venv 并以 `--no-index` 离线安装）。
+
+### 目标机前置条件
+
+打包脚本把语音运行时（含 VC++ 运行时 4 个 DLL）都放进了包，但有两件事它替不了：
+
+1. **Python 3.12 64 位**。`install_offline.bat` 不捆绑 Python，它用 PATH 上的 `python` 建 venv（可用 `set PYTHON=<绝对路径>` 指定）。而 `wheels/` 里 10 个带 ABI 标签的 wheel 是 `cp312-win_amd64`，所以目标机必须是 3.12；版本不一致会在 `pip install` 阶段直接失败。打别的版本：`python package_intranet.py --python-version 313`。
+2. **Windows 10/11 x64**。`voice_asr` 的 4 个 DLL 与 shim 都是 x64 PE，32 位 Python 加载会失败。
+
+其余都不需要：不必装 Visual Studio，不必装 VC++ 可再发行组件包，不必装 whisper.cpp 或任何 exe。
+
+### 装完先跑这两个检查
+
+```bash
+:: 在解压出来的包目录里
+venv\Scripts\python -c "from voice_asr.config import settings; print(settings.is_ready(), settings.model)"
+venv\Scripts\python voice_asr\smoke_test.py --backend-only
+```
+
+第一条只查三个路径是否就位（快）；第二条加载真模型跑一段真音频，是「语音到底能不能用」的判据，退出码 0 即通过。
+
+服务起来后还有一次 HTTP 级确认，`ready` 必须是 `true`：
+
+```bash
+venv\Scripts\python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:1231/asr/health')))"
+```
+
+为 `false` 时看同一响应里的 `shim` / `model` 两个路径，缺哪个补哪个。界面在 `http://<主机>:1231/ui/`（`/` 会 307 跳过去）。
 
 ---
 

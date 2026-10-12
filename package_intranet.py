@@ -117,13 +117,20 @@ def copy_sources(stage: Path) -> int:
 # 这些文件被 .gitignore 排除（147MB 模型 + 上游 DLL + 本机构建的 shim），
 # 走 git ls-files 收不到，必须单独复制进离线包，否则内网机器上 /asr 永远未就绪。
 ASR_ASSET_DIRS = (
-    ROOT / "voice_asr" / "runtime",      # whisper.dll / ggml*.dll / models/ggml-base.bin
+    ROOT / "voice_asr" / "runtime",      # whisper.dll / ggml*.dll / VC 运行时 / models/ggml-base.bin
     ROOT / "voice_asr" / "native" / "bin",  # asr_shim.dll
 )
-# 模型缺失时不必让打包失败，但必须显式告警：这是「装完发现语音不能用」的根因
+# 模型缺失时不必让打包失败，但必须显式告警：这是「装完发现语音不能用」的根因。
+# VC 运行时四项同样列入必查：本机因为有 Visual Studio 而一切正常，干净机器上
+# 缺 MSVCP140/VCRUNTIME140/VCRUNTIME140_1/VCOMP140 会直接加载失败（VCOMP140 还得
+# 归因于 ggml-cpu.dll 开了 OpenMP）。它们不随 Python 提供，也不在 Windows 自带组件里。
 ASR_REQUIRED = (
     ROOT / "voice_asr" / "runtime" / "models" / "ggml-base.bin",
     ROOT / "voice_asr" / "runtime" / "whisper.dll",
+    ROOT / "voice_asr" / "runtime" / "msvcp140.dll",
+    ROOT / "voice_asr" / "runtime" / "vcruntime140.dll",
+    ROOT / "voice_asr" / "runtime" / "vcruntime140_1.dll",
+    ROOT / "voice_asr" / "runtime" / "vcomp140.dll",
     ROOT / "voice_asr" / "native" / "bin" / "asr_shim.dll",
 )
 
@@ -190,7 +197,8 @@ def main() -> None:
     ap.add_argument("--no-wheels", action="store_true", help="只打包源码，不下载依赖")
     ap.add_argument("--no-asr", action="store_true",
                     help="不打包语音识别资产（whisper DLL 与 147MB 模型）")
-    ap.add_argument("--python-version", default="313", help="目标 Python 版本，如 311 / 313")
+    ap.add_argument("--python-version", default="312",
+                    help="目标 Python 版本，如 311 / 312 / 313（须与内网机器一致）")
     ap.add_argument("--platform", default="win_amd64", help="目标平台，如 win_amd64 / manylinux2014_x86_64")
     ap.add_argument("--out", default=None, help="输出 zip 路径")
     args = ap.parse_args()

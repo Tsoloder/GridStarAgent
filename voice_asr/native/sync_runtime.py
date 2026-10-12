@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import time
 import urllib.request
 from pathlib import Path
 
@@ -37,8 +38,26 @@ KNOWN_PACKS = [
     Path(r"D:\TRAE_project\GridStar-history-package\GS_Pack-20260924-112531"),
 ]
 
-# 运行 whisper.dll 所必需的 DLL，缺任何一个都会加载失败
-REQUIRED_DLLS = ["whisper.dll", "ggml.dll", "ggml-base.dll", "ggml-cpu.dll"]
+# 运行 whisper.dll 所必需的 DLL，缺任何一个都会加载失败。
+#
+# 后四个是 Microsoft VC++ 运行时，不是可选的美化项：dumpbin /dependents 显示
+# whisper.dll / ggml*.dll 直接导入 MSVCP140.dll、VCRUNTIME140.dll、
+# VCRUNTIME140_1.dll，ggml-cpu.dll 还导入 VCOMP140.DLL（它编译时开了 OpenMP，
+# 系统信息里的 "OPENMP = 1" 就是它）。开发机上这些由 Visual Studio 装进
+# System32，所以本机一切正常；换一台干净机器就会因缺 DLL 而加载失败。
+# VCOMP140 尤其关键：它不在 Windows 自带组件里，也不随 Python 安装包提供。
+# 目标机装过「VC++ 2015-2022 可再发行组件包」的话本来就有，但为了不把这个
+# 前提当成默认事实，直接从 GS 包根目录一并分发（合计约 0.9MB）。
+REQUIRED_DLLS = [
+    "whisper.dll",
+    "ggml.dll",
+    "ggml-base.dll",
+    "ggml-cpu.dll",
+    "msvcp140.dll",
+    "vcruntime140.dll",
+    "vcruntime140_1.dll",
+    "vcomp140.dll",
+]
 
 MODEL_REL = Path("res") / "whisperModels" / "ggml-base.bin"
 
@@ -81,10 +100,28 @@ def _copy(src: Path, dst: Path, label: str) -> bool:
         print(f"  [跳过] {label}: 源不存在 {src}")
         return False
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
-    print(f"  [ok]   {label}: {src.name} -> {dst.relative_to(RUNTIME_DIR.parent)} "
-          f"({src.stat().st_size:,} bytes)")
-    return True
+
+    # 已同步且大小一致就直接跳过：既让重跑幂等，也避开 Windows 上「目标文件
+    # 正被占用」的问题（刚落地的大 DLL 常被 Defender 或索引服务短暂持有，
+    # copy2 覆盖时会抛 WinError 32）。
+    if dst.is_file() and dst.stat().st_size == src.stat().st_size:
+        print(f"  [已有] {label}: {dst.name} 已同步，跳过 ({src.stat().st_size:,} bytes)")
+        return True
+
+    last_err: Exception | None = None
+    for attempt in range(5):
+        try:
+            shutil.copy2(src, dst)
+            print(f"  [ok]   {label}: {src.name} -> {dst.relative_to(RUNTIME_DIR.parent)} "
+                  f"({src.stat().st_size:,} bytes)")
+            return True
+        except PermissionError as exc:  # WinError 32：目标被占用，稍等再试
+            last_err = exc
+            time.sleep(0.6 * (attempt + 1))
+    raise SystemExit(
+        f"复制 {src.name} 到 {dst} 失败：{last_err}\n"
+        f"目标文件被占用。关掉正在运行的 GridStarAgent/python 进程，或先手工删除 {dst} 后重跑。"
+    )
 
 
 def sync_pack_assets(pack: Path) -> int:
