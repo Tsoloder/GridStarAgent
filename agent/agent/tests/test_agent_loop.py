@@ -662,6 +662,36 @@ async def test_auto_mode_defer_internal_tools(tmp_path, monkeypatch):
     assert tools_called.count("GenerateSurMesh") == 1
     assert all(call["ok"] for call in ledger.calls)
 
+    # 历史完整性：同一批次的 assistant 消息只应落盘一次，且其中每个 tool_call
+    # 都必须有配对的 tool 消息。早先把整批落盘一次、内部工具裁剪后又落盘一次，
+    # 同一个 call id 出现在两条 assistant 消息里，先落盘那条永远等不到结果，
+    # 下一轮请求会被 provider 以「tool_calls 必须紧跟 tool 消息」拒掉。
+    messages = session_mod._read_jsonl(
+        str(session_mod.session_dir(sid) / "messages.jsonl")
+    )
+    assert messages, "会话消息未落盘"
+    persisted_ids = [
+        call.get("id")
+        for message in messages
+        if message.get("role") == "assistant"
+        for call in (message.get("tool_calls") or [])
+    ]
+    assert len(persisted_ids) == len(set(persisted_ids)), \
+        "同一个 tool_call id 被重复落盘：%s" % persisted_ids
+
+    answered = {
+        message.get("tool_call_id")
+        for message in messages
+        if message.get("role") == "tool"
+    }
+    for message in messages:
+        if message.get("role") != "assistant":
+            continue
+        pending = {call.get("id") for call in (message.get("tool_calls") or [])}
+        if pending:
+            assert pending <= answered, \
+                "assistant 的 tool_call 缺少配对的 tool 结果：%s" % (pending - answered)
+
 
 @pytest.mark.asyncio
 async def test_auto_mode_readonly_query_exempt_from_plan_gate(tmp_path, monkeypatch):
@@ -1580,4 +1610,31 @@ async def test_large_failed_tool_result_is_still_recorded_as_failure(tmp_path, m
     assert tool_msgs, _event_types(events)
     assert "Result persisted to file" in tool_msgs[-1]["content"]
     assert ledger.calls[-1]["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_truncation_retry_limit_is_per_turn_not_process_global(tmp_path, monkeypatch):
+    """连续截断的重试上限属于本轮对话：上一个会话用满，不得让下一个会话直接放弃。
+
+    早先这个计数器挂在 run_agent_loop 的函数对象上，是进程级全局且从不重置，
+    进程里累计两次截断之后所有会话都失去重试机会。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    first = await _run_fixture("truncation_retry_limit")
+    assert _event_types(first).count("traj_request_start") == 3
+    assert any(
+        event["type"] == "error" and "连续截断超过 2 次" in event.get("message", "")
+        for event in first
+    )
+
+    # 计数器若残留，第二次只会发一次请求就报「连续截断超过 2 次」
+    second = await _run_fixture("truncation_retry_limit")
+    assert _event_types(second).count("traj_request_start") == 3
+    assert any(
+        event["type"] == "error" and "连续截断超过 2 次" in event.get("message", "")
+        for event in second
+    )
 

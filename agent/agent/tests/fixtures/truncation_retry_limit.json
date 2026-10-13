@@ -1,0 +1,40 @@
+{
+  "name": "truncation_retry_limit",
+  "description": "连续截断：重试上限是本轮对话的局部状态，不跨会话残留",
+  "input": {
+    "session_id": "test-trunc-001",
+    "message": "生成表面网格",
+    "interaction_mode": "manual",
+    "system_prompt": "",
+    "selected_skills": [],
+    "model_id": "test-model"
+  },
+  "mock_llm_responses": [
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "第一次输出被截断"},
+        {"type": "tool_call", "id": "tc-trunc-1", "name": "GetPointCount", "args": {}},
+        {"type": "usage", "input": 10, "output": 5, "total": 15},
+        {"type": "done", "stop_reason": "length"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "第二次输出被截断"},
+        {"type": "tool_call", "id": "tc-trunc-2", "name": "GetPointCount", "args": {}},
+        {"type": "usage", "input": 10, "output": 5, "total": 15},
+        {"type": "done", "stop_reason": "length"}
+      ]
+    },
+    {
+      "events": [
+        {"type": "text_chunk", "delta": "第三次输出被截断"},
+        {"type": "tool_call", "id": "tc-trunc-3", "name": "GetPointCount", "args": {}},
+        {"type": "usage", "input": 10, "output": 5, "total": 15},
+        {"type": "done", "stop_reason": "length"}
+      ]
+    }
+  ],
+  "mock_mcp_results": {"GetPointCount": "{\"count\": 3}"},
+  "expected_text_contains": "连续截断超过 2 次"
+}

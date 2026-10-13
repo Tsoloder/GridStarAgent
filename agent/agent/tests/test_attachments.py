@@ -304,3 +304,35 @@ def test_openai_responses_sends_input_image_parts():
         {"type": "input_text", "text": "看图"},
         {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
     ]
+
+
+def test_read_image_data_reuses_cache_across_requests(tmp_path, monkeypatch):
+    """同一张图在多轮请求里被反复取用：第二次不该再读盘。
+
+    编码结果按 (路径, mtime, 大小) 缓存；文件真变了要重新读，不能拿旧内容。
+    """
+    reads = {"count": 0}
+    original_read_bytes = document_loader.Path.read_bytes
+
+    def counting_read_bytes(self):
+        reads["count"] += 1
+        return original_read_bytes(self)
+
+    monkeypatch.setattr(document_loader.Path, "read_bytes", counting_read_bytes)
+    monkeypatch.setattr(document_loader, "_IMAGE_CACHE", document_loader.OrderedDict())
+
+    shot = tmp_path / "screenshot.png"
+    shot.write_bytes(PNG_BYTES)
+
+    first = read_image_data(str(shot))
+    second = read_image_data(str(shot))
+
+    assert first == second
+    assert reads["count"] == 1, "第二次读取命中了缓存就不该再读盘"
+
+    # 同名文件被重写（大小不同）后必须重新读
+    shot.write_bytes(PNG_BYTES + b"\x00" * 8)
+    third = read_image_data(str(shot))
+
+    assert third != first
+    assert reads["count"] == 2

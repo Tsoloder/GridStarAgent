@@ -1,5 +1,7 @@
 """Extract text/images from user-imported attachments for one chat request."""
 import base64
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -221,6 +223,15 @@ def extract_content(path_string: str) -> Dict[str, str]:
     return {"kind": "text", "name": path.name, "text": text, "path": str(path)}
 
 
+# 图片编码结果按 (路径, mtime, 大小) 缓存：同一张图在一次对话的多轮请求里会被
+# 反复取用（工具来回几轮都会重建 model_messages），每轮重新读盘 + base64 是纯浪费。
+# 文件真变了或超出容量才失效；大图不进缓存，避免长跑进程把内存吃掉。
+_IMAGE_CACHE: "OrderedDict[tuple, Dict[str, str]]" = OrderedDict()
+_IMAGE_CACHE_MAX_ITEMS = 6
+_IMAGE_CACHE_MAX_BYTES = 4_000_000  # 单张 base64 上限，约 3MB 原图
+_IMAGE_CACHE_LOCK = threading.Lock()
+
+
 def read_image_data(path_string: str) -> Optional[Dict[str, str]]:
     """Base64-encode a stored image at request time; return None when unusable."""
     try:
@@ -228,12 +239,26 @@ def read_image_data(path_string: str) -> Optional[Dict[str, str]]:
         suffix = path.suffix.lower()
         if suffix not in IMAGE_SUFFIXES or not path.is_file():
             return None
-        if path.stat().st_size > MAX_FILE_BYTES:
+        stat = path.stat()
+        if stat.st_size > MAX_FILE_BYTES:
             return None
-        return {
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        with _IMAGE_CACHE_LOCK:
+            cached = _IMAGE_CACHE.get(key)
+            if cached is not None:
+                _IMAGE_CACHE.move_to_end(key)
+                return cached
+        payload = {
             "media_type": IMAGE_MEDIA_TYPES[suffix],
             "data": base64.b64encode(path.read_bytes()).decode("ascii"),
         }
+        if len(payload["data"]) <= _IMAGE_CACHE_MAX_BYTES:
+            with _IMAGE_CACHE_LOCK:
+                _IMAGE_CACHE[key] = payload
+                _IMAGE_CACHE.move_to_end(key)
+                while len(_IMAGE_CACHE) > _IMAGE_CACHE_MAX_ITEMS:
+                    _IMAGE_CACHE.popitem(last=False)
+        return payload
     except OSError:
         return None
 

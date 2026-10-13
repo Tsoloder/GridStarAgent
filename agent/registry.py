@@ -69,6 +69,7 @@ _CORE_TOOL_GROUPS = (
             query.GetPointCount,
             query.GetNewConnectorId,
             query.GetDomainsByType,
+            query.GetRecentMessages,
         ),
     },
     {
@@ -126,6 +127,7 @@ _CORE_TOOL_GROUPS = (
             mesh.UGReDimensionInversionDistribution,
             mesh.UGReDimensionConfigDistribution,
             mesh.UGReDimensionSmoothDistribution,
+            mesh.UGReDimensionSHyperbolicTangent,
             mesh.UGSplitConnector,
             mesh.TranslateConnector,
             mesh.CreateConnector,
@@ -157,12 +159,13 @@ _CORE_TOOL_GROUPS = (
     },
     {
         "id": "boundary",
-        "description": "边界条件：边界条件分组的添加与删除、属性配置、保存到计算域。",
+        "description": "边界条件：边界条件分组的查询、添加与删除、属性配置、保存到计算域。",
         "tools": (
             boundary.BorderConditionAddGroup,
             boundary.BorderConditionDeleteGroup,
             boundary.BorderConditioConfigProperty,
             boundary.BorderConditionSaveDataToDomain,
+            boundary.GetAllBorderConditionGroups,
         ),
     },
     {

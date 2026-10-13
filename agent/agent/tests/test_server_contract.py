@@ -985,3 +985,17 @@ def test_cors_allows_loopback_any_port_and_rejects_others():
         },
     )
     assert "access-control-allow-origin" not in rejected.headers
+
+
+def test_tools_that_were_never_registered_are_visible_now():
+    """这三个工具早就实现，却漏了注册，模型此前永远看不到它们。"""
+    import registry
+
+    names = {tool.__name__ for tool in registry.TOOLS}
+    assert "GetRecentMessages" in names
+    assert "GetAllBorderConditionGroups" in names
+    assert "UGReDimensionSHyperbolicTangent" in names
+
+    assert registry.group_id_for_tool("GetRecentMessages") == "query"
+    assert registry.group_id_for_tool("GetAllBorderConditionGroups") == "boundary"
+    assert registry.group_id_for_tool("UGReDimensionSHyperbolicTangent") == "mesh"

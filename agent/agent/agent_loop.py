@@ -943,6 +943,9 @@ async def run_agent_loop(
     _update_plan_retry_count = 0
     _pending_reminders = []
     _invalid_tool_reselection_used = False
+    # 输出截断的重试次数：循环内局部状态。早先挂在 run_agent_loop 函数对象上，
+    # 进程里累计两次截断之后所有会话都失去重试机会，提示语里的「连续」也跟实际语义对不上。
+    _truncation_retries = 0
     # 本次用户消息内是否真的执行过工具：决定末尾那轮纯文本回复能不能免于格式重试
     _turn_tool_executed = False
     # 已启用的工具分组：本次用户消息内跨请求累积；换消息后重置，
@@ -1282,9 +1285,8 @@ async def run_agent_loop(
 
         # v4: 输出截断保护 — LLM 因 token 限制被截断时，tool call 参数可能不完整
         if _stop_reason == "length" and tool_calls:
-            _truncation_retries = getattr(run_agent_loop, '_truncation_retries', 0)
             if _truncation_retries < 2:
-                setattr(run_agent_loop, '_truncation_retries', _truncation_retries + 1)
+                _truncation_retries += 1
                 session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
                 _pending_reminders.append(
                     "<truncation_reminder>\n"
@@ -1292,7 +1294,7 @@ async def run_agent_loop(
                     "请重新输出完整的工具调用，确保参数完整。\n"
                     "</truncation_reminder>"
                 )
-                logger.warning("[truncation] 截断保护触发，重试 %d/2", _truncation_retries + 1)
+                logger.warning("[truncation] 截断保护触发，重试 %d/2", _truncation_retries)
                 tool_calls = []  # 清空，不执行
                 continue
             else:
@@ -1311,6 +1313,11 @@ async def run_agent_loop(
                          and ledger is not None and ledger.plan is None
                          and not _update_plan_reminded)
         _skip_plan_reminder = False
+        # 本批次的 assistant 消息是否已经落盘。_plan_missing 分支会把整批调用先落盘、
+        # 并给被暂缓的调用补上 tool result；之后若在这里再落一次，同一个 call id 会
+        # 出现在两条 assistant 消息里，先落盘那条的调用永远等不到配对的 tool 结果，
+        # 下一轮请求会被 provider 直接拒绝（tool_calls 必须紧跟 tool 消息）。
+        _batch_persisted = False
         if _plan_missing:
             _update_plan_reminded = True
             if not _update_plan_blocked:
@@ -1318,6 +1325,7 @@ async def run_agent_loop(
                 # 否则前端任务规划进度区永远没有内容可渲染。
                 _update_plan_blocked = True
                 session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
+                _batch_persisted = True
                 # 被暂缓的工具调用必须补一条 tool result，否则历史里悬空的
                 # tool_calls 会让 provider 在下一轮请求时报错。
                 # 内部工具（read_skill 等）无副作用，放行执行：读取技能/参考
@@ -1392,7 +1400,8 @@ async def run_agent_loop(
                                 tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
             logger.info("[tool exec] 开始执行 %d 个工具", len(tool_calls))
 
-            session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
+            if not _batch_persisted:
+                session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,

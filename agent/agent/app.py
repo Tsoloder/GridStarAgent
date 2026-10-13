@@ -69,6 +69,7 @@ from session import (
     load_session,
     locked_session,
     save_session,
+    session_dir,
     set_archived,
     storage_issues,
     update_index,
