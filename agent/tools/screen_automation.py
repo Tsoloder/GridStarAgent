@@ -2113,6 +2113,12 @@ def ActivateGridStarWindow(window_title: str = "") -> str:
 def CaptureGridStarWindow() -> str:
     """截取 GridStar 窗口的可见区域截图。无需任何参数，直接调用。
 
+    **用途限定**：这个工具当前只用来确认 GridStar 里导入的是什么领域的模型
+    （飞机 / 导弹），也就是领域识别的那一步。识别之外不要调用它：不看按钮在哪、
+    不核对上一步操作是否生效、不读界面上的参数与列表，也不要为"再确认一眼"重截；
+    分类一旦确定（用户选过或已 set_active_category）就不需要再截图。
+    唯一例外是用户明确要求操作界面——那时才可以用它为坐标定位截一张图。
+
     截图矩形取自 DWM 的实际可见边框（DWMWA_EXTENDED_FRAME_BOUNDS），并裁剪到
     虚拟屏幕范围内：GetWindowRect 含一圈 DWM 隐形边框，直接用会多出黑边，
     窗口部分移出屏幕时又会让抓图越界。

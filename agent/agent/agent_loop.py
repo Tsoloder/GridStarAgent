@@ -156,7 +156,8 @@ def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegi
 
 
 # 只读、但名字不落在 Get/Query/... 前缀里的工具：桌面感知类。
-# CaptureGridStarWindow 会顺带把窗口切到前台（看清界面本来就是它的目的），
+# CaptureGridStarWindow 会顺带把窗口切到前台（看清主视口本来就是它的目的，
+# 用途限定在领域识别那一步，见 base_prompt.md §2.8），
 # ActivateGridStarWindow 只切前台，两者都不改任何数据，因此按只读对待：
 # 不该被 auto 模式的建计划门禁暂缓，也不该在 manual 模式弹审批卡。
 # 真正注入输入的六个（ClickAtPoint / DragAtPoint / ScrollAtPoint / ClickUIElement /
@@ -513,8 +514,10 @@ def _vision_disabled_domain_gate(model_key: str) -> str:
         "<vision_disabled_domain_detection>\n"
         "当前模型 %s 的 capabilities.vision=false：图片不会送达你，你只能收到截图"
         "结果的文字元数据。因此这次的领域识别不走下面的截图第 2 步，改走这一段：\n"
-        "1. 不要为了识别模型类型去调 CaptureGridStarWindow 看图。截图可以调"
-        "（操作界面仍然需要它），但不要指望从图里读出模型类型，更不要反复截图。\n"
+        "1. 不要为了识别模型类型去调 CaptureGridStarWindow 看图，也不要指望从图里读出"
+        "模型类型，更不要反复截图。这个工具当前只用于确认导入的模型属于哪个领域，"
+        "而你看不到图时这条路线根本走不通：识别这一轮一次都不要调它"
+        "（只有用户明确要求操作界面时，才可以为定位而截图）。\n"
         "2. 也不要拿工程名、文件名、已确认参数（<tool_parameter_memory>）、历史会话"
         "或记忆库来猜类型：那些是按几何形状选出来的结果，拿它们反推类型是把因果倒过来。\n"
         "3. 用 ask_user_question 问一轮，请用户给出本次按哪个领域处理（也就是用哪个"
@@ -761,7 +764,8 @@ async def run_agent_loop(
         "group_id 传 \"screen\"，把桌面截图分组打开\n"
         "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（无参数，直接调用即可；"
         "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
-        "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）\n"
+        "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）。"
+        "这个工具当前只用来确认导入的模型属于哪个领域，识别之外的用途一律没有\n"
         "2. 看主视口里的模型是飞机还是导弹。**这是唯一的判断依据。**\n"
         + _step2_without_vision
         + "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
@@ -785,7 +789,8 @@ async def run_agent_loop(
         "这时顺便问清本次按哪个领域处理，问完再往下走）\n"
         "3. 根据识别结果调用 set_active_category 设置正确分类\n"
         "4. 通过 / 菜单或 read_skill 加载对应领域的技能再开始工作\n"
-        "需要操作界面时：GridStar 不提供 UI 自动化控件，GetUIElementInfo 返回 "
+        "需要操作界面时（这是截图定位的唯一例外：用户明确要求你操作界面才走这一段，"
+        "他没提就不要自己往界面上点）：GridStar 不提供 UI 自动化控件，GetUIElementInfo 返回 "
         "0 个控件是正常现象，ClickUIElement / TypeTextInUIElement 在它身上用不了。"
         "请在截图上看清目标位置后，用 ClickAtPoint / DragAtPoint / ScrollAtPoint "
         "按 0-1000 归一化坐标操作（坐标相对截图结果里的 capture_rect，"
@@ -796,7 +801,9 @@ async def run_agent_loop(
         "它同时会用 basis_check 告诉你坐标基准是否还等于你截图时的 capture_rect，"
         "status 是 stale 就说明窗口挪过、你手上的坐标已经对不上画面，要重新截图定位。"
         "键盘快捷键仍可用 SendKeyboardShortcut。\n"
-        "注意：截图工具只有在你确实需要看界面时才调用，它返回的图片会占用较多上下文。\n"
+        "注意：CaptureGridStarWindow 当前只用来确认 GridStar 里导入的是什么领域的模型；"
+        "分类一旦确定就不再调它，也不要拿它巡检界面、核对操作结果。它返回的图片会占用"
+        "较多上下文，一张 2560x1552 的截图约合 1100 input token。\n"
         "</domain_detection>"
     )
     if selected_category:

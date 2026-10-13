@@ -344,6 +344,71 @@ async def test_image_capable_model_keeps_the_original_domain_path(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_screenshot_tool_scope_is_pinned_to_domain_detection(tmp_path, monkeypatch):
+    """截图工具只服务领域识别：巡检界面、核对操作结果这些用法要被文案挡掉。
+
+    现场：CaptureGridStarWindow 在提示词里有两条通道——<domain_detection> 叫它截图认
+    模型，同一段末尾又教它"需要操作界面时"用截图定位。模型于是把它当通用界面巡检
+    工具：分类早就定了还反复截图去核对按钮位置，一张 2560x1552 的图约合 1100 input
+    token，几轮下来上下文全喂给了同一张界面图。这条限制得四头同时钉：base_prompt 的
+    §2.8、注入的 <domain_detection>、工具自己的描述（模型决定调不调它时最近的一处
+    语料）、以及 screen 工具组的说明。任何一处退回旧措辞，模型都会重新拿它巡检。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    import agent_loop
+
+    base = agent_loop._load_base_prompt()
+    assert "### 2.8 截图工具的用途限制" in base
+    assert "当前只服务一件事" in base
+    assert "确认 GridStar 里导入的是什么领域的模型" in base
+    # §1 那句领域识别要指向 §2.8，否则只读 §1 的人不知道还有这条限制
+    assert "`CaptureGridStarWindow` 当前只服务这一步" in base
+    # 限制要给出唯一例外，否则模型会把"不许截图"理解成界面操作也不能做
+    assert "唯一例外：用户明确要求操作界面时" in base
+
+    runtime = _ScriptedRuntime([_text_events("好的。")])
+    await _run_direct(runtime, "帮我生成表面网格", config=_vision_config(True))
+    prompt = runtime.system_prompts[0]
+    domain = prompt[prompt.index("<domain_detection>"):]
+    assert "这个工具当前只用来确认导入的模型属于哪个领域" in domain
+    assert "用户明确要求你操作界面才走这一段" in domain
+    assert "分类一旦确定就不再调它" in domain
+
+    # 看不到图的那份闸门同样收口，不留"换个模型就能拿它巡检"的口子
+    runtime = _ScriptedRuntime([_text_events("好的。")])
+    await _run_direct(runtime, "帮我生成表面网格", config=_vision_config(False))
+    assert "这个工具当前只用于确认导入的模型属于哪个领域" in runtime.system_prompts[0]
+
+    # 工具描述：模型在决定"要不要调它"时读到的那一段
+    import sys
+
+    tools_dir = Path(__file__).resolve().parents[2] / "tools"
+    if str(tools_dir) not in sys.path:
+        sys.path.insert(0, str(tools_dir))
+    sa = pytest.importorskip("screen_automation",
+                             reason="桌面依赖（mss/uiautomation）未安装")
+    description = sa.CaptureGridStarWindow.__doc__ or ""
+    assert "用途限定" in description
+    assert "只用来确认 GridStar 里导入的是什么领域的模型" in description
+    assert "分类一旦确定（用户选过或已 set_active_category）就不需要再截图" in description
+
+    # 工具分组说明：模型用 GetToolGroups 挑分组时读到的就是这一段
+    agent_dir = Path(__file__).resolve().parents[2]
+    if str(agent_dir) not in sys.path:
+        sys.path.insert(0, str(agent_dir))
+    import registry
+
+    screen = [g for g in registry.TOOL_GROUPS if g["id"] == "screen"]
+    assert screen, "screen 分组缺失：screen_automation 刚导入成功，注册表里就该有它"
+    group = screen[0]["description"]
+    assert "当前用途范围" in group
+    assert "只用于确认 GridStar 里导入的是什么领域的模型" in group
+
+
+@pytest.mark.asyncio
 async def test_screenshot_result_keeps_the_tool_own_field_report(tmp_path, monkeypatch):
     """截图工具如实报出的现场字段必须原样送到模型手里，只摘掉 base64。
 

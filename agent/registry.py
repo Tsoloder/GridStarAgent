@@ -193,7 +193,7 @@ _CORE_TOOL_GROUPS = (
 if screen_automation is not None:
     _SCREEN_GROUP = {
         "id": "screen",
-        "description": "桌面屏幕自动化：通过进程（gridstar.exe）定位 GridStar 窗口，截取窗口截图、读取 UI 控件信息、按画面坐标点击/拖动/滚轮、模拟控件点击与键盘输入、发送快捷键。用于让智能体感知界面状态并在界面上操作。GridStar 不暴露 UI 自动化控件（控件树为空），实际可用的是「截图 → 看图 → 坐标操作」这条路线。",
+        "description": "桌面屏幕自动化：通过进程（gridstar.exe）定位 GridStar 窗口，截取窗口截图、读取 UI 控件信息、按画面坐标点击/拖动/滚轮、模拟控件点击与键盘输入、发送快捷键。用于让智能体感知界面状态并在界面上操作。GridStar 不暴露 UI 自动化控件（控件树为空），实际可用的是「截图 → 看图 → 坐标操作」这条路线。当前用途范围：CaptureGridStarWindow 只用于确认 GridStar 里导入的是什么领域的模型（飞机 / 导弹），界面操作只在用户明确要求时才做。",
         "tools": (
             screen_automation.FindGridStarWindow,
             screen_automation.ActivateGridStarWindow,
