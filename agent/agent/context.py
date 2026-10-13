@@ -50,7 +50,10 @@ class TokenCounter:
 
 class ContextManager:
     STALE_TURNS = 6
-    LARGE_RESULT_CHARS = 30000
+    # 与 _MAX_TOOL_RESULT_BYTES（8KB）对齐：超过就在写入历史时落盘只留路径+预览，
+    # 不再常驻原文。定在 30000 时，2 万字级的结果（如各向异性处理的 steps 明细）
+    # 会整段留在历史里、每轮重新计费一次。
+    LARGE_RESULT_CHARS = 8192
     SHORT_MSG_CHARS = 100
     # Layer 4 压缩后保留最近消息的 token 预算（参考 pi-main keepRecentTokens=20000）
     KEEP_RECENT_TOKENS = 20000
@@ -74,8 +77,13 @@ class ContextManager:
         current = sum(self.counter.estimate(self._msg_text(m)) for m in messages)
 
         messages = self._layer1_budget_truncate(messages, max_tokens)
-        messages = self._layer2_stale_snip(messages, self.STALE_TURNS)
+        # Layer 2 是唯一会改写历史中段的层，而缓存按前缀命中：一条旧结果被
+        # 折叠，它后面那一段（约 12 条消息、10~20K token）下一轮就要全价重算。
+        # 实测那个 88K/1M 的会话里，这类改写贡献了约 45 万 input token 的重算，
+        # 而它换下来的是本来就命中缓存的常驻内容（缓存读取比未命中便宜得多）。
+        # 所以折叠只在窗口真的吃紧时才做，和 Layer 3/4 一样按阈值触发。
         if current > threshold_micro:
+            messages = self._layer2_stale_snip(messages, self.STALE_TURNS)
             messages = self._layer3_microcompact(messages)
         if current > threshold_warn:
             messages = await self._layer4_auto_compact(
@@ -114,8 +122,8 @@ class ContextManager:
     _PRESERVE_TOOL_NAMES = {"read_skill", "read_skill_resource"}
 
     # 单条 tool result 的最大字节数,超过此值才触发 head+tail 截断。
-    # 与 LARGE_RESULT_CHARS 形成两级:超大结果执行当场就落盘只留路径,
-    # 中等长度(8KB ~ 30000 字符)的旧结果在变陈旧后截断为头尾各 40%,
+    # 与 LARGE_RESULT_CHARS 形成两级:超过 8192 字符的结果执行当场就落盘只留
+    # 路径+预览,8KB 以内的旧结果在变陈旧后截断为头尾各 40%,
     # 避免网格查询结果在历史里被每轮全额重传。
     _MAX_TOOL_RESULT_BYTES = 8 * 1024
 
@@ -146,6 +154,12 @@ class ContextManager:
         )
 
     def _layer2_stale_snip(self, messages, stale_turns):
+        """把变陈旧的工具结果截成头尾。只在窗口吃紧时调用（见 compress）。
+
+        这是唯一会改写历史中段的层，每折叠一条就要让后面整段前缀缓存作废；
+        常驻内容本身是命中缓存的，成本远低于反复重算，所以不做常压折叠。
+        已经落盘成 stub 的结果再截一次也是幂等的，无害。
+        """
         for i, m in enumerate(messages):
             if m.get("role") == "tool" and i < len(messages) - stale_turns * 2:
                 if m.get("tool_name") in self._PRESERVE_TOOL_NAMES:
@@ -323,5 +337,15 @@ class ContextManager:
             from session import atomic_write
 
             atomic_write(str(path), result)
-            return f"[Result persisted to file: {path}, size: {len(result)} chars]"
+            # 保留头部预览：像各向异性处理那种 step 明细，关键状态（哪一步 failed）
+            # 通常就在开头，只留路径会让模型为了看结论再查一次。400 字符时
+            # 嵌套较深的 JSON 常常还没读到 status，放宽到 1200。
+            preview = result[:1200]
+            return (
+                "[Result persisted to file: %s, size: %d chars]\n"
+                "前 1200 字符预览：\n%s\n"
+                "（完整内容未载入上下文。需要细节时重新调用该工具取更窄的结果；"
+                "这个文件路径只供用户查阅，你当前没有读取它的工具）"
+                % (path, len(result), preview)
+            )
         return result

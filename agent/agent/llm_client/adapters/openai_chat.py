@@ -38,6 +38,19 @@ class OpenAIChatAdapter(Adapter):
                 output.append(item)
         body = {"model": model.id, "messages": output, "stream": True}
         if tools: body["tools"] = _tools(tools)
+        # 思考强度：默认什么都不下发。不认这些字段的网关会因为多出来的键直接 400，
+        # 所以必须由 compat 显式开启。实测（阿里 compatible-mode +
+        # deepseek-v4.1-flash）：thinking=disabled 真能把 reasoning 归零；
+        # reasoning_effort 被接受但不改变思考量（minimal/low/baseline 都在 119~159
+        # token 波动），留着给认这条的网关用。
+        thinking = str(model.compat.get("thinking", "") or "").strip().lower()
+        if thinking == "disabled":
+            body["thinking"] = {"type": "disabled"}
+        elif thinking == "enabled":
+            body["thinking"] = {"type": "enabled"}
+        effort = str(model.compat.get("reasoning_effort", "") or "").strip()
+        if effort:
+            body["reasoning_effort"] = effort
         if model.capabilities.stream_usage and model.compat.get("stream_options", True):
             body["stream_options"] = {"include_usage": True}
         field = model.compat.get("max_tokens_field", "max_tokens")

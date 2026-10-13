@@ -476,19 +476,30 @@ def _model_sees_images(config, model_key: str) -> bool:
 
     网关对不支持图片的模型是「静默丢弃」：HTTP 200，图片一个 token 都不算，
     模型只看到工具返回的元数据，然后如实回答「我看不到画面」，再反复截图。
-    这里按配置里的 capabilities.vision 做闸门；查不到模型时按支持处理
-    （宁可白发一张图，也不要谎报「看不到」）。
+    这里按配置里的 capabilities.vision 做闸门；查不到模型时按「看不到」处理
+    （fail-closed）：误判成看不到的代价是问用户一句，误判成看得见的代价是
+    整条流程建在幻觉上——模型会拿文件名、工程名、参数记忆凑一个类型。
     """
     try:
         return bool(config.model(model_key).capabilities.vision)
     except Exception:
-        return True
+        return False
 
 
 def _screenshot_note(model_key: str, path: str, sees_images: bool) -> str:
     """回给模型的截图结果说明文字：能不能看图，说实话。"""
     if sees_images:
-        return "截图已缓存，将在下一轮请求中以图片形式发送给模型"
+        # 这句话是本地声明，不是送达回执：配置里的 vision 是表单默认值，
+        # 未经实测。所以只说「已按图片附加」，并当场要求模型在看不到时自曝，
+        # 而不是替网关承诺「一定送达」——否则模型会以为图看得见，
+        # 然后拿文件名/工程名/参数记忆猜一个模型类型。
+        return (
+            "截图已保存到 uploads/%s，并按图片附加到本轮请求（能否真正送达取决于"
+            "当前模型是否支持图片输入）。如果你在本轮输入里看不到图像内容，直接说明"
+            "你看不到，不要用文件名、工程名、历史会话或参数记忆去推断模型类型；"
+            "改用 ask_user_question 问用户当前是飞机还是导弹。"
+            % os.path.basename(path)
+        )
     return (
         "截图已保存到 uploads/%s，但不会送达模型：当前模型 %s 被配置为不支持图片输入"
         "（capabilities.vision=false），网关会把图片静默丢掉，你看到的只有这段文字。"
@@ -741,41 +752,54 @@ async def run_agent_loop(
     # 所以这里的取值必须与循环内每轮的 call_model_id 完全一致。
     call_model_id = model_override or session.ResolvedModelId(config.default_model)
     _sees_images = _model_sees_images(config, call_model_id)
-    # 看不到图时，第 2 步的"看主视口"没有可执行的内容：就地换成问用户。
-    # 能看图时不贴这段，主路径保持原样。
-    _step2_without_vision = "" if _sees_images else (
-        "（图片不会送达你：这一步换 <vision_disabled_domain_detection> 里的问法，"
-        "不要截图。）\n"
-    )
+    # 看不到图时，0/1/2 步与「确认主视口」整段都要作废：只换第 2 步那一行不够，
+    # 模型会照主路径去截图、去重截，而它其实什么也看不到，最后只能拿参数记忆猜类型。
+    if _sees_images:
+        _domain_steps = (
+            "0. 若当前工具列表里还没有 CaptureGridStarWindow，先调用 enable_tool_group，"
+            "group_id 传 \"screen\"，把桌面截图分组打开\n"
+            "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（无参数，直接调用即可；"
+            "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
+            "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）。"
+            "这个工具当前只用来确认导入的模型属于哪个领域，识别之外的用途一律没有\n"
+            "2. 看主视口里的模型是飞机还是导弹。**这是唯一的判断依据。**\n"
+            "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
+            "进气道 / 大展弦比机翼 等），再据此定类型；说不清特征就不要下结论\n"
+            "**先确认这张图里真的有 GridStar 的主视口**：结果里 is_foreground 为 false、"
+            "或带 occluded_warning 时，说明有别的窗口压在 GridStar 上面，"
+            "你看到的那块内容不是 GridStar 的画面；先调用 ActivateGridStarWindow 把它切到"
+            "前台，再重新截一次，拿到能看清主视口的图再判断。图里找不到三维视口时同样不要"
+            "下结论，重复这一步；实在拿不到干净画面就问用户，绝不要退回去猜\n"
+        )
+    else:
+        _ask_user = (
+            "按 <vision_disabled_domain_detection> 的退路，用 ask_user_question 问用户"
+            "本次按哪个领域处理。"
+            if not selected_category else
+            "分类已由用户选定（见 <selected_category>），直接用该分类开工，不要再去问用户。"
+        )
+        _domain_steps = (
+            "0. 本模型看不到图片，下面这套截图识别整体不适用：不要打开桌面截图分组，"
+            "也不要为了识别去调用 CaptureGridStarWindow（识别这一轮一次都不调它，"
+            "不要截图）。"
+            + _ask_user + "\n"
+        )
     system_parts = []
     if base_system_prompt:
         system_parts.append(base_system_prompt)
     system_parts.append(skill_registry.catalog_prompt(selected_ids))
     # 模型看不了图时，先立一份"问用户要领域"的契约，再把通用识别引导贴上：
     # 顺序反过来的话，模型会先读到"看主视口判断飞机还是导弹"这条主路径。
-    if not _sees_images:
+    # 分类已定时不贴：<selected_category> 已经写明"不要再问用户"，再贴会自相矛盾。
+    if not _sees_images and not selected_category:
         system_parts.append(_vision_disabled_domain_gate(call_model_id))
     # 通用领域识别引导：不依赖技能是否选中，模型始终知道该截图识别模型类型
     system_parts.append(
         "<domain_detection>\n"
         "当用户要求「生成网格」「画网格」「导出网格」等 CFD 网格操作，"
         "但未明确指定模型类型时：\n"
-        "0. 若当前工具列表里还没有 CaptureGridStarWindow，先调用 enable_tool_group，"
-        "group_id 传 \"screen\"，把桌面截图分组打开\n"
-        "1. 调用 CaptureGridStarWindow 截取 GridStar 主窗口（无参数，直接调用即可；"
-        "它按进程 gridstar.exe 定位窗口，不看标题；返回结果里的 is_foreground 说明"
-        "画面是不是 GridStar 本身，不是则先调用 ActivateGridStarWindow）。"
-        "这个工具当前只用来确认导入的模型属于哪个领域，识别之外的用途一律没有\n"
-        "2. 看主视口里的模型是飞机还是导弹。**这是唯一的判断依据。**\n"
-        + _step2_without_vision
-        + "先说清你在主视口看到的几何特征（细长旋成体 / 弹翼 / 翼身融合 / 平尾垂尾 / "
-        "进气道 / 大展弦比机翼 等），再据此定类型；说不清特征就不要下结论\n"
-        "**先确认这张图里真的有 GridStar 的主视口**：结果里 is_foreground 为 false、"
-        "或带 occluded_warning 时，说明有别的窗口压在 GridStar 上面，"
-        "你看到的那块内容不是 GridStar 的画面；先调用 ActivateGridStarWindow 把它切到"
-        "前台，再重新截一次，拿到能看清主视口的图再判断。图里找不到三维视口时同样不要"
-        "下结论，重复这一步；实在拿不到干净画面就问用户，绝不要退回去猜\n"
-        "以下都不是依据，不得用来推断或「印证」类型：\n"
+        + _domain_steps
+        + "以下都不是依据，不得用来推断或「印证」类型：\n"
         "  - <tool_parameter_memory> 里的已确认参数。它不绑定任何工程，是历次调用最后"
         "写入的值：上次做过导弹，growthRate / controlLayer 就会一直躺在那儿，"
         "换成机翼工程也不会变\n"
@@ -1388,6 +1412,10 @@ async def run_agent_loop(
                 }
                 _tool_ok = True
                 _tool_t0 = _time.monotonic()
+                # 失败判定要在落盘之前做：落盘后 result 只剩一行 stub，
+                # _tool_result_failed 拿纯文本会直接判 False，把大结果里的
+                # status=error 记成成功。
+                _result_failed = False
                 # 每轮工具调用重置：截图路径只属于本次调用，否则上一轮的值会被
                 # 反复注入，且异常路径下这个变量会未绑定（NameError）。
                 _image_path = None
@@ -1652,10 +1680,12 @@ async def run_agent_loop(
                                 pass
                             if not _sees:
                                 _image_path = None
+                    _result_failed = _tool_result_failed(result)
                     result = ctx_mgr.persist_large_result(result, session.id)
                 except Exception as e:
                     result = f"Tool error: {e}"
                     _tool_ok = False
+                    _result_failed = True
                     logger.warning(f"tool {tc['name']} failed: {e}")
                     logger.warning("[tool error] %s: %s", tc["name"], e)
                 # 工具返回值日志
@@ -1696,7 +1726,7 @@ async def run_agent_loop(
                 if ledger is not None:
                     ledger.record_call(
                         tc["name"], tc["args"], result=result,
-                        ok=_tool_ok and not _tool_result_failed(result),
+                        ok=_tool_ok and not _result_failed,
                     )
             # 工具执行完毕后，如果缺少计划，注入轻量提醒
             if _plan_missing and not _skip_plan_reminder:

@@ -75,8 +75,29 @@ def test_runtime_routes_full_model_key_to_provider_and_adapter():
     assert [event.type for event in asyncio.run(run())] == ["start", "done"]
 
 
-def _chat_model():
-    return ModelConfig("qwen-test", "vendor", "openai-chat")
+def _chat_model(**compat):
+    return ModelConfig("qwen-test", "vendor", "openai-chat", compat=compat)
+
+
+def test_openai_chat_thinking_switch_is_opt_in():
+    """思考强度默认不下发，只有 compat 明确要求时才带 thinking / reasoning_effort。
+
+    实测（阿里 compatible-mode + deepseek-v4.1-flash）：thinking=disabled 真能
+    把 reasoning 归零；reasoning_effort 被接受但改变不了思考量（minimal/low/
+    baseline 都在 119~159 token 波动），是空招。默认不下发的理由是：不认这些
+    字段的网关会因为多出来的键直接 400。
+    """
+    messages = MessageTransformer().from_legacy([{"role": "user", "content": "hi"}], "sys")
+
+    plain = OpenAIChatAdapter().build_request(_chat_model(), messages, [])
+    assert "thinking" not in plain and "reasoning_effort" not in plain
+
+    off = OpenAIChatAdapter().build_request(_chat_model(thinking="disabled"), messages, [])
+    assert off["thinking"] == {"type": "disabled"}
+
+    low = OpenAIChatAdapter().build_request(_chat_model(reasoning_effort="low"), messages, [])
+    assert low["reasoning_effort"] == "low"
+    assert "thinking" not in low
 
 
 def test_openai_chat_request_never_sends_null_or_empty_messages():

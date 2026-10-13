@@ -200,15 +200,21 @@ def test_screenshot_gate_follows_capabilities_vision():
     })
     assert agent_loop._model_sees_images(config, "test/text-only") is False
     assert agent_loop._model_sees_images(config, "test/sees-images") is True
-    # 配置里查不到这个模型时按「能看图」处理：宁可白发一张图，也不要谎报看不到
-    assert agent_loop._model_sees_images(config, "test/absent") is True
+    # 配置里查不到这个模型时按「看不到」处理（fail-closed）：
+    # 误判成看得到会让模型拿文件名/工程名猜类型，代价比多问一句大得多。
+    assert agent_loop._model_sees_images(config, "test/absent") is False
 
 
 def test_screenshot_note_tells_the_truth_about_vision():
     import agent_loop
 
     delivered = agent_loop._screenshot_note("test/sees-images", r"C:\uploads\a.png", True)
-    assert "图片形式发送" in delivered
+    # 不再替网关承诺「一定送达」：vision 是表单默认值，未经实测。
+    # 只说「已按图片附加」，并要求模型看不到时自曝、改用问用户。
+    assert "图片形式发送" not in delivered
+    assert "a.png" in delivered
+    assert "看不到" in delivered
+    assert "ask_user_question" in delivered
 
     blocked = agent_loop._screenshot_note("test/text-only", r"C:\uploads\a.png", False)
     assert "不会送达模型" in blocked
@@ -238,7 +244,7 @@ async def test_domain_detection_names_the_screenshot_as_the_only_evidence(tmp_pa
     tool_memory.remember("GenerateANisoDomainGrid", {"controlLayer": 50, "growthRate": 1.2})
 
     runtime = _ScriptedRuntime([_text_events("好的。")])
-    await _run_direct(runtime, "帮我生成表面网格")
+    await _run_direct(runtime, "帮我生成表面网格", config=_vision_config(True))
     prompt = runtime.system_prompts[0]
 
     # 参数记忆确实作为独立段落注入了，否则这条测试什么也没验到
@@ -312,6 +318,11 @@ async def test_visionless_model_is_asked_for_the_skill_domain(tmp_path, monkeypa
     # 截图那一步要被显式降级，否则模型仍会按主路径反复截图
     assert "不要为了识别模型类型去调 CaptureGridStarWindow 看图" in prompt
     assert "不要反复截图" in prompt
+    # 0/1/2 步与「确认主视口」整段都要消失：只换第 2 步那一行不够，
+    # 模型会照主路径去截图、去重截到「能看清」，而它其实什么也看不到。
+    assert "把桌面截图分组打开" not in prompt
+    assert "ActivateGridStarWindow 把它切到" not in prompt
+    assert "这是唯一的判断依据" not in prompt
     # 硬闸门段落必须排在通用识别引导之前：反过来的话模型先读到的是"看主视口判断"
     assert prompt.index("<vision_disabled_domain_detection>") < prompt.index("<domain_detection>")
     assert "不要截图" in prompt
@@ -337,6 +348,9 @@ async def test_image_capable_model_keeps_the_original_domain_path(tmp_path, monk
 
     assert "<domain_detection>" in prompt
     assert "这是唯一的判断依据" in prompt
+    # 能看图时 0/1/2 步与「确认主视口」都在，主路径没被换掉
+    assert "把桌面截图分组打开" in prompt
+    assert "ActivateGridStarWindow 把它切到" in prompt
     assert "<vision_disabled_domain_detection>" not in prompt
     assert "capabilities.vision=false" not in prompt
     # 主路径的第 2 步不该被"改用问用户"的插入语污染
@@ -477,7 +491,10 @@ async def test_screenshot_result_keeps_the_tool_own_field_report(tmp_path, monke
     assert data["method"] == "region"
     assert data["window"]["hwnd"] == 134538
     assert data["image_delivered"] is True
-    assert "图片形式发送" in data["note"]
+    # 文案不再替网关承诺「一定送达」：vision 是未实测的声明，
+    # 只说已按图片附加，并要求模型看不到时自曝、改用问用户。
+    assert "按图片附加到本轮请求" in data["note"]
+    assert "看不到" in data["note"]
 
 
 def _patch_stream_runtime(monkeypatch, agent_loop, stream_chat):
@@ -1516,4 +1533,51 @@ async def test_set_active_category_notifies_the_frontend(tmp_path, monkeypatch):
     assert "session_meta" not in _event_types(refused)
     assert invalid.category == ""
     assert not (tmp_path / invalid.id / "meta.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_large_failed_tool_result_is_still_recorded_as_failure(tmp_path, monkeypatch):
+    """大结果落盘成 stub 之后，失败判定不能跟着丢。
+
+    落盘发生在记账之前：persist 之后 result 只剩一行纯文本 stub，
+    _tool_result_failed 解析不出 JSON 会返回 False，于是 status=error 的结果
+    被记成成功——阈值 30000→8192 把这个窗口放大了三倍多。
+    这条用例同时卡住两件事：历史里存的必须是 stub，台账里必须是失败。
+    """
+    import json
+
+    import agent_loop
+    import session as session_mod
+    from context import ContextManager
+    from task_ledger import TaskLedger
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    big_error = json.dumps({
+        "status": "error",
+        "error": "ExecAnisoDomain type=1 failed",
+        "steps": {"step4_aniso_line_group": "failed"},
+        "detail": "x" * 20000,
+    })
+    session = _make_session("large-failed-call")
+    (tmp_path / session.id).mkdir(parents=True, exist_ok=True)
+    ledger = TaskLedger(session.id)
+
+    ctx = ContextManager()
+    ctx._sessions_dir = tmp_path
+    runtime = _ScriptedRuntime([
+        _tool_call_events("GetModelParameters", {"component_ids": [1]}),
+        _text_events("好。"),
+    ])
+    events = [event async for event in agent_loop.run_agent_loop(
+        session, "查一下参数", "base", _make_config(),
+        MockMcpBridge({"GetModelParameters": big_error}),
+        ctx, MockSkillRegistry(), model_runtime=runtime, ledger=ledger,
+        interaction_mode="auto",
+    )]
+
+    tool_msgs = [m for m in session.messages if m.get("role") == "tool"]
+    assert tool_msgs, _event_types(events)
+    assert "Result persisted to file" in tool_msgs[-1]["content"]
+    assert ledger.calls[-1]["ok"] is False
 
