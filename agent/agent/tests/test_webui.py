@@ -553,7 +553,7 @@ def test_webui_usage_panel_contract():
                  "Charts.formatMillions(totals.output)", "Charts.formatMillions(row[item.key])"):
         assert call in script
     # 模型设置的上下文窗口仍用 K/M 自适应：128K 换成 0.13M 反而难读
-    assert "function formatTokens(value) { return value >= 1048576" in script
+    assert "function formatTokens(value) { return value >= 1000000" in script
     assert "formatTokens(totals" not in script and "formatTokens(row[item" not in script
     # 轮次是计数不是用量：只给 token 列打 tokens 标记，否则 33 轮会写成 0.000033M
     assert '{key:"turns",label:"轮次",numeric:true},' in script

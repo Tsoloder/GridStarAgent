@@ -404,10 +404,14 @@ def _auto_plan_waits_for_choice(text: str, ledger) -> bool:
     return _plan_has_open_phases(ledger)
 
 
-def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id):
+def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id,
+                          context_used: int = 0, context_window=None,
+                          context_estimated: bool = False):
     """汇总本轮 token 用量，返回 (total, usage_record, done 事件的用量字段)。
 
     实时 usage 缺失时回落到本地估算，保证气泡与 done 事件仍能显示 token 量。
+    context_used 是最近一次请求实际送出的 input，供上下文用量圆环用；
+    它不是本轮累计 input（那会远高于窗口占用）。
     """
     estimated = not (usage_totals["total"] or usage_totals["input"] or usage_totals["output"])
     if estimated:
@@ -426,6 +430,7 @@ def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id):
             "cache_write": usage_totals["cache_write"],
             "reasoning": usage_totals["reasoning"],
             "model": model_id,
+            "context_used": context_used,
         }
     fields = {
         "tokens": total,
@@ -436,6 +441,9 @@ def _summarize_turn_usage(usage_totals: dict, estimated_totals: dict, model_id):
         "cache_write_tokens": usage_totals["cache_write"],
         "reasoning_tokens": usage_totals["reasoning"],
         "model": model_id,
+        "context_used": context_used,
+        "context_window": context_window,
+        "context_estimated": context_estimated,
     }
     return total, record, fields
 
@@ -956,6 +964,14 @@ async def run_agent_loop(
                      "cache_read": 0, "cache_write": 0, "reasoning": 0}
     # 供应商未回传 usage 时的本地估算（逐轮累计）
     _estimated_totals = {"input": 0, "output": 0}
+    # 上下文用量圆环：最近一次请求实际送出的 input（含缓存读），以及模型窗口上限。
+    # 不能拿 _usage_totals["input"]，那是本轮多次请求之和，会远高于当前窗口占用。
+    _request_input = 0
+    _request_estimated = False
+    try:
+        _context_window = int(model_runtime.context_window(call_model_id)) or None
+    except Exception:  # noqa: BLE001 - 取不到窗口只是画不出进度环，不该影响对话
+        _context_window = None
 
     while True:
         turn += 1
@@ -1147,6 +1163,10 @@ async def run_agent_loop(
                     tool_calls.append(event)
                 elif event["type"] == "usage":
                     usage = event
+                    if event.get("input"):
+                        # 最近一次请求的 input 就是当前的窗口占用
+                        _request_input = event.get("input") or 0
+                        _request_estimated = False
                     _usage_totals["input"] += event.get("input", 0)
                     _usage_totals["output"] += event.get("output", 0)
                     _usage_totals["total"] += event.get("total", 0)
@@ -1204,11 +1224,14 @@ async def run_agent_loop(
             )
         else:
             # 流里没有 usage（例如模型未开启 stream_usage 能力），逐轮累计本地估算，
-            # 保证结束时气泡仍能显示本次对话的 token 量。
-            _estimated_totals["input"] += _estimate_tokens(
+            # 保证结束时气泡仍能显示本次谈话的 token 量。
+            _turn_input_estimate = _estimate_tokens(
                 system_prompt + "\n" + _calibration_text(model_messages, ctx_mgr)
             )
+            _estimated_totals["input"] += _turn_input_estimate
             _estimated_totals["output"] += _estimate_tokens(text_acc + reasoning_acc)
+            _request_input = _turn_input_estimate
+            _request_estimated = True
 
         # 实时 token 计数：每轮 LLM 调用结束后发中间事件，让前端可以即时更新
         _real_input = _usage_totals["input"] or _estimated_totals["input"]
@@ -1219,6 +1242,9 @@ async def run_agent_loop(
             "tokens_input": _real_input,
             "tokens_output": _real_output,
             "tokens_estimated": not bool(_usage_totals["total"] or _usage_totals["input"] or _usage_totals["output"]),
+            "context_used": _request_input,
+            "context_window": _context_window,
+            "context_estimated": _request_estimated,
         }
 
         # 直呼自动解锁：模型可能不查分组目录、直接按名字调用未暴露的工具
@@ -1468,7 +1494,8 @@ async def run_agent_loop(
                             }
                             yield {"type": "options_offered", "id": tc["id"], **payload}
                             _total_tokens, _usage_record, _usage_fields = _summarize_turn_usage(
-                                _usage_totals, _estimated_totals, call_model_id
+                                _usage_totals, _estimated_totals, call_model_id,
+                                _request_input, _context_window, _request_estimated,
                             )
                             _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
                             _ttft_ms = _ttft_ms_total or None
@@ -1827,7 +1854,8 @@ async def run_agent_loop(
                 continue
 
             _total_tokens, _usage_record, _usage_fields = _summarize_turn_usage(
-                _usage_totals, _estimated_totals, call_model_id
+                _usage_totals, _estimated_totals, call_model_id,
+                _request_input, _context_window, _request_estimated,
             )
             _elapsed_ms = int(round((_time.monotonic() - _turn_t0) * 1000))
             _ttft_ms = _ttft_ms_total or None

@@ -31,6 +31,9 @@ const state = {
     catalog:{},configuredProviders:{},providerOptions:[],modelOptions:[],
     calendar:null,pendingStart:null,pendingEnd:null,sort:{key:"total",desc:true}},
   viewTab: "chat",
+  // 上下文用量圆环：used 为最近一次请求实际送出的 input，window 为模型窗口上限，
+  // 二者任一缺失就画灰环（未知态）
+  context: {used: null, window: null, estimated: false},
   // 记忆面板：影子期只采集与审核，所有操作立即落盘，不写入 settings.draft
   memory: {loaded:false,loading:false,error:"",summary:null,items:[],page:1,pageSize:20,total:0,
     facets:{scopes:[],task_types:[]},selected:new Set(),detail:null,tools:{tools:[],tool_count:0,field_count:0},
@@ -45,6 +48,9 @@ const el = {
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"), categoryTrigger: $("#category-trigger"), categoryLabel: $("#category-label"), categoryListbox: $("#category-listbox"), categorySelect: $("#category-select"),
   input: $("#message-input"), send: $("#send"), voiceBtn: $("#voice-btn"), busyLabel: $("#busy-label"), warning: $("#config-warning"), toast: $("#toast"), choiceOverlay: $("#choice-overlay"), composer: $(".composer"),
   attachBar: $("#attach-bar"), attachBtn: $("#attach-btn"), fileInput: $("#file-input"), dropOverlay: $("#drop-overlay"),
+  contextRing: $("#context-ring"), contextRingArc: $("#context-ring-arc"), contextPct: $("#context-pct"),
+  contextMax: $("#context-max"), contextUsed: $("#context-used"), contextLeft: $("#context-left"),
+  contextBar: $("#context-bar"), contextNote: $("#context-note"),
   openSettings: $("#open-settings"), settingsModal: $("#settings-modal"), closeSettings: $("#close-settings"), cancelSettings: $("#cancel-settings"), saveSettings: $("#save-settings"), settingsStatus: $("#settings-status"), providerList: $("#provider-list"), providerEditor: $("#provider-editor"), addProvider: $("#add-provider"),
   mcpTools: $("#mcp-tools"), mcpCount: $("#mcp-count"), mcpStatus: $("#mcp-status"), refreshMcp: $("#refresh-mcp"),
   skillsList: $("#skills-list"), skillCount: $("#skill-count"), skillsStatus: $("#skills-status"), refreshSkills: $("#refresh-skills"),
@@ -189,7 +195,7 @@ function renderModelList() {
   });
   if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">没有已配置的模型</div>';
 }
-function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); }
+function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); renderContextRing(); }
 function openModelList() { closeModeList(); closeSlashMenu(); closeCategoryList(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
 function closeModelList() { state.modelListOpen = false; state.modelSearch = ""; el.modelListbox.classList.add("hidden"); el.modelTrigger.setAttribute("aria-expanded","false"); }
 function focusModelOption() { const options = [...el.modelListbox.querySelectorAll(".model-option")]; options.forEach((item,index) => item.classList.toggle("focused",index === state.modelOptionIndex)); const active = options[state.modelOptionIndex]; if (active) active.scrollIntoView({block:"nearest"}); }
@@ -1161,6 +1167,65 @@ function setBubbleUsage(message, usage) {
     row.querySelector("b").textContent = rows[key];
   });
 }
+// 上下文用量圆环：已用取最近一次请求实际送出的 input（含缓存读），
+// 上限优先用事件里的 context_window，取不到就回落到当前模型的配置。
+const CONTEXT_RING_CIRC = 2 * Math.PI * 15.5;
+function contextWindowFor(key) {
+  const item = (state.models || []).find(model => modelKey(model) === key);
+  const value = item && Number(item.context_window);
+  return value > 0 ? value : null;
+}
+function renderContextRing() {
+  if (!el.contextRing || !el.contextRingArc) return;
+  const windowSize = Number(state.context.window) > 0 ? Number(state.context.window) : contextWindowFor(el.model.value);
+  const used = Number(state.context.used) > 0 ? Number(state.context.used) : null;
+  el.contextRing.classList.remove("unknown", "warn", "danger");
+  if (!used || !windowSize) {
+    el.contextRing.classList.add("unknown");
+    el.contextRingArc.setAttribute("stroke-dashoffset", String(CONTEXT_RING_CIRC));
+    el.contextPct.textContent = "—";
+    el.contextMax.textContent = windowSize ? formatTokens(windowSize) : "—";
+    el.contextUsed.textContent = "—";
+    el.contextLeft.textContent = "—";
+    el.contextBar.style.width = "0";
+    el.contextNote.hidden = true;
+    el.contextRing.setAttribute("aria-label", "上下文用量：暂无数据");
+    return;
+  }
+  const ratio = Math.min(1, used / windowSize);
+  if (ratio >= 0.9) el.contextRing.classList.add("danger");
+  else if (ratio >= 0.7) el.contextRing.classList.add("warn");
+  const percent = Math.round(ratio * 100);
+  el.contextRingArc.setAttribute("stroke-dashoffset", String(CONTEXT_RING_CIRC * (1 - ratio)));
+  el.contextPct.textContent = percent + "%";
+  el.contextMax.textContent = formatTokens(windowSize);
+  el.contextUsed.textContent = formatTokens(used);
+  el.contextLeft.textContent = formatTokens(Math.max(windowSize - used, 0));
+  el.contextBar.style.width = percent + "%";
+  el.contextNote.hidden = !state.context.estimated;
+  el.contextRing.setAttribute("aria-label", "上下文用量 " + percent + "%，已用 " + used + " / " + windowSize + " token");
+}
+// 切会话后从历史恢复：取最近一条带 context_used 的 assistant 消息
+function restoreContextRing(messages) {
+  const list = messages || [];
+  let restored = null;
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const usage = list[index] && list[index].usage;
+    if (usage && Number(usage.context_used) > 0) { restored = usage; break; }
+  }
+  state.context = restored
+    ? {used: Number(restored.context_used), window: null, estimated: false}
+    : {used: null, window: null, estimated: false};
+  renderContextRing();
+}
+// 流事件带来的上下文占用：token_usage 每轮请求后发一次，done 收尾再发一次
+function applyContextUsage(event) {
+  if (!event || (event.context_used == null && event.context_window == null)) return;
+  if (Number(event.context_used) > 0) state.context.used = Number(event.context_used);
+  if (Number(event.context_window) > 0) state.context.window = Number(event.context_window);
+  state.context.estimated = Boolean(event.context_estimated);
+  renderContextRing();
+}
 function finishAssistant(message, deferred = false) {
   if (!message || message.finished) return;
   message.finished = true;
@@ -1818,6 +1883,7 @@ async function loadSession(id) {
     // 会话里存着模型上次用 set_active_category 设的分类：切回来/刷新后要显示它，
     // 而不是永远从「全部」开始。这不是用户的选择，所以不置 categoryTouched。
     state.categoryTouched = false; selectCategory(state.session.meta.category || "");
+    restoreContextRing(state.session.messages);
     el.messages.innerHTML = ""; hidePhasePanel(); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
     if (!restoreView(id)) {
@@ -1960,9 +2026,9 @@ function handleStreamEvent(id, type, event, assistant) {
   else if (type === "skill_loaded") { /* 识别但不在气泡上展示 Skill 标签 */ }
   else if (type === "notice") showToast(event.message || "附件处理提示");
   else if (type === "session_meta") syncCategoryFromMeta(id, event.category || "");
-  else if (type === "token_usage") setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated});
+  else if (type === "token_usage") { setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated}); applyContextUsage(event); }
   else if (type === "error") throw streamFailure(event);
-  else if (type === "done") { finishAssistant(assistant); const stream = state.streams.get(id); if (stream && assistant.awaitingInput) stream.awaiting = true; setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); }
+  else if (type === "done") { finishAssistant(assistant); const stream = state.streams.get(id); if (stream && assistant.awaitingInput) stream.awaiting = true; setBubbleUsage(assistant, {total: event.tokens, input: event.tokens_input, output: event.tokens_output, estimated: event.tokens_estimated, cache_read: event.cache_read_tokens, reasoning: event.reasoning_tokens, model: event.model}); setBubbleTiming(assistant, {elapsed: event.elapsed_ms, think: event.think_ms, ttft: event.ttft_ms, tps: event.tps}); setBubbleTime(assistant, new Date()); applyContextUsage(event); }
 }
 async function sendMessage(rawMessage = null, displayContent = null, retryAttachments = null) {
   const busyId = currentId();
@@ -2151,7 +2217,9 @@ function renderProviderEditor() {
 }
 // 模型设置里的上下文窗口/最大输出用 K/M 自适应：128K 这类约定俗成的写法换成 M 反而难读。
 // 用量面板一律用 M（见 Charts.formatMillions），两者口径不同是刻意的。
-function formatTokens(value) { return value >= 1048576 ? `${Math.round(value / 104857.6) / 10}M` : value >= 1024 ? `${Math.round(value / 102.4) / 10}K` : String(value); }
+// 紧凑 token 数：32K / 1M。按十进制量级切档，1,000,000 就是 1M；
+// 拿 1024 进制去切会把 1M 窗口显示成 976.6K。
+function formatTokens(value) { return value >= 1000000 ? `${Math.round(value / 100000) / 10}M` : value >= 1000 ? `${Math.round(value / 100) / 10}K` : String(value); }
 function candidateLimits(model) { return ((state.settings.discoveredModels || {})[model.provider] || []).find(item => (item.id || item.model_id) === model.id) || null; }
 function autoLimit(model, name) { const limits = candidateLimits(model), value = limits && limits[name]; return value ? `自动 · ${formatTokens(value)}` : "保存时自动识别"; }
 function renderModelCard(model, parent) {

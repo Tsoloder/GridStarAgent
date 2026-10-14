@@ -693,3 +693,23 @@
   .memory-card-head{flex-wrap:wrap}
   .memory-tool>summary{flex-wrap:wrap}
 }
+/* 上下文用量圆环：位于输入框底部工具栏，紧邻专业分类下拉。已用取最近一次请求
+   实际送出的 input（含缓存读），上限取当前模型的 context_window；无数据时画灰环。 */
+.context-ring{position:relative;width:30px;height:30px;flex:0 0 30px;display:flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:var(--radius-sm);background:none;outline:none;transition:background .15s ease,border-color .15s ease}
+.context-ring:hover,.context-ring:focus-visible{border-color:var(--line-strong);background:var(--surface-2)}
+.context-ring svg{display:block}
+.context-ring-track{stroke:var(--line)}
+.context-ring-arc{stroke:var(--cyan);transition:stroke-dashoffset .35s ease,stroke .25s ease}
+.context-ring.unknown .context-ring-arc{stroke:var(--muted-2);opacity:.55}
+.context-ring.warn .context-ring-arc{stroke:var(--orange)}
+.context-ring.danger .context-ring-arc{stroke:var(--red)}
+.context-pop{position:absolute;left:50%;bottom:calc(100% + 8px);z-index:30;min-width:216px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--band-2);box-shadow:0 10px 26px #000a;text-align:left;transform:translate(-50%,4px);opacity:0;visibility:hidden;pointer-events:none;transition:opacity .14s ease,transform .14s ease,visibility .14s}
+.context-ring:hover .context-pop,.context-ring:focus-visible .context-pop{opacity:1;visibility:visible;transform:translate(-50%,0)}
+.context-pop .pop-title{display:flex;align-items:center;gap:6px;padding-bottom:7px;margin-bottom:6px;border-bottom:1px solid var(--line);color:var(--text);font-size:11px;font-weight:600}
+.context-pop .pop-title .pop-total{margin-left:auto;font-weight:500;font-family:Consolas,monospace}
+.context-pop .pop-row{display:flex;justify-content:space-between;gap:18px;padding:3px 0;font-size:11px}
+.context-pop .pop-row>span{color:var(--muted)}
+.context-pop .pop-row>b{color:var(--text-bright);font-weight:500;font-family:Consolas,monospace;white-space:nowrap}
+.context-pop .pop-bar{height:4px;margin-top:7px;border-radius:2px;background:var(--surface-3);overflow:hidden}
+.context-pop .pop-bar>i{display:block;height:100%;width:0;border-radius:2px;background:var(--cyan);transition:width .35s ease,background .25s ease}
+.context-pop .pop-note{margin-top:6px;color:var(--muted-2);font-size:9px}

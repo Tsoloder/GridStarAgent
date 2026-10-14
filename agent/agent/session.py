@@ -236,6 +236,9 @@ class Session:
                     record[key] = int(usage[key])
             if usage.get("model"):
                 record["model"] = str(usage["model"])
+            # 上下文用量圆环靠它恢复：最近一次请求实际送出的 input（不是本轮累计）
+            if usage.get("context_used"):
+                record["context_used"] = int(usage["context_used"])
             message["usage"] = record
         if elapsed_ms is not None:
             # 本轮（含多轮工具调用）总耗时，供历史会话气泡展示

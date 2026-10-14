@@ -1638,3 +1638,26 @@ async def test_truncation_retry_limit_is_per_turn_not_process_global(tmp_path, m
         for event in second
     )
 
+
+@pytest.mark.asyncio
+async def test_done_event_carries_context_usage(tmp_path, monkeypatch):
+    """上下文用量圆环的数据源：done 事件要带上最近一次请求的 input 与模型窗口。
+
+    注意不能是 _usage_totals["input"]（本轮多次请求之和），那是累计量。
+    """
+    import uuid
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    events = await _run_fixture("simple_chat")
+    done = next(event for event in events if event["type"] == "done")
+    assert done["context_used"] > 0
+    assert done["context_window"] == 32000
+
+    # 同一份数据也要落到 assistant 消息的 usage 里，切会话时才能恢复圆环
+    sid = str(uuid.uuid5(uuid.NAMESPACE_URL, load_fixture("simple_chat")["input"]["session_id"]))
+    messages = session_mod._read_jsonl(str(session_mod.session_dir(sid) / "messages.jsonl"))
+    assistant = [m for m in messages if m.get("role") == "assistant"][-1]
+    assert assistant["usage"]["context_used"] > 0
+

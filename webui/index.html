@@ -109,6 +109,20 @@
               </div>
             </div>
           </div>
+          <div id="context-ring" class="context-ring" tabindex="0" role="img" aria-label="上下文用量">
+            <svg viewBox="0 0 36 36" width="22" height="22" aria-hidden="true">
+              <circle class="context-ring-track" cx="18" cy="18" r="15.5" fill="none" stroke-width="4"></circle>
+              <circle id="context-ring-arc" class="context-ring-arc" cx="18" cy="18" r="15.5" fill="none" stroke-width="4" stroke-linecap="round" stroke-dasharray="97.39" stroke-dashoffset="97.39" transform="rotate(-90 18 18)"></circle>
+            </svg>
+            <div class="context-pop" role="tooltip">
+              <div class="pop-title">上下文用量 <b class="pop-total" id="context-pct">—</b></div>
+              <div class="pop-row"><span>窗口上限</span><b id="context-max">—</b></div>
+              <div class="pop-row"><span>已用</span><b id="context-used">—</b></div>
+              <div class="pop-row"><span>剩余</span><b id="context-left">—</b></div>
+              <div class="pop-bar"><i id="context-bar"></i></div>
+              <div class="pop-note hidden" id="context-note">本地估算</div>
+            </div>
+          </div>
           <input id="skill-select" type="hidden" value="">
           <button id="skill-chip" class="skill-chip hidden" type="button" title="清除技能"><b>无 Skill</b><span aria-hidden="true">×</span></button>
           <span id="busy-label" class="busy-label"></span>
