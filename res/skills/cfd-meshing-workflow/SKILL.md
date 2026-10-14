@@ -39,7 +39,7 @@ allowed-tools: []
 | 5 | MAC、平均气动弦长、翼根/翼尖弦长、展长、特征长度、尺寸测量 | `references/geometry-parameters.md` |
 | 6 | 表面网格、面网格生成 | `references/cad-to-mesh.md` §4；已按部件分组时用 `references/part-based-surface-mesh.md` |
 | 7 | 各向异性、网格线分布、前缘/后缘/翼梢加密（机翼子组存在时强制） | `references/anisotropic-mesh.md` |
-| 8 | 后缘面处理、后缘网格、trailing edge、翼梢交线（机翼子组存在时强制） | 独立 Skill `trailing-edge-processing`（入口说明见 `references/trailing-edge-processing.md`） |
+| 8 | 后缘面处理、后缘网格、trailing edge、翼梢交线（机翼子组存在时强制） | `wing-anisotropy-processing` 的 `references/type1.md` / `references/type2.md`（一体化入口 `WingAnisoProcessWingAnisotropy` 已覆盖，仅 step8b 失败时回退；入口说明见 `references/trailing-edge-processing.md`） |
 | 9 | 体网格块创建、外场生成、半模边界线 | `references/cad-to-mesh.md` §7.1–§7.3 |
 | 10 | 空间网格、体网格、附面层 | `references/cad-to-mesh.md` §7.4 |
 | 11 | 边界条件、BC、物面、远场、对称、流入流出 | `references/boundary-conditions.md` |
@@ -58,7 +58,7 @@ allowed-tools: []
 **各向异性网格处理（前置条件满足时）→ 后缘面处理 → 体网格块创建 → 空间网格生成 → 边界条件设置 → 网格块质量检查**
 
 1. **各向异性网格处理**：先用 `GetAllSpitAssemblyGroupProperty` 确认机翼子组存在（`wingUpper`、`wingLower`、`wingTip`、`wingTrailingEdge`）。存在时按流程 A 表第 7 行执行 `WingAnisoProcessWingAnisotropy`；不存在时将该阶段标记 `skipped` 并在 `note` 中注明原因，再进入后缘面处理。
-2. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取独立 Skill `trailing-edge-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `trailing-edge-processing`，路径填 `type1.md` 或 `type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
+2. **后缘面处理**：用 `GetSpliteAssemlyDomainsBatch`（`group_names` = `["wingTrailingEdge", "wingTip", "engine", "fuselage"]`）获取各分组网格面 ID → 调 `ClassifyTrailingEdgeDomains` 判定每个后缘面的类型 → 读取 `wing-anisotropy-processing` 的类型步骤资料（调 `read_skill_resource` 时 skill 参数填 `wing-anisotropy-processing`，路径填 `references/type1.md` 或 `references/type2.md`，**不要在本 Skill 下找这两个文件**），严格按对应类型步骤逐个处理。正常情况后缘面处理已包含在上一步 `WingAnisoProcessWingAnisotropy` 一体化入口内（step2b 分类 / step4b 分布 / step8b 删除原面并装配），只有该入口返回的 step8b 失败时才按此回退执行。**严禁调用不存在的 Skill `trailing-edge-processing`**。先处理全部类型一，再处理全部类型二，两种类型步骤完全不同，严禁混淆。
 3. **体网格块创建**：按流程 A 表第 9 行执行；半模场景先调 `UGHalfModelLine` 设置半模边界线，外场不存在时先按外场规则体创建生成外场。
 4. **空间网格生成**：按流程 A 表第 10 行执行。
 5. **边界条件设置**：按流程 A 表第 11 行执行。
