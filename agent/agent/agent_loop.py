@@ -346,10 +346,97 @@ SET_CATEGORY_TOOL = RuntimeTool(
 )
 
 
+LIST_DIRECTORY_TOOL_NAME = "ListDirectoryFiles"
+
+LIST_DIRECTORY_TOOL = RuntimeTool(
+    name=LIST_DIRECTORY_TOOL_NAME,
+    description=(
+        "列出本机某个目录下的文件与子目录（只读，不修改任何数据）。"
+        "当用户给出目录路径、需要知道里面有哪些数模或工程文件时调用，"
+        "例如列出 D:\\Code\\igesAndStep 下有哪些 .iges / .step 文件；"
+        "用户只给了目录时先用本工具看清文件清单，不要让用户手动报文件名。"
+        "支持按文件名通配符过滤（pattern，如 *.step）以及是否递归子目录（recursive）。"
+        "结果按名称排序，最多返回 200 条，超出会截断并提示。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "要列出的目录绝对路径，如 D:\\Code\\igesAndStep",
+            },
+            "pattern": {
+                "type": "string",
+                "description": "可选的文件名通配符过滤，如 *.step、*.iges",
+            },
+            "recursive": {
+                "type": "boolean",
+                "description": "是否递归列出子目录（默认 false，只列当前层）",
+            },
+        },
+        "required": ["path"],
+    },
+)
+
+# 列目录条目上限：避免把超大目录整段塞进上下文（大结果外置见 context.py）。
+_LIST_DIRECTORY_MAX_ENTRIES = 200
+
+
+def _human_size(num_bytes: int) -> str:
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return ("%d %s" % (size, unit)) if unit == "B" else ("%.1f %s" % (size, unit))
+        size /= 1024
+    return "%d B" % num_bytes
+
+
+def _list_directory(path_string: str, pattern: str = "", recursive: bool = False) -> str:
+    """只读列目录：返回中文清单文本；任何异常都转成可读的失败文案。"""
+    raw = str(path_string or "").strip().strip('"').strip("'")
+    if not raw:
+        return "ListDirectoryFiles 失败：缺少 path（目录路径）。"
+    try:
+        base = Path(raw).expanduser()
+        if not base.exists():
+            return "ListDirectoryFiles 失败：路径不存在：%s" % raw
+        if not base.is_dir():
+            return "ListDirectoryFiles 失败：不是目录：%s" % raw
+        name_pattern = str(pattern or "").strip() or "*"
+        items = list(base.glob(("**/" if recursive else "") + name_pattern))
+        items.sort(key=lambda p: p.as_posix().lower())
+        total = len(items)
+        shown = items[:_LIST_DIRECTORY_MAX_ENTRIES]
+        dir_count = sum(1 for p in items if p.is_dir())
+        lines = []
+        for item in shown:
+            try:
+                stat = item.stat()
+            except OSError:
+                continue
+            stamp = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            rel = item.relative_to(base).as_posix()
+            if item.is_dir():
+                lines.append("- %s（目录，%s）" % (rel, stamp))
+            else:
+                lines.append("- %s（文件，%s，%s）" % (rel, _human_size(stat.st_size), stamp))
+        header = "目录 %s 下匹配到 %d 项（%d 个文件、%d 个子目录）" % (
+            base.as_posix(), total, total - dir_count, dir_count,
+        )
+        if total > _LIST_DIRECTORY_MAX_ENTRIES:
+            header += "，仅显示前 %d 项" % _LIST_DIRECTORY_MAX_ENTRIES
+        if not lines:
+            return header + "：没有匹配的条目。"
+        return header + "：\n" + "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001 - 列目录失败不应打断对话
+        return "ListDirectoryFiles 失败：%s" % exc
+
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
                    UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME,
-                   EXPORT_SESSION_TOOL_NAME, SET_CATEGORY_TOOL_NAME}
+                   EXPORT_SESSION_TOOL_NAME, SET_CATEGORY_TOOL_NAME,
+                   LIST_DIRECTORY_TOOL_NAME}
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -1140,7 +1227,7 @@ async def run_agent_loop(
             )
             runtime_tools = skill_registry.internal_tools() + [
                 UPDATE_PLAN_TOOL, ASK_USER_TOOL, EXPORT_SESSION_TOOL,
-                SET_CATEGORY_TOOL,
+                SET_CATEGORY_TOOL, LIST_DIRECTORY_TOOL,
             ]
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
@@ -1436,7 +1523,8 @@ async def run_agent_loop(
             for _step_idx, tc in enumerate(tool_calls, 1):
                 internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,
-                                               ASK_USER_TOOL_NAME, EXPORT_SESSION_TOOL_NAME}
+                                               ASK_USER_TOOL_NAME, EXPORT_SESSION_TOOL_NAME,
+                                               LIST_DIRECTORY_TOOL_NAME}
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -1628,6 +1716,14 @@ async def run_agent_loop(
                                 "可选分组：%s。" % (group_id or "(空)",
                                                    "、".join(sorted(group_tools)))
                             )
+                    elif tc["name"] == LIST_DIRECTORY_TOOL_NAME:
+                        # 内置只读列目录：不走 MCP、不走审批
+                        _dir_args = tc.get("args") or {}
+                        result = _list_directory(
+                            _dir_args.get("path", ""),
+                            _dir_args.get("pattern", ""),
+                            bool(_dir_args.get("recursive", False)),
+                        )
                     else:
                         if is_param_cancelled and cancelled_tool and tc["name"] == cancelled_tool:
                             # 用户已取消这组参数：即便模型仍然发起调用也拦下，不再兜底执行
