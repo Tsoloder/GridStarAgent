@@ -9,8 +9,8 @@ GridStar 网格生成软件的 AI 智能助手：把「CAD 导入 → 水密处�
 ## 功能特性
 
 - **多 Provider 模型接入**：OpenAI Chat Completions / OpenAI Responses / Anthropic Messages，以及 DeepSeek、Ollama、OpenRouter 等任意 OpenAI 兼容服务；模型以 `provider/model` 标识，独立配置上下文窗口、输出上限与能力（工具、并行工具、推理、视觉、流式用量）。
-- **109 个 GridStar 工具，按业务域分组**：默认只暴露只读查询与工程文件管理，其余分组由模型按当前阶段调用 `enable_tool_group` 按需启用，避免每轮携带全量 Schema。
-- **技能（Skill）系统**：`res/skills/` 下的 Markdown 技能包按需加载，例如 `cfd-meshing-workflow` 提供完整网格流程路由表，`trailing-edge-processing`、`wing-anisotropy-processing` 提供专项处理步骤；支持 `read_skill` / `read_skill_resource` / `create_skill`。
+- **125 个 GridStar 工具，按业务域分组**：默认只暴露只读查询与工程文件管理，其余分组由模型按当前阶段调用 `enable_tool_group` 按需启用，避免每轮携带全量 Schema。
+- **技能（Skill）系统**：`res/skills/` 下的 Markdown 技能包按需加载，例如 `cfd-meshing-workflow` 提供完整网格流程路由表，`wing-anisotropy-processing`、`missile-trailing-edge-processing` 提供专项处理步骤；支持 `read_skill` / `read_skill_resource` / `create_skill`。
 - **阶段台账与自动模式**：多阶段任务通过内置 `update_plan` 维护全量阶段计划，未创建计划就调用外部工具会被硬拦截；auto 模式下按计划自动推进，manual 模式下每步等待确认。
 - **工具审批与人机确认**：有副作用的工具调用可挂起等待用户确认（`/sessions/{id}/tool-approvals/{call_id}`），需要拍板时模型调用 `ask_user_question` 弹出选择卡片。
 - **后台任务与断线重连**：Agent 循环运行在独立后台 Task 中，切换会话或刷新页面不中断回复；SSE 断连后按事件序号整体回放，不丢不重；「停止」会真正取消后台任务并补齐被中断的 tool_calls。
