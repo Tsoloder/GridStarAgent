@@ -8,7 +8,7 @@
 |---|---:|---|
 | CAD 导入角度 | 10.0 | 曲率自适应角度 |
 | 表面网格目标尺寸 | 0.05 | 应优先通过默认参数工具获取 |
-| 空间网格层数 | 40 | 附面层层数参考 |
+| 空间网格层数 | 60 | 附面层层数参考（与 `UGUGSp` 工具默认一致） |
 | 增长率 | 1.2 | 空间网格增长率参考 |
 
 ## 边界条件属性参考
@@ -36,11 +36,11 @@
 | 机身 | 4% × MAC | 目标尺寸 × 1/10 | 默认 10° |
 | 机翼 | ≤ 3% × 当地弦长，默认用 2% × 当地弦长 | 目标尺寸 × 1/10 | 默认 10° |
 | 其他 | 4% × MAC | 目标尺寸 × 1/10 | 默认 10° |
-| 外场（若存在） | 按 `references/cad-to-mesh.md` §6.2 的马赫数规则计算 | 目标尺寸 × 1/10 | 默认 10° |
+| 外场（若存在） | 按 `references/cad-to-mesh.md` §9.2 的马赫数规则计算 | 目标尺寸 × 1/10 | 默认 10° |
 
 多段翼可参考机翼的要求分布表面网格。主翼、襟翼、副翼、缝翼、导流片等的前后缘附近表面网格间距取 0.1% × 平均气动弦长。
 
-MAC 计算公式与获取方式参见 `references/geometry-parameters.md`。用 `GenerateSurMeshBySpitAssemblyGroupProperty` 分组设置参数时，`references/part-based-surface-mesh.md` §3 的分组比例表与本表等价：该表的"2% × MAC"就是本表机翼行的默认值（MAC 可近似代替当地弦长）。
+MAC 计算公式与获取方式参见 `references/geometry-parameters.md`。用 `GenerateSurMeshBySpitAssemblyGroupProperty` 分组设置参数时，`references/part-based-surface-mesh.md` §2 的分组比例表与本表等价：该表的"2% × MAC"就是本表机翼行的默认值（MAC 可近似代替当地弦长）。
 
 ## 各向异性尺寸参考
 
@@ -48,8 +48,8 @@ MAC 计算公式与获取方式参见 `references/geometry-parameters.md`。用 
 
 ## 空间网格参数参考
 
-空间网格参数（附面层首层高度、增长率 1.2、层数 40、扩散因子、单元类型）参见 `references/cad-to-mesh.md` §6.4。
+空间网格参数（附面层首层高度、增长率 1.2、层数 60、扩散因子、单元类型）参见 `references/cad-to-mesh.md` §9.4。
 
 ## 外场生成规则
 
-外场生成规则（马赫数与外场大小/形状对应关系）、`chooseParam` 取值与体创建缩放系数参见 `references/cad-to-mesh.md` §6.2、§6.3。
+外场生成规则（马赫数与外场大小/形状对应关系）、`chooseParam` 取值与体创建缩放系数参见 `references/cad-to-mesh.md` §9.2、§9.3。

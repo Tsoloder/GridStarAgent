@@ -6,7 +6,7 @@
 
 后缘面处理已在 `WingAnisoProcessWingAnisotropy` 一体化入口内部完成（step2b 分类、step4b 分布设置、step8b 删除原面并装配），正常情况下不需要单独执行。
 
-仅当该入口返回的 `steps` 中 `step8b_te_delete_assemble` 失败、或后缘面条目 `status=failed` 时，才读取 `wing-anisotropy-processing` 的类型步骤资料做回退：
+仅当该入口返回的**顶层 `status` 为 `"failed"` 且 `message` 指向后缘面处理失败时**，才读取 `wing-anisotropy-processing` 的类型步骤资料做回退（`steps` 内子步骤字段（如 `aniso_domains`）的 `failed` 不代表整体失败，不作判据）：
 
 ```
 read_skill_resource(skill_id="wing-anisotropy-processing", relative_path="references/type1.md")

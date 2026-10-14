@@ -4,7 +4,7 @@ description: 引导用户通过 MCP 工具完成机翼各向异性网格处理�
 aliases: [机翼各向异性, 各向异性处理, wing anisotropy, 前缘分布, 弦向分布, 展向分布, MAC, 翼段, 交线识别, 各向异性域, 后缘面处理, 后缘网格, trailing edge, 后缘分布, 翼梢交线]
 tags: [CFD, 网格, 各向异性, 机翼, 前缘, MAC, 后缘面]
 category: Aircraft
-version: 2.1.0
+version: 2.2.0
 author: GridStarAgent
 allowed-tools: []
 ---
@@ -74,15 +74,16 @@ allowed-tools: []
 }
 ```
 
-### 失败处理
+> **注意**：`steps` 各键名与顶层汇总字段（`aniso_domains`、`aniso_line_groups` 等）仅供排查参考，键名以工具实时返回为准，**成败判定只看顶层 `status`**；子字段中的 `"failed"` 不代表整体失败。
 
-- `status` 为 `"failed"` 时停止，检查 `message` 字段获取具体原因
-- 常见失败原因：部件分割未完成、表面网格未生成、分组缺失
-- 若一体化入口内部的后缘面处理步骤（step8b_te_delete_assemble）失败，**可回退到下方**的独立后缘面 MCP 工具逐个处理
+### 成败判定（只看顶层 `status`）
+
+- **唯一判据是返回顶层的 `status` 字段**：为 `"success"` 即整体成功，本阶段完成，直接进入下一阶段；为 `"failed"` 才视为失败，读 `message` 获取具体原因（常见：部件分割未完成、表面网格未生成、分组缺失）。
+- `steps` 内各子步骤字段（`step1_dimensions` … `step8b_*`）与顶层汇总字段（`aniso_domains`、`aniso_line_groups` 等）只是执行信息，供排查参考。其中出现 `"failed"`（例如 `aniso_domains: "failed"`）**不代表整体失败**，不得据此判定失败，也不得据此触发回退。
 
 ## 后缘面处理失败回退流程
 
-> ⚠️ **仅在 `WingAnisoProcessWingAnisotropy` 的 `steps` 中 `step8b_te_delete_assemble` 失败**，或返回中 `te_classification_count` > 0 但某些后缘面条目 `status=failed` 时使用。
+> ⚠️ **仅当顶层 `status` 为 `"failed"`、且 `message` 指向后缘面处理失败时**才使用本回退流程。顶层 `status` 为 `"success"` 时后缘面已由入口完成，**严禁**因任何子步骤字段的 `failed` 值而回退。
 
 ### 第0步：参数准备
 

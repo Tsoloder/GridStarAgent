@@ -1,6 +1,6 @@
 # 体网格与空间网格
 
-体网格块创建（`UGBlockCreate`）和空间网格生成（`UGUGSp`）的完整流程参见 `references/cad-to-mesh.md` 第 5 节。
+体网格块创建（`UGBlockCreate`）和空间网格生成（`UGUGSp`）的完整流程参见 `references/cad-to-mesh.md` 第 9 节。
 
 ## 快速索引
 

@@ -77,75 +77,27 @@
 
 ## 5. 机翼各向异性与后缘面一体化处理
 
-机翼各向异性与后缘面处理已合并为一个一体化流程，属于独立 Skill `wing-anisotropy-processing`，详细流程见该 Skill 的 SKILL.md。
+四类各向异性处理（机翼 / 吊舱 / 尾翼 / 其余面）的**总表、入口工具、前置分组、顺序与跳过规则统一见 `references/anisotropy-overview.md`**；本节及第 6–8 节不再重复列出。
 
-**阶段位置**：表面网格生成之后、体网格块创建之前。
+机翼类（含后缘面分类 / 分布 / 装配与失败回退）详细步骤见 Skill `wing-anisotropy-processing`。
 
-**前置条件**：
-1. 自动部件分割已完成，机翼子组 `wingUpper` / `wingLower` / `wingTip` / `wingTrailingEdge` / `fuselage` 已存在
-2. 表面网格已生成
-
-**执行要求**：一旦计划列入了本阶段且前置条件满足，就必须执行，不得以用户未提网格数量要求为由跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
-
-**核心工具**：**`WingAnisoProcessWingAnisotropy`** — 一键执行机翼各向异性 + 后缘面分类 + 后缘分布设置 + 后缘装配的完整一体化流程。
-
-**失败回退**：若 `WingAnisoProcessWingAnisotropy` 返回中 `step8b_te_delete_assemble` 失败，可回退到独立后缘面 MCP 工具：先 `ProcessAllTrailingEdges` 批量处理，失败后按 type1/type2 分步处理（详见 `wing-anisotropy-processing` SKILL.md 的后缘面处理失败回退流程）。
-
-**完成标准**：`WingAnisoProcessWingAnisotropy` 返回 `status: "success"`，见 `wing-anisotropy-processing` 的 SKILL.md。
+**执行要求**：一旦计划列入了本阶段且前置条件满足，就必须执行，不得以用户未提网格数量要求为由跳过；某类前置分组确认缺失时标记该类 `skipped` 并在 `note` 中说明原因。
 
 ## 6. 吊舱各向异性处理
 
-吊舱（含发动机短舱和支架）各向异性处理为独立 Skill `nacelle-anisotropy-processing`，详细流程见该 Skill 的 SKILL.md。
-
-**阶段位置**：机翼各向异性与后缘面一体化处理之后、体网格块创建之前。
-
-**前置条件**：
-1. 发动机子部件分割已完成，以下分组已存在：`engineInner` / `engineOuter` / `enginePylonInner` / `enginePylonOuter` / `enginePylon` / `engineTrailingEdge` / `enginePylonTrailingEdge`
-2. 机翼各向异性处理已完成（`WingAnisoProcessWingAnisotropy`）
-3. 表面网格已生成
-
-**执行要求**：一旦计划列入了本阶段且前置条件满足，就必须执行，不得以用户未提网格数量要求为由跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
-
-**核心工具**：**`NacelleAnisoProcessNacelleAnisotropy`** — 一键执行吊舱各向异性网格处理的完整一体化流程。
-
-**完成标准**：`NacelleAnisoProcessNacelleAnisotropy` 返回 `status: "success"`，见 `nacelle-anisotropy-processing` 的 SKILL.md。
+见 `references/anisotropy-overview.md`（四类总表）；详细步骤见 Skill `nacelle-anisotropy-processing`。
 
 ## 7. 尾翼各向异性处理
 
-尾翼（平尾 + 立尾）各向异性处理为独立 Skill `tail-anisotropy-processing`。
-
-**阶段位置**：吊舱各向异性处理之后、体网格块创建之前。
-
-**前置条件**：
-1. 尾翼子部件分割已完成，以下分组已存在：
-   - 立尾：`verticalTailRight` / `verticalTailLeft` / `verticalTailTip` / `verticalTailTrailingEdge`
-   - 平尾：`horizontalTailUpper` / `horizontalTailLower` / `horizontalTailTip` / `horizontalTailTrailingEdge`
-2. 机翼及吊舱各向异性处理已完成（`WingAnisoProcessWingAnisotropy` / `NacelleAnisoProcessNacelleAnisotropy`）
-3. 表面网格已生成
-
-**执行要求**：前置条件满足时必须执行，不得跳过；分组缺失时标记该阶段 `skipped` 并在 `note` 中说明原因。
-
-**核心工具**：**`TailAnisoProcessTailAnisotropy`** — 一键执行尾翼各向异性网格处理的完整一体化流程。
-
-**完成标准**：`TailAnisoProcessTailAnisotropy` 返回 `status: "success"`。
+见 `references/anisotropy-overview.md`（四类总表）；详细步骤见 Skill `tail-anisotropy-processing`。
 
 ## 8. 其余面各向异性处理
 
-其余网格面（机身、机尾等未被机翼/吊舱/尾翼覆盖的面）各向异性处理为独立 Skill `remaining-anisotropy-processing`。
-
-**阶段位置**：尾翼各向异性处理之后、体网格块创建之前。
-
-**前置条件**：
-1. 机翼、吊舱（若存在）、尾翼（若存在）各向异性处理已完成
-2. 表面网格已生成
-
-**核心工具**：**`RemainingAnisoProcessRemainingAnisotropy`** — 一键执行其余面各向异性处理。
-
-**完成标准**：`RemainingAnisoProcessRemainingAnisotropy` 返回 `status: "success"`。
+见 `references/anisotropy-overview.md`（四类总表）；详细步骤见 Skill `remaining-anisotropy-processing`。
 
 ## 9. 体网格与空间网格
 
-**阶段闸门（强制）**：表面网格生成成功后，必须完成机翼、吊舱、尾翼、其余面各向异性处理（前置条件满足时），然后才能进行体网格块创建（`UGBlockCreate`）与空间网格生成（`UGUGSp`）。任何时候都不得跳过机翼处理或体网格块创建直接调用 `UGUGSp`。
+**阶段闸门（强制）**：表面网格生成成功后，必须先按 `references/anisotropy-overview.md` 完成机翼、吊舱、尾翼、其余面四类各向异性处理（每类前置分组以查询结果为准，存在即必做），然后才能进行体网格块创建（`UGBlockCreate`）与空间网格生成（`UGUGSp`）。任何时候都不得跳过其中任一类各向异性处理或体网格块创建直接调用 `UGUGSp`，也不得只做机翼一类就当作四类已完成。
 
 此步骤为强制，不可跳过。manual 模式使用 `tool_params` 确认体创建参数；auto 模式查询默认参数后直接执行 `UGBlockCreate`。体网格块成功后，manual 模式使用 `options` 询问是否继续生成空间网格；auto 模式根据用户原始目标判断。然后按以下步骤执行。
 
@@ -171,7 +123,7 @@
 ### 9.3 体创建
 
 1. 查询体创建所需参数：调用 `GetCreateBlockDefaultParam()`，记返回的默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）与 `meshSize`。
-2. 按 §6.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
+2. 按 §9.2 外场大小规则确定实际 `geoParam` 尺寸；若与默认 `geoParam` 值不同，`meshSizeOrDimension` 必须按同一缩放系数同步调整，保持外场网格分辨率一致：
    - 缩放系数 = 实际 `geoParam` 尺寸值 / 默认 `geoParam` 尺寸值
    - `meshSizeOrDimension` = 默认 `meshSize` × 缩放系数
    - 示例：默认 `geoParam`=121.107、`meshSize`=14.23，外场按 20 倍特征长度放大为 853.6 时，系数=853.6/121.107≈7.05，`meshSizeOrDimension`=14.23×7.05≈100.3。
@@ -187,11 +139,11 @@
 1. 确定附面层参数：
    - 首层高度：根据 y+、雷诺数、参考长度计算。y+ 默认 1，雷诺数默认 1.5×10⁷，参考长度取 MAC。
    - 增长率：1.2（默认）。
-   - 层数：40（默认）。
+   - 层数：60（默认，与 `UGUGSp` 工具描述一致）。
    - 扩散因子：粗网格 0.5 / 中等 0.8 / 细网格 0.98。
    - 单元类型：四面体（默认）。
 
-   > **预留工具**：`CalculateFirstLayerHeight`（附面层首层高度计算）— 当前 MCP 工具列表中尚不存在。在工具就绪前，按上述公式由 AI 计算或向用户询问。
+   > **预留工具**：`CalculateFirstLayerHeight`（附面层首层高度计算）— 当前 MCP 工具列表中尚不存在。在工具就绪前，按上述公式由 AI 计算；缺少来流工况、公式所需输入无法唯一确定时，按基础提示词第 2.1 节第 5 条就近取一个合理值，并在阶段 `note` 中记录所依据的假设，不要因此长时间自问或反复推翻。
 
 2. 调用 `UGUGSp` 生成空间网格。
 3. 手动模式使用 `tool_params` 确认，自动模式使用查询或 Schema 默认参数直接执行。

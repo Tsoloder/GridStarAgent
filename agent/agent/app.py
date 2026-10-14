@@ -259,6 +259,18 @@ def _session_turn_lock(session_id: str):
     return lock
 
 
+def _ensure_config_lock() -> asyncio.Lock:
+    """配置锁单例：lifespan 会重建，其余入口统一走这里。
+
+    模型设置与记忆开关共用同一个 revision，必须共用同一把锁；各自 ``or asyncio.Lock()``
+    会 new 出两把不同的锁，两者之间就没有互斥，409 防护随之失效。
+    """
+    global _config_lock
+    if _config_lock is None:
+        _config_lock = asyncio.Lock()
+    return _config_lock
+
+
 async def _request_tool_approval(session_id, call_id, name, args):
     loop = asyncio.get_running_loop()
     future = loop.create_future()
@@ -283,8 +295,6 @@ def _memory_config_writer(updates) -> MemoryConfig:
     复用模型设置的同一份版本化落盘：两者共用一个 revision，这里若另写一套，
     模型 Tab 保存时就会撞 409。所以路由层要先拿 `_config_lock`。
     """
-    from dataclasses import replace
-
     global current_config
     if current_config is None:
         raise ConfigError("配置尚未加载，无法保存记忆开关")
@@ -393,7 +403,27 @@ class NoStoreStaticFiles(StaticFiles):
 
 
 app.mount("/ui", NoStoreStaticFiles(directory=str(WEBUI_DIR), html=True), name="webui")
-app.mount("/uploads", StaticFiles(directory=str(UPLOADS_DIR), check_dir=False), name="uploads")
+
+
+# 上传目录里这些后缀会被浏览器当页面渲染、进而执行脚本；而 /uploads 与 API
+# 同源（同源即可读写 config、会话、触发工具调用），所以对外一律降级成纯文本
+# 加下载，不做内联渲染。
+_UNSAFE_SERVE_SUFFIXES = {".html", ".htm", ".xhtml", ".xml", ".svg"}
+
+
+class UploadsStaticFiles(StaticFiles):
+    """上传文件：按扩展名给出安全的 Content-Type，并统一加 nosniff。"""
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        if Path(path).suffix.lower() in _UNSAFE_SERVE_SUFFIXES:
+            response.headers["Content-Type"] = "text/plain; charset=utf-8"
+            response.headers["Content-Disposition"] = "attachment"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return response
+
+
+app.mount("/uploads", UploadsStaticFiles(directory=str(UPLOADS_DIR), check_dir=False), name="uploads")
 
 
 @app.post("/upload")
@@ -557,15 +587,14 @@ async def update_config(body: dict):
     raw_config = body.get("config")
     if raw_config is None:
         raw_config = {key: value for key, value in body.items() if key != "revision"}
-    if _config_lock is None:
-        _config_lock = asyncio.Lock()
-    async with _config_lock:
+    async with _ensure_config_lock():
         actual_revision = config_revision(current_config) if current_config is not None else None
         if expected_revision != actual_revision:
             return JSONResponse(
                 {"error": "config revision conflict", "revision": actual_revision},
                 status_code=409,
             )
+        candidate_catalog = candidate_runtime = None
         try:
             candidate = config_from_dict(_apply_model_limits(raw_config))
             if current_config is not None:
@@ -573,7 +602,7 @@ async def update_config(body: dict):
             candidate_catalog, candidate_runtime = _build_runtime(candidate)
             save_config(candidate)
         except (ConfigError, OSError, TypeError, ValueError) as exc:
-            if "candidate_runtime" in locals():
+            if candidate_runtime is not None:
                 await _close_runtime(candidate_runtime)
             return JSONResponse({"error": str(exc)}, status_code=400)
 
@@ -638,8 +667,7 @@ async def memory_summary():
 async def memory_config(body: dict = None):
     """记忆开关立即生效并落盘，不走底部「保存设置」的草稿模型。"""
     updates = body or {}
-    lock = _config_lock or asyncio.Lock()
-    async with lock:
+    async with _ensure_config_lock():
         return _memory_call(MemoryService.patch_config, updates)
 
 
@@ -807,8 +835,10 @@ def _provider_from_body(body: dict):
     return provider
 
 
-def _safe_provider_error(exc: Exception, provider) -> str:
+def _safe_provider_error(exc: Exception, provider=None) -> str:
     message = str(exc)
+    if provider is None:
+        return message
     for secret in (provider.api_key, provider.resolved_api_key()):
         if secret and secret != API_KEY_MASK:
             message = message.replace(secret, API_KEY_MASK)
@@ -818,6 +848,7 @@ def _safe_provider_error(exc: Exception, provider) -> str:
 @app.post("/config/providers/test")
 async def test_provider(body: dict):
     client = None
+    provider = None
     try:
         provider = _provider_from_body(body)
         client = _provider_client(provider)
@@ -836,6 +867,7 @@ async def test_provider(body: dict):
 @app.post("/config/providers/models")
 async def provider_models(body: dict):
     client = None
+    provider = None
     try:
         provider = _provider_from_body(body)
         if provider.discovery_api == "none":
@@ -999,8 +1031,6 @@ async def chat_stream(body: dict):
     turn_marker = message or "|".join(
         str(item.get("name", "")) for item in attachments if isinstance(item, dict)
     )
-
-    save_events = {"tool_call", "tool_result", "done"}
 
     async def gen():
         bg = _get_or_create_background(session_id)
@@ -1190,9 +1220,7 @@ async def workflow_stream(body: dict):
                 persist_result=ctx_mgr.persist_large_result,
             ):
                 if event["type"] in {"workflow_started", "workflow_step", "workflow_done"}:
-                    with locked_session(session_id):
-                        save_session(session)
-                        update_index(session)
+                    await asyncio.to_thread(_persist_session, session_id, session)
                 yield "event: %s\ndata: %s\n\n" % (
                     event["type"], json.dumps(event, ensure_ascii=False)
                 )
@@ -1204,9 +1232,7 @@ async def workflow_stream(body: dict):
             raise
         except Exception as exc:
             logger.exception("workflow failed")
-            with locked_session(session_id):
-                save_session(session)
-                update_index(session)
+            await asyncio.to_thread(_persist_session, session_id, session)
             yield "event: workflow_done\ndata: %s\n\n" % json.dumps(
                 {"status": "failed", "message": str(exc)}, ensure_ascii=False
             )
@@ -1436,12 +1462,15 @@ async def _stop_background(bg: "BackgroundSession"):
 async def remove_session(session_id: str):
     try:
         session_id = validate_session_id(session_id)
-        bg = _get_or_create_background(session_id)
-        async with bg.start_lock:
-            await _stop_background(bg)
-            async with _session_turn_lock(session_id):
-                async with _session_async_lock(session_id):
-                    deleted = delete_session(session_id)
+        # 用 get 而不是 get_or_create：从未跑过后台任务的会话不该在这里被凭空建出
+        # 一个 BackgroundSession（它没有 task/订阅者，也就永远不会被清理）。
+        bg = _background_sessions.get(session_id)
+        if bg is not None:
+            async with bg.start_lock:
+                await _stop_background(bg)
+        async with _session_turn_lock(session_id):
+            async with _session_async_lock(session_id):
+                deleted = delete_session(session_id)
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": deleted}
@@ -1451,14 +1480,15 @@ async def remove_session(session_id: str):
 async def clear_session_endpoint(session_id: str):
     try:
         session_id = validate_session_id(session_id)
-        bg = _get_or_create_background(session_id)
-        async with bg.start_lock:
-            await _stop_background(bg)
-            async with _session_turn_lock(session_id):
-                async with _session_async_lock(session_id):
-                    cleared = clear_session(session_id)
-                    if cleared:
-                        TaskLedger(session_id).clear()
+        bg = _background_sessions.get(session_id)
+        if bg is not None:
+            async with bg.start_lock:
+                await _stop_background(bg)
+        async with _session_turn_lock(session_id):
+            async with _session_async_lock(session_id):
+                cleared = clear_session(session_id)
+                if cleared:
+                    TaskLedger(session_id).clear()
     except InvalidSessionId as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     return {"ok": cleared}
@@ -1649,6 +1679,17 @@ def _sse_payload(event: dict) -> dict:
     return {k: v for k, v in event.items() if k != "_seq"}
 
 
+def _persist_session(session_id: str, session) -> None:
+    """加会话文件锁后落盘，供 asyncio.to_thread 调用。
+
+    save_session/update_index 是同步文件 I/O，直接在协程里跑会在慢盘（含网络盘）
+    上卡住整个事件循环，这里挪到工作线程。
+    """
+    with locked_session(session_id):
+        save_session(session)
+        update_index(session)
+
+
 async def _run_background_locked(*args, **kwargs):
     runtime = kwargs.pop("runtime", None)
     _acquire_runtime(runtime)
@@ -1701,7 +1742,7 @@ async def _run_background_loop(
         "content": message,
         "display_content": display_content or message,
     }
-    session.append_trajectory(_traj_user)
+    await asyncio.to_thread(session.append_trajectory, _traj_user)
     await _bg_put(bg, _traj_user)
 
     _done_sent = False
@@ -1764,17 +1805,17 @@ async def _run_background_loop(
 
             if bg.invalidated:
                 return
-            # 轨迹事件先落盘再入队，保证落盘集合 ⊇ 实时收到集合
+            # 轨迹事件先落盘再入队，保证落盘集合 ⊇ 实时收到集合。
+            # 写盘走线程：traj_system_prompt 会带上整份系统提示词，同步写在内网
+            # 网络盘上会卡住事件循环。agent_loop 取消分支里那处保持同步，见其注释。
             if event["type"] in _TRAJ_EVENTS:
-                session.append_trajectory(event)
+                await asyncio.to_thread(session.append_trajectory, event)
 
             # 持久化关键事件
             if event["type"] in {"tool_call", "tool_result", "done"}:
                 if model_id and session.model_id != model_id:
                     session.model_id = model_id
-                with locked_session(session_id):
-                    save_session(session)
-                    update_index(session)
+                await asyncio.to_thread(_persist_session, session_id, session)
 
             if event["type"] == "done":
                 _done_sent = True
@@ -1799,6 +1840,12 @@ async def _run_background_loop(
             await _bg_put(bg, {"type": "done"})
         bg.done_event.set()
 
+        # 客户端中途断开时，SSE 生成器的 finally 早已跑过（那一刻 done_event 还没
+        # 置位，不会调度清理），这里在任务真正收尾时补一次，否则条目会永久留在
+        # _background_sessions 里。
+        if bg.subscriber_count <= 0:
+            _schedule_cleanup(bg)
+
         # 提炼排在 done 之后：只投递不等待，模型慢或失败都不影响用户看到的结果。
         # 用的是内存里的 ledger（run_agent_loop 刚更新过），不再读一次盘。
         if _memory is not None and not bg.invalidated:
@@ -1822,7 +1869,13 @@ async def _drain_queue(queue):
 
 
 def _schedule_cleanup(bg: BackgroundSession):
-    """调度后台 session 清理（无订阅者且 task 已完成时）。"""
+    """调度后台 session 清理（无订阅者且 task 已完成时）。
+
+    可重复调用：已有定时器先取消再重建，避免同一个 bg 挂上多个定时器。
+    """
+    pending = getattr(bg, "_cleanup_timer", None)
+    if pending is not None:
+        pending.cancel()
     loop = asyncio.get_running_loop()
     bg._cleanup_timer = loop.call_later(
         _BG_CLEANUP_SECONDS,
@@ -1837,12 +1890,18 @@ def _do_cleanup(bg: BackgroundSession):
     if bg.task and not bg.task.done():
         bg.task.cancel()
     _background_sessions.pop(bg.session_id, None)
+    # 会话级锁随 bg 一起回收，避免两个 dict 跟着会话数无界增长；
+    # 仍被持有的锁不回收（回收后新调用方会拿到另一把锁，互斥失效）。
+    for locks in (_session_turn_locks, _session_async_locks):
+        lock = locks.get(bg.session_id)
+        if lock is not None and not lock.locked():
+            locks.pop(bg.session_id, None)
     logger.info(f"background session cleaned up: {bg.session_id}")
 
 
 # --- 语音转文字（voice_asr）模块挂载 ---
 # voice_asr 位于项目根，需将 PROJECT_ROOT 加入 sys.path 才能导入。
-# 本文件在 agent/agent/app.py，故项目根是 parents[1]。
+# 本文件在 agent/agent/app.py，故项目根是 parents[2]。
 # 用 absolute() 而非 resolve()：以 `python app.py` 方式启动时 __file__ 是相对路径，
 # resolve() 会拿它去拼当前工作目录，cwd 一变项目根就算错，而守卫只告警，
 # 症状是 /asr 静默消失（用别的 cwd 拉起服务时必现）。

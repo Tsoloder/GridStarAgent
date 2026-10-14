@@ -853,8 +853,11 @@ async def run_agent_loop(
             "<interaction_mode>auto</interaction_mode>\n"
             "【严厉禁令】auto 模式下严禁输出 tool_params JSON 块。"
             "所有工具（包括操作类工具）直接调用 MCP 工具执行，参数按优先级自动填充，前端不展示参数编辑表。\n"
-            "参数优先级：用户明确值 > 已确认记忆值 > 实时查询结果 > Schema 默认值。\n"
-            "缺少无法推导的必填信息时用 options 询问用户，不得用 tool_params 代替。\n"
+            "参数优先级：用户明确值 > 已确认记忆值 > 实时查询结果 > Skill/参考文档默认值 > Schema 默认值；"
+            "同一参数在 Skill 文档与工具 Schema/工具描述之间不一致时，以 Skill 文档为准。\n"
+            "优先级链全部取不到（参数无权威来源）时，在合理区间内就近取一个值、写明假设后推进，"
+            "不要长时间自问或反复推翻；只有必须由用户拍板的信息（领域分类、目标路径、不可逆操作对象范围等）"
+            "才用 options 询问，不得用 tool_params 代替。\n"
             "删除、覆盖、导出和批量破坏性操作用 options 请求确认，仍不输出 tool_params。"
         )
     else:
@@ -1194,6 +1197,8 @@ async def run_agent_loop(
             if text_acc or reasoning_acc:
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc,
                                          interrupted=True)
+            # 这里刻意同步写：本分支由取消触发，若改成 await to_thread，await 本身
+            # 可能被二次取消抛 CancelledError，轨迹就永远停在 running 了。
             session.append_trajectory(_traj_request_end("interrupted"))
             logger.info("model stream interrupted by user: session=%s", session.id)
             raise

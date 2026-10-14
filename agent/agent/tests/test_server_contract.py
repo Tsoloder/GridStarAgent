@@ -999,3 +999,200 @@ def test_tools_that_were_never_registered_are_visible_now():
     assert registry.group_id_for_tool("GetRecentMessages") == "query"
     assert registry.group_id_for_tool("GetAllBorderConditionGroups") == "boundary"
     assert registry.group_id_for_tool("UGReDimensionSHyperbolicTangent") == "mesh"
+
+
+def test_delete_session_without_background_task_does_not_create_entry(monkeypatch):
+    """删除从未跑过对话的会话，不该凭空建出 BackgroundSession。
+
+    这类兜底条目没有 task、没有订阅者，done_event 也不会被置位，等于永久泄漏。
+    """
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    calls = []
+    monkeypatch.setattr(server, "delete_session",
+                        lambda sid: calls.append(sid) or True)
+    server._background_sessions.pop(session_id, None)
+
+    response = TestClient(server.app).delete("/sessions/%s" % session_id)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert calls == [session_id]
+    assert session_id not in server._background_sessions
+
+
+def test_clear_session_without_background_task_does_not_create_entry(monkeypatch):
+    import uuid
+    from types import SimpleNamespace
+
+    session_id = str(uuid.uuid4())
+    monkeypatch.setattr(server, "clear_session", lambda sid: True)
+    monkeypatch.setattr(server, "TaskLedger",
+                        lambda sid: SimpleNamespace(clear=lambda: None))
+    server._background_sessions.pop(session_id, None)
+
+    response = TestClient(server.app).post("/sessions/%s/clear" % session_id)
+
+    assert response.status_code == 200
+    assert response.json() == {"ok": True}
+    assert session_id not in server._background_sessions
+
+
+def _install_finishing_background(monkeypatch):
+    """把后台循环所需的落盘与 agent 调用全部替换掉，只留下收尾行为。"""
+    import uuid
+
+    session_id = str(uuid.uuid4())
+
+    def finishing_loop(*args, **kwargs):
+        async def gen():
+            yield {"type": "done", "tokens": 1}
+        return gen()
+
+    monkeypatch.setattr(server, "run_agent_loop", finishing_loop)
+    monkeypatch.setattr(server, "load_session",
+                        lambda _: SimpleNamespace(model_id="", messages=[],
+                                                  append_trajectory=lambda *a, **k: None))
+    monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
+    monkeypatch.setattr(server, "save_session", lambda *a, **k: None)
+    monkeypatch.setattr(server, "update_index", lambda *a, **k: None)
+    return session_id
+
+
+def test_background_loop_schedules_cleanup_after_finish(monkeypatch):
+    """客户端中途断开时 SSE 生成器不会再调度清理，任务收尾必须自己补一次。"""
+    import asyncio
+
+    session_id = _install_finishing_background(monkeypatch)
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        await server._run_background_loop(
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
+        )
+        return bg
+
+    bg = asyncio.run(main())
+    timer = getattr(bg, "_cleanup_timer", None)
+    assert timer is not None
+    timer.cancel()
+
+
+def test_background_loop_skips_cleanup_while_subscribed(monkeypatch):
+    """还有订阅者连着时不能挂清理定时器，否则会把正在看的这轮会话摘掉。"""
+    import asyncio
+
+    session_id = _install_finishing_background(monkeypatch)
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        bg.subscribe()
+        await server._run_background_loop(
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
+        )
+        return bg
+
+    bg = asyncio.run(main())
+    assert getattr(bg, "_cleanup_timer", None) is None
+
+
+def test_trajectory_writes_leave_the_event_loop_thread(monkeypatch):
+    """轨迹事件写盘要跑到 worker 线程，不能占着事件循环。
+
+    traj_system_prompt 会带上整份系统提示词，同步写在内网网络盘上会把整站响应
+    一起拖住。这里用线程 id 断言写入确实离开了事件循环线程。
+    """
+    import asyncio
+    import threading
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    writes = []
+
+    def streaming_loop(*args, **kwargs):
+        async def gen():
+            yield {"type": "traj_system_prompt", "turn": 1, "content": "sys"}
+            yield {"type": "done", "tokens": 1}
+        return gen()
+
+    class FakeSession:
+        model_id = ""
+        messages = []
+
+        def append_trajectory(self, event):
+            writes.append((event["type"], threading.get_ident()))
+
+    monkeypatch.setattr(server, "run_agent_loop", streaming_loop)
+    monkeypatch.setattr(server, "load_session", lambda _: FakeSession())
+    monkeypatch.setattr(server, "TaskLedger", lambda _: SimpleNamespace(plan=None))
+    monkeypatch.setattr(server, "save_session", lambda *a, **k: None)
+    monkeypatch.setattr(server, "update_index", lambda *a, **k: None)
+
+    loop_thread = {}
+
+    async def main():
+        loop_thread["id"] = threading.get_ident()
+        bg = server.BackgroundSession(session_id)
+        await server._run_background_loop(
+            bg, session_id, "hi", "base", [], "", [], "hi", "chat", ""
+        )
+        timer = getattr(bg, "_cleanup_timer", None)
+        if timer is not None:
+            timer.cancel()
+
+    asyncio.run(main())
+
+    # 轮次 user 事件与 traj_system_prompt 都写过盘，且顺序保持先落盘
+    assert [name for name, _ in writes] == ["user", "traj_system_prompt"]
+    assert all(ident != loop_thread["id"] for _, ident in writes)
+
+
+def test_do_cleanup_reclaims_idle_session_locks(monkeypatch):
+    """会话锁要随 bg 一起回收，否则两个 dict 跟着会话数无界增长。"""
+    import asyncio
+    import uuid
+
+    session_id = str(uuid.uuid4())
+
+    async def main():
+        bg = server.BackgroundSession(session_id)
+        server._session_turn_lock(session_id)
+        server._session_async_lock(session_id)
+        server._background_sessions[session_id] = bg
+        server._do_cleanup(bg)
+        return (session_id in server._session_turn_locks,
+                session_id in server._session_async_locks,
+                session_id in server._background_sessions)
+
+    turn_alive, async_alive, bg_alive = asyncio.run(main())
+    assert not turn_alive and not async_alive and not bg_alive
+
+
+def test_uploads_serve_html_as_plain_text_and_images_unchanged():
+    """/uploads 与 API 同源：上传的 .html 不能以 text/html 内联渲染。"""
+    import uuid
+
+    server.UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    html_name = "doc-%s.html" % uuid.uuid4().hex
+    png_name = "pic-%s.png" % uuid.uuid4().hex
+    html_path = server.UPLOADS_DIR / html_name
+    png_path = server.UPLOADS_DIR / png_name
+    html_path.write_text("<script>alert(1)</script>", encoding="utf-8")
+    png_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    try:
+        client = TestClient(server.app)
+
+        html_response = client.get("/uploads/%s" % html_name)
+        assert html_response.status_code == 200
+        assert html_response.headers["content-type"].startswith("text/plain")
+        assert html_response.headers["content-disposition"] == "attachment"
+        assert html_response.headers["x-content-type-options"] == "nosniff"
+
+        png_response = client.get("/uploads/%s" % png_name)
+        assert png_response.status_code == 200
+        assert png_response.headers["content-type"] == "image/png"
+        assert png_response.headers["x-content-type-options"] == "nosniff"
+    finally:
+        html_path.unlink(missing_ok=True)
+        png_path.unlink(missing_ok=True)

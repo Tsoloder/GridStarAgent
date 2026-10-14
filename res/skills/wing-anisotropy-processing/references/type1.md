@@ -6,8 +6,8 @@
 >
 > 本步骤为机翼一体化处理（`WingAnisoProcessWingAnisotropy`）内部的失败回退流程。
 > 正常情况下不需要执行本步骤，一体化入口已自动处理后缘面。
-> 以下步骤仅在 `WingAnisoProcessWingAnisotropy` 返回的 `steps` 中 `step8b_te_delete_assemble` 失败时，
-> 或后缘面处理条目 `status=failed` 时使用。
+> **仅当该入口返回的顶层 `status` 为 `"failed"`、且 `message` 指向后缘面处理失败时**才使用。
+> `steps` 内的子步骤字段（如 `aniso_domains`）即使是 `"failed"` 也不代表整体失败，不得据此触发回退。
 
 **间距参数**（动态计算，调用 `GetModelParameters` 获取 `wing_half_span` 和 `mac`）：
 - `bodySpacing` = 0.1% × 半展长 = 0.001 × wing_half_span（靠近翼梢端）
