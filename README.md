@@ -9,14 +9,15 @@ GridStar 网格生成软件的 AI 智能助手：把「CAD 导入 → 水密处�
 ## 功能特性
 
 - **多 Provider 模型接入**：OpenAI Chat Completions / OpenAI Responses / Anthropic Messages，以及 DeepSeek、Ollama、OpenRouter 等任意 OpenAI 兼容服务；模型以 `provider/model` 标识，独立配置上下文窗口、输出上限与能力（工具、并行工具、推理、视觉、流式用量）。
-- **125 个 GridStar 工具，按业务域分组**：默认只暴露只读查询与工程文件管理，其余分组由模型按当前阶段调用 `enable_tool_group` 按需启用，避免每轮携带全量 Schema。
-- **技能（Skill）系统**：`res/skills/` 下的 Markdown 技能包按需加载，例如 `cfd-meshing-workflow` 提供完整网格流程路由表，`wing-anisotropy-processing`、`missile-trailing-edge-processing` 提供专项处理步骤；支持 `read_skill` / `read_skill_resource` / `create_skill`。
+- **125 个 GridStar 工具，按业务域分组**：默认只暴露只读查询与工程文件管理，其余分组由模型按当前阶段调用 `enable_tool_group` 按需启用，避免每轮携带全量 Schema。其中 `screen` 分组提供桌面窗口截图与坐标操作，只在桌面依赖可用时才注册。
+- **技能（Skill）系统**：`res/skills/` 下的 12 个 Markdown 技能包按需加载，例如 `cfd-meshing-workflow` 提供完整网格流程路由表，`wing-anisotropy-processing`、`missile-trailing-edge-processing` 提供专项处理步骤；支持 `read_skill` / `read_skill_resource` / `create_skill`。
 - **阶段台账与自动模式**：多阶段任务通过内置 `update_plan` 维护全量阶段计划，未创建计划就调用外部工具会被硬拦截；auto 模式下按计划自动推进，manual 模式下每步等待确认。
 - **工具审批与人机确认**：有副作用的工具调用可挂起等待用户确认（`/sessions/{id}/tool-approvals/{call_id}`），需要拍板时模型调用 `ask_user_question` 弹出选择卡片。
 - **后台任务与断线重连**：Agent 循环运行在独立后台 Task 中，切换会话或刷新页面不中断回复；SSE 断连后按事件序号整体回放，不丢不重；「停止」会真正取消后台任务并补齐被中断的 tool_calls。
 - **完整轨迹与会话导出**：每轮请求的系统提示、上下文、请求/响应、工具调用与结果落盘 `trajectory.jsonl`，前端可查看轨迹面板；会话可导出为 Markdown。
-- **对话界面**：一轮一张卡片（用户 / 助手 / 工具），思考过程与工具调用就地折叠，卡片底部可查看本轮用量与用时明细；对话区最左边缘的**轮次导航轨**按轮次排点，悬浮显示该轮提问、点击直接定位、当前所在轮次高亮；轨迹视图支持按时长 / 轮次 / 调用分组并用时间轴选区过滤；设置中心分「模型 / 技能 / MCP 工具」三页签；深色 / 银白 / 蔚蓝三套皮肤。
-- **附件与多模态**：拖拽上传文本/代码/PDF/Word/Excel/图片（单文件 10 MB，单次最多 6 个附件 / 4 张图片），图片按模型视觉能力送入模型。
+- **对话界面**：一轮一张卡片（用户 / 助手 / 工具），思考过程与工具调用就地折叠，卡片底部可查看本轮用量与用时明细；对话区最左边缘的**轮次导航轨**按轮次排点，悬浮显示该轮提问、点击直接定位、当前所在轮次高亮；轨迹视图支持按时长 / 轮次 / 调用分组并用时间轴选区过滤；设置中心分「模型 / 技能 / MCP 工具 / 记忆 / 用量」五页签；深色 / 银白 / 蔚蓝三套皮肤。
+- **附件与多模态**：拖拽上传文本/代码/PDF/Word/Excel/图片（单文件 10 MB，单次最多 6 个附件 / 4 张图片，文本合计上限 12 万字符）。图片按模型视觉能力送入模型，发送前压到长边 1568、短边 768 以内并转 JPEG（质量 85），整请求的图片编码字节共享 24 MB 预算、图越多每张分到的越少；**图片只活一轮**，只在到达它的那一轮真正发给模型，之后退化成占位文本，避免同一批图随历史反复重传。视觉 token 计入上下文预算，带图会话不会静默顶出窗口。
+- **长期记忆（可在设置里关掉）**：把已验证的策略与工程事实沉淀成跨会话记忆，库落在 `.gridstar/memory/memory.db`。自动提炼只写「候选」，只有人工审核通过的记忆才可能被召回；提炼提示词里只有工具名与参数形状，参数原值一个都不进，落库前再过一道脱敏，命中敏感模式整条丢弃。中文检索走应用层 2/3-gram 索引，FTS5 不可用时退回 LIKE 扫描，记忆链路故障不阻断主任务。
 - **语音输入**：基于 whisper.cpp 的本地 WAV 转写（`POST /asr`），不上传云端。
 - **内网离线分发**：一条命令生成源码 + 离线 wheel + 一键安装脚本的分发包。
 
@@ -34,14 +35,14 @@ GridStar 网格生成软件的 AI 智能助手：把「CAD 导入 → 水密处�
 ┌─────────────────────────────────────────────────────┴───────────────┐
 │  Agent 后端 (agent/agent/)  FastAPI  127.0.0.1:1231                 │
 │  agent_loop · llm_client(多 Provider) · session · skill_runtime      │
-│  task_ledger · context · document_loader · tool_memory · voice_asr   │
+│  task_ledger · context · document_loader · tool_memory · memory      │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │  MCP over SSE (MCP_SERVER_URL)
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────┐
 │  MCP 工具服务 (agent/)  FastMCP  SSE 127.0.0.1:5656                  │
 │  registry(工具分组) · tools/{project,query,cad,mesh,generation,      │
-│  boundary,quality,advanced} · client(HTTP)                          │
+│  boundary,quality,advanced,screen} · client(HTTP)                   │
 └───────────────────────────────┬─────────────────────────────────────┘
                                 │  POST http://127.0.0.1:1313
                                 ▼
@@ -63,7 +64,7 @@ GridStarAgent/
 │   ├── registry.py            工具分组注册表（各分组默认是否启用）
 │   ├── client.py              GridStar HTTP 客户端（127.0.0.1:1313）
 │   ├── tools/                 工具实现：project / query / cad / mesh /
-│   │                          generation / boundary / quality / advanced
+│   │                          generation / boundary / quality / advanced / screen
 │   ├── prompt/                内置提示词（CFD 工作流路由表）
 │   └── agent/                 Agent 后端
 │       ├── app.py             FastAPI 入口（默认端口 1231）
@@ -78,12 +79,18 @@ GridStarAgent/
 │       ├── context.py         上下文压缩与大结果外置
 │       ├── document_loader.py 附件解析（文本 / PDF / Excel / 图片）
 │       ├── tool_memory.py     工具参数默认值的用户确认记忆
+│       ├── memory_store.py    记忆子系统门面（经验库 / 参数记忆统一入口）
+│       ├── experience_*.py    长期记忆：异步提炼（extractor）与库存储（memory）
+│       ├── memory_sanitize.py 记忆脱敏防线（参数原值不进提示词）
+│       ├── data_dir_guard.py  数据目录可写性探测与就地权限修复
+│       ├── check_data_dir.py  数据目录自检 CLI（--repair）
+│       ├── usage_stats.py     Token 用量聚合（扫描会话落盘记录）
 │       ├── mcp_bridge.py      MCP 客户端桥接与工具分组管理
 │       ├── workflow_runner.py 预定义步骤工作流执行器
 │       └── tests/             pytest 套件（含 fixtures 事件序列）
 ├── webui/                     浏览器端聊天界面（原生 JS，无构建步骤）
 ├── QtChartWidget/             Qt 5.12 原生 UI 库 + demo + 接线示例
-├── res/skills/                Skill 包（CFD 流程、后缘面、各向异性、技能创建）
+├── res/skills/                Skill 包（CFD 流程与导弹专用路由、后缘面、各向异性、导弹方向与根部、技能创建）
 ├── voice_asr/                 语音转写模块（whisper.cpp）
 ├── docs/                      设计文档
 ├── package_intranet.py        内网离线分发包打包脚本
@@ -97,7 +104,7 @@ GridStarAgent/
 | 组件 | 要求 |
 | --- | --- |
 | Python | **内网离线包按 3.12 打包**（`wheels/` 为 `cp312-win_amd64`）；开发机源码运行 3.10+ 即可。原因见 [内网离线分发](#内网离线分发) |
-| 依赖 | 见 [agent/agent/requirements.txt](file:///d:/TRAE_project/GridStarAgent/agent/agent/requirements.txt)：fastapi、uvicorn、fastmcp 3.x、openai、httpx、pypdf、openpyxl、requests、pywin32(Windows) |
+| 依赖 | 见 [agent/agent/requirements.txt](file:///d:/TRAE_project/GridStarAgent/agent/agent/requirements.txt)：fastapi、uvicorn[standard]、fastmcp 3.x、openai、httpx、pypdf、openpyxl、requests、pywin32 与 pip-system-certs(Windows)；桌面 `screen` 分组另需 mss、uiautomation、Pillow(Windows) |
 | GridStar 软件 | 本机运行，HTTP 接口监听 `127.0.0.1:1313`（否则工具调用返回连接失败） |
 | Qt 客户端（可选） | Qt 5.12.2 msvc2017_64 + MSVC x64（qmake / nmake） |
 | 语音输入（可选） | Windows x64。运行时依赖随包分发（`voice_asr/runtime/`），无需目标机另装 whisper 或 VC++ 运行时 |
@@ -163,6 +170,7 @@ python app.py --host 127.0.0.1 --port 1231
 .gridstar/
 ├── config.json               模型与 Provider 配置
 ├── tool_parameter_memory.json 工具参数默认值的确认记忆
+├── memory/memory.db          长期记忆库（策略经验 + 工程事实）
 ├── sessions/<uuid>/          messages.jsonl、trajectory.jsonl、meta
 ├── skills/                   运行期可写技能目录
 ├── uploads/                  附件原文件
@@ -193,7 +201,7 @@ python check_data_dir.py --repair   :: 顺手执行一次修权限
 
 ## 工具分组
 
-MCP 服务共注册 109 个业务工具 + `GetToolGroups` 发现入口，按域分组：
+MCP 服务共注册 125 个业务工具 + `GetToolGroups` 发现入口，按域分组：
 
 | 分组 | 默认启用 | 说明 |
 | --- | :---: | --- |
@@ -205,8 +213,13 @@ MCP 服务共注册 109 个业务工具 + `GetToolGroups` 发现入口，按域�
 | `boundary` | | 边界条件：分组增删、属性配置、保存到计算域 |
 | `quality` | | 质量检查：网格线 / 网格面 / 网格块质量评估 |
 | `advanced` | | 高级批处理：服务端组合流程、后缘面分类与类型一/类型二批量处理、前缘识别 |
+| `screen` | | 桌面自动化：定位 GridStar 窗口、窗口截图、读取 UI 控件、按画面坐标点击/拖动/滚轮、模拟控件点击与键盘输入。GridStar 不暴露 UI 自动化控件（控件树为空），实际可用的是「截图 → 看图 → 坐标操作」这条路线 |
 
 技能可通过 frontmatter 中的 `allowed-tools` 进一步收窄当前会话允许调用的工具范围。
+
+`screen` 分组的依赖（pywin32 / mss / uiautomation）只在带桌面的 Windows 上成立，导入失败时只丢这一个分组，不会连带其余工具与 MCP 服务一起下线。
+
+除业务工具外，后端还内置了一批不占 GridStar 工具额度的工具：阶段台账 `update_plan`、分组开关 `enable_tool_group`、选择卡片 `ask_user_question`、只读目录列举 `ListDirectoryFiles`（支持通配符过滤与递归，最多返回 200 条），以及技能读写 `read_skill` / `read_skill_resource` / `create_skill`。
 
 ---
 
