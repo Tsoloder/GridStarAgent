@@ -14,7 +14,12 @@ from typing import AsyncIterator
 
 from config import ApiConfig
 from context import ContextManager, MAX_TURNS
-from document_loader import read_image_data
+from document_loader import (
+    HISTORICAL_IMAGE_NOTICE,
+    image_byte_budget,
+    images_to_send,
+    read_image_data,
+)
 from llm_client.adapters.base import is_retryable
 from mcp_bridge import McpBridge
 from paths import UPLOADS_DIR
@@ -1046,6 +1051,9 @@ async def run_agent_loop(
     _truncation_retries = 0
     # 本次用户消息内是否真的执行过工具：决定末尾那轮纯文本回复能不能免于格式重试
     _turn_tool_executed = False
+    # 本次用户消息内已经作为图片发给模型的路径。图片只活一轮：同一条 user 消息上
+    # 会不断累加工具截图，发过一次的下一轮就退化成占位文本，避免同一批图每轮重传。
+    _replayed_images = set()
     # 已启用的工具分组：本次用户消息内跨请求累积；换消息后重置，
     # 由"直呼自动解锁"兜底，避免模型重复启用。
     enabled_tool_groups = set()
@@ -1070,13 +1078,18 @@ async def run_agent_loop(
             return
 
         compressed_messages = await ctx_mgr.compress(
-            session.messages, session.id, config, call_model_id, model_runtime
+            session.messages, session.id, config, call_model_id, model_runtime,
+            sent_image_paths=_replayed_images,
         )
         # Reminders must come *after* the conversation history so the model
         # treats them as the latest instruction; injecting them before the
         # history gets them buried and ignored.
+        # 历史图片剥离：只有本轮该发的图才读盘编码，其余退化成文本占位。
+        # 预算按本轮实际张数分摊，整请求不会因为多图超总预算。
+        _send_images = images_to_send(compressed_messages, _replayed_images)
+        _image_budget = image_byte_budget(len(_send_images))
         model_messages = []
-        for message in compressed_messages:
+        for message_index, message in enumerate(compressed_messages):
             clean = {key: value for key, value in message.items()
                      if key not in {"active_skills", "attachments", "display_content", "usage",
                                     "ts", "elapsed_ms", "think_ms", "ttft_ms", "tps", "interrupted"}}
@@ -1086,14 +1099,25 @@ async def run_agent_loop(
                 image_parts = []
                 for doc in docs:
                     if doc.get("kind") == "image":
+                        path = str(doc.get("path", ""))
+                        name = str(doc.get("name", "image"))
+                        if (message_index, path) not in _send_images:
+                            # 历史图片：不再重复发送，留占位让模型知道这里曾有过一张图
+                            sections.append(
+                                "<document name=\"%s\">\n%s\n</document>" %
+                                (html.escape(name, quote=True),
+                                 html.escape(HISTORICAL_IMAGE_NOTICE, quote=False))
+                            )
+                            continue
                         # 图片只在请求时读盘编码，session 里始终只存路径
-                        payload = read_image_data(str(doc.get("path", "")))
+                        payload = read_image_data(path, _image_budget)
                         if payload is None:
                             sections.append(
                                 "<document name=\"%s\">\n[图片已失效，无法读取]\n</document>" %
-                                html.escape(str(doc.get("name", "image")), quote=True)
+                                html.escape(name, quote=True)
                             )
                             continue
+                        _replayed_images.add(path)
                         image_parts.append({
                             "type": "image",
                             "media_type": payload["media_type"],

@@ -497,6 +497,111 @@ async def test_screenshot_result_keeps_the_tool_own_field_report(tmp_path, monke
     assert "看不到" in data["note"]
 
 
+@pytest.mark.asyncio
+async def test_historical_images_degrade_to_text_while_the_new_one_is_sent(tmp_path, monkeypatch):
+    """图片只活一轮：旧消息里的图退化成占位文本，本轮上传的图才真的发出去。
+
+    对齐 openhanako message-sanitizer 的策略。旧实现把历史里所有图片每轮重新
+    读盘、重新编码、重新发送，同一张图问十个问题就付十次视觉 token，还把窗口
+    一路顶到上游 400。
+    """
+    import agent_loop
+    import document_loader
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+
+    fake_png = b"\x89PNG\r\n\x1a\n" + b"0" * 64
+    old_shot = tmp_path / "old.png"
+    new_shot = tmp_path / "new.png"
+    old_shot.write_bytes(fake_png)
+    new_shot.write_bytes(fake_png)
+
+    session = _make_session(None)
+    session.append_user("先看这张旧图", [],
+                        [{"kind": "image", "name": "old.png", "path": str(old_shot)}])
+    session.append_assistant("看过了。")
+
+    runtime = _ScriptedRuntime([
+        _text_events("好的。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    async for _ in agent_loop.run_agent_loop(
+        session=session,
+        user_message="再看这张新图",
+        base_system_prompt="base",
+        config=_vision_config(True),
+        mcp=MockMcpBridge({}),
+        ctx_mgr=MockContextManager(),
+        skill_registry=MockSkillRegistry(),
+        attachments=[{"kind": "image", "name": "new.png", "path": str(new_shot)}],
+        model_runtime=runtime,
+    ):
+        pass
+
+    sent = runtime.messages[0]
+    users = [m for m in sent if m.get("role") == "user"]
+
+    # 旧消息的图片不能再作为图片出现，只能留下占位文本
+    old_content = users[0]["content"]
+    assert isinstance(old_content, str)
+    assert document_loader.HISTORICAL_IMAGE_NOTICE in old_content
+
+    # 本轮上传的图片必须真的作为图片发出去
+    new_content = users[-1]["content"]
+    assert isinstance(new_content, list)
+    assert any(part.get("type") == "image" for part in new_content)
+    assert document_loader.HISTORICAL_IMAGE_NOTICE not in "".join(
+        str(part.get("text", "")) for part in new_content if isinstance(part, dict))
+
+
+@pytest.mark.asyncio
+async def test_replayed_screenshot_degrades_after_it_was_sent_once(tmp_path, monkeypatch):
+    """截图只活一轮：同一条 user 消息上累加的截图，发过的那张下一轮退化成占位。
+
+    屏幕自动化一次任务会连截几十张图，全都追加到同一条 user 消息上。旧实现每轮
+    把这一串图重新读盘、重新编码、重新发送——第 N 轮就背上 N 张图的视觉 token，
+    一路把窗口顶爆。
+    """
+    import base64
+    import json
+
+    import agent_loop
+    import document_loader
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    monkeypatch.setattr(agent_loop, "UPLOADS_DIR", tmp_path / "uploads")
+
+    png = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"0" * 64).decode("ascii")
+    shot = json.dumps({"status": "success", "result": {
+        "image": png, "width": 100, "height": 100, "format": "png"}})
+
+    runtime = _ScriptedRuntime([
+        _tool_call_events("CaptureGridStarWindow", {}),
+        _tool_call_events("CaptureGridStarWindow", {}),
+        _text_events("好的。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    await _run_direct(runtime, "帮我看看画面", interaction_mode="auto",
+                      config=_vision_config(True),
+                      mcp=MockMcpBridge({"CaptureGridStarWindow": shot}))
+
+    def _last_user(messages):
+        return [m for m in messages if m.get("role") == "user"][-1]
+
+    # 第一张截图在它到达的那一轮真的作为图片发出去了
+    first_shot_turn = _last_user(runtime.messages[1])["content"]
+    assert any(part.get("type") == "image" for part in first_shot_turn)
+
+    # 第二张截图到达时，第一张已经发过一轮，必须退化成占位文本、只发新的那张
+    second_shot_turn = _last_user(runtime.messages[2])["content"]
+    images = [part for part in second_shot_turn if part.get("type") == "image"]
+    assert len(images) == 1
+    assert document_loader.HISTORICAL_IMAGE_NOTICE in "".join(
+        str(part.get("text", "")) for part in second_shot_turn if isinstance(part, dict))
+
+
 def _patch_stream_runtime(monkeypatch, agent_loop, stream_chat):
     async def stream_runtime(runtime, model_key, messages, system_prompt, tools):
         async for event in stream_chat(

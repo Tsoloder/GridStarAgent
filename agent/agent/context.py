@@ -3,6 +3,7 @@ import hashlib
 import logging
 
 from config import ApiConfig
+from document_loader import estimate_image_tokens, images_to_send
 from paths import SESSIONS_DIR
 
 logger = logging.getLogger(__name__)
@@ -69,14 +70,21 @@ class ContextManager:
         config: ApiConfig,
         model_key: str = "",
         runtime=None,
+        sent_image_paths=None,
     ) -> list:
+        """``sent_image_paths`` 是本轮已经发过的图片路径（见 images_to_send）。
+
+        工具截图会不断累加到同一条 user 消息上，图片发过一次就不再随请求发送；
+        不把这件事告诉预算，几十张陈年截图会以满额视觉 token 虚增占用，让压缩
+        在窗口还宽裕时就开始改写历史中段、把前缀缓存全部作废。
+        """
         messages = copy.deepcopy(messages)
         max_tokens = max_tokens_for_config(config, model_key, runtime)
         threshold_warn = int(max_tokens * 0.8)
         threshold_micro = int(max_tokens * 0.6)
-        current = sum(self.counter.estimate(self._msg_text(m)) for m in messages)
+        current = self._total_tokens(messages, sent_image_paths)
 
-        messages = self._layer1_budget_truncate(messages, max_tokens)
+        messages = self._layer1_budget_truncate(messages, max_tokens, sent_image_paths)
         # Layer 2 是唯一会改写历史中段的层，而缓存按前缀命中：一条旧结果被
         # 折叠，它后面那一段（约 12 条消息、10~20K token）下一轮就要全价重算。
         # 实测那个 88K/1M 的会话里，这类改写贡献了约 45 万 input token 的重算，
@@ -87,18 +95,18 @@ class ContextManager:
             messages = self._layer3_microcompact(messages)
         if current > threshold_warn:
             messages = await self._layer4_auto_compact(
-                messages, config, model_key, runtime
+                messages, config, model_key, runtime, sent_image_paths
             )
         return messages
 
-    def _layer1_budget_truncate(self, messages, max_tokens):
+    def _layer1_budget_truncate(self, messages, max_tokens, sent_image_paths=None):
         """从头删除消息直到总 token 在预算内。
 
         参考 pi-main findCutPoint:只在有效消息边界切,
         不切在 tool result 和 assistant tool_calls 之间,
         避免破坏工具调用-结果的配对关系。
         """
-        while sum(self.counter.estimate(self._msg_text(m)) for m in messages) > max_tokens * 0.9:
+        while self._total_tokens(messages, sent_image_paths) > max_tokens * 0.9:
             if len(messages) <= 2:
                 break
             # 找到下一个安全的切点:user 消息或 assistant 消息的开头
@@ -203,6 +211,7 @@ class ContextManager:
         config,
         model_key="",
         runtime=None,
+        sent_image_paths=None,
     ):
         try:
             summary = await self._summarize_via_llm(
@@ -210,17 +219,20 @@ class ContextManager:
             )
             # 保留最近 KEEP_RECENT_TOKENS token 的消息（参考 pi-main keepRecentTokens）
             # 而非固定 8 条,确保多步骤业务流程的上下文不会被过度截断
-            recent = self._keep_recent_by_token_budget(messages, self.KEEP_RECENT_TOKENS)
+            recent = self._keep_recent_by_token_budget(
+                messages, self.KEEP_RECENT_TOKENS, sent_image_paths
+            )
             return [
                 {"role": "system", "content": f"[Previous conversation summary]: {summary}"}
             ] + recent
         except Exception as e:
             logger.warning(f"auto-compact LLM call failed: {e}, fallback to truncation")
             return self._layer1_budget_truncate(
-                messages, int(max_tokens_for_config(config, model_key, runtime) * 0.5)
+                messages, int(max_tokens_for_config(config, model_key, runtime) * 0.5),
+                sent_image_paths,
             )
 
-    def _keep_recent_by_token_budget(self, messages, budget_tokens):
+    def _keep_recent_by_token_budget(self, messages, budget_tokens, sent_image_paths=None):
         """从消息列表尾部向前保留,直到累积 token 超过预算。
 
         参考 pi-main 的 findCutPoint 逻辑:保留最近的上下文,
@@ -228,11 +240,13 @@ class ContextManager:
         """
         recent = []
         accumulated = 0
-        for m in reversed(messages):
-            estimated = self.counter.estimate(self._msg_text(m))
+        send_images = images_to_send(messages, sent_image_paths)
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            estimated = self._msg_tokens(message, index, send_images)
             if accumulated + estimated > budget_tokens and recent:
                 break
-            recent.insert(0, m)
+            recent.insert(0, message)
             accumulated += estimated
         return recent
 
@@ -294,6 +308,34 @@ class ContextManager:
             elif event.type == "error":
                 raise RuntimeError(event.message)
         return result_text.strip()
+
+    def _msg_tokens(self, msg, index: int = -1, send_images=None) -> int:
+        """消息的真实预算成本：文本按字符估，本轮真正发送的图片按视觉 token 计入。
+
+        _msg_text 对图片附件返回空串，只用它统计的话一张图在预算里是 0 token，
+        压缩层永远不会为它腾空间，带图会话会静默顶出窗口、被上游 400。
+
+        但历史图片会被剥成占位文本、只剩几十个字符，所以只计 ``send_images``
+        里那批（见 document_loader.images_to_send）；否则几十张陈年截图会以满额
+        视觉 token 虚增预算，让压缩早得多地触发。
+        """
+        tokens = self.counter.estimate(self._msg_text(msg))
+        for item in msg.get("attachments") or []:
+            if not isinstance(item, dict) or item.get("kind") != "image":
+                continue
+            path = str(item.get("path", ""))
+            if send_images is not None and (index, path) not in send_images:
+                continue
+            tokens += estimate_image_tokens(path)
+        return tokens
+
+    def _total_tokens(self, messages, sent_image_paths=None) -> int:
+        """一次请求的历史总成本，图片成本与真正发送的那批保持一致。"""
+        send_images = images_to_send(messages, sent_image_paths)
+        return sum(
+            self._msg_tokens(message, index, send_images)
+            for index, message in enumerate(messages)
+        )
 
     def _msg_text(self, msg) -> str:
         content = msg.get("content") if isinstance(msg.get("content"), str) else ""

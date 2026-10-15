@@ -203,7 +203,8 @@ class MockContextManager:
         from context import TokenCounter
         self.counter = TokenCounter()
 
-    async def compress(self, messages, session_id, config, model_key="", runtime=None):
+    async def compress(self, messages, session_id, config, model_key="", runtime=None,
+                       sent_image_paths=None):
         return messages
 
     def persist_large_result(self, result, session_id):

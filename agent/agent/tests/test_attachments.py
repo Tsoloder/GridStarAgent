@@ -8,8 +8,9 @@ from fastapi.testclient import TestClient
 import app as app_module
 import document_loader
 from document_loader import (
-    MAX_ATTACHMENTS, MAX_FILE_BYTES, MAX_IMAGES, extract_content,
-    load_attachments, read_image_data,
+    HISTORICAL_IMAGE_NOTICE, MAX_ATTACHMENTS, MAX_FILE_BYTES, MAX_IMAGE_BASE64_BYTES,
+    MAX_IMAGES, MIN_IMAGE_BASE64_BYTES, TOTAL_IMAGE_BASE64_BUDGET, extract_content,
+    image_byte_budget, images_to_send, load_attachments, read_image_data,
 )
 from llm_client.adapters.anthropic_messages import AnthropicMessagesAdapter
 from llm_client.adapters.base import image_data_url
@@ -336,3 +337,102 @@ def test_read_image_data_reuses_cache_across_requests(tmp_path, monkeypatch):
 
     assert third != first
     assert reads["count"] == 2
+
+
+# --- 历史图片剥离（对齐 openhanako 的「图片只活一轮」）---
+
+def _user_with_images(paths):
+    return {"role": "user", "content": "看图", "attachments": [
+        {"kind": "image", "name": p.rsplit("/", 1)[-1], "path": p} for p in paths]}
+
+
+def test_images_to_send_keeps_only_the_latest_user_message():
+    """历史 user 消息里的图片不再发送，只有最后一条 user 消息的图才发。
+
+    图片挂在 user 消息上，边界因此取「最后一条 user 消息」而不是照搬
+    openhanako 的「最后一条 assistant」——后者会把刚截的图也剥掉。
+    """
+    messages = [
+        _user_with_images(["/a/old.png"]),
+        {"role": "assistant", "content": "收到"},
+        _user_with_images(["/a/new.png"]),
+    ]
+
+    assert images_to_send(messages) == {(2, "/a/new.png")}
+
+
+def test_images_to_send_skips_images_already_sent_this_run():
+    """同一条消息上累加的截图，发过一次的下一轮必须退化成占位。
+
+    一次用户消息内的多轮工具调用会把截图不断追加到同一条 user 消息上；
+    没有这道闸，同一批图会随每轮请求重复发送。
+    """
+    messages = [_user_with_images(["/a/shot1.png", "/a/shot2.png"])]
+
+    assert images_to_send(messages) == {(0, "/a/shot1.png"), (0, "/a/shot2.png")}
+    assert images_to_send(messages, {"/a/shot1.png"}) == {(0, "/a/shot2.png")}
+    assert images_to_send(messages, {"/a/shot1.png", "/a/shot2.png"}) == set()
+
+
+def test_images_to_send_ignores_text_attachments_and_empty_paths():
+    messages = [{"role": "user", "content": "x", "attachments": [
+        {"kind": "text", "text": "参考资料"},
+        {"kind": "image", "name": "broken.png", "path": ""},
+    ]}]
+
+    assert images_to_send(messages) == set()
+
+
+def test_images_to_send_returns_empty_without_user_message():
+    assert images_to_send([{"role": "assistant", "content": "只有回复"}]) == set()
+    assert images_to_send([]) == set()
+
+
+def test_historical_image_notice_is_a_plain_text_placeholder():
+    """占位文本必须能让模型知道"这里曾有过一张图"，而不是留下一个空洞。"""
+    assert HISTORICAL_IMAGE_NOTICE.startswith("[") and HISTORICAL_IMAGE_NOTICE.endswith("]")
+    assert "图片" in HISTORICAL_IMAGE_NOTICE
+
+
+# --- 图片编码字节预算（对齐 openhanako 的 min(单图上限, 总预算/张数)）---
+
+def test_image_byte_budget_scales_down_with_image_count():
+    assert image_byte_budget(0) == MAX_IMAGE_BASE64_BYTES
+    assert image_byte_budget(1) == MAX_IMAGE_BASE64_BYTES
+    assert image_byte_budget(12) == TOTAL_IMAGE_BASE64_BUDGET // 12
+    # 张数极端时不摊到压不出可用画质，由下限兜住
+    assert image_byte_budget(10_000) == MIN_IMAGE_BASE64_BYTES
+
+
+def test_read_image_data_reencodes_when_bytes_exceed_budget(tmp_path):
+    """尺寸合规但体积超预算的图也必须压下来，否则整请求会顶爆总预算。"""
+    import io
+    import os
+
+    PILImage = pytest.importorskip("PIL.Image")
+
+    # 随机噪声压不动 PNG，天然得到一张"尺寸不大、体积很大"的图
+    noisy = PILImage.frombytes("RGB", (800, 600), os.urandom(800 * 600 * 3))
+    shot = tmp_path / "noisy.png"
+    noisy.save(shot, format="PNG")
+    original = shot.read_bytes()
+
+    payload = read_image_data(str(shot), max_bytes=100_000)
+    sent = base64.b64decode(payload["data"])
+
+    assert payload["media_type"] == "image/jpeg"
+    assert len(sent) < len(original)
+    # 像素尺寸不变，视觉 token 只由尺寸决定，所以重编码不会改变预算口径
+    assert document_loader.image_pixel_size(str(shot)) == (800, 600)
+    assert PILImage.open(io.BytesIO(sent)).size == (800, 600)
+
+
+def test_read_image_data_leaves_small_images_untouched(tmp_path):
+    """尺寸和体积都在预算内时不能白折腾一遍编码：原字节原样透传。"""
+    shot = tmp_path / "tiny.png"
+    shot.write_bytes(PNG_BYTES)
+
+    payload = read_image_data(str(shot), max_bytes=100_000)
+
+    assert payload == {"media_type": "image/png",
+                       "data": base64.b64encode(PNG_BYTES).decode("ascii")}
