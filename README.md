@@ -48,6 +48,10 @@ GridStar 网格生成软件的 AI 智能助手：把「CAD 导入 → 水密处�
                      GridStar 网格生成软件（本机运行）
 ```
 
+上图是组件之间的调用关系，下面这张是它们的实际落点。
+
+![GridStarAgent 部署形态](docs/images/gridstaragent-deployment.png)
+
 ---
 
 ## 目录结构
