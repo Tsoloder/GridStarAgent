@@ -783,6 +783,22 @@
 .settings-dialog .settings-field input:disabled{color:var(--muted-2);background:var(--band-3)}
 .settings-field code{font:11px/1.5 Consolas,monospace;color:var(--muted-2);overflow-wrap:anywhere}
 
+/* ---- 数值预设下拉：输入框可手填，右侧一格放预设档位（沿用主窗口 listbox 的语汇） ---- */
+.settings-field>.num-combobox{max-width:460px}
+.num-combobox{position:relative;display:flex;align-items:center;min-width:0}
+.num-combobox input{width:100%;padding-right:40px}
+/* 原生步进箭头会跟右侧按钮撞在一起，而且图里也没有它 */
+.num-combobox input::-webkit-outer-spin-button,.num-combobox input::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.num-toggle{position:absolute;top:1px;right:1px;bottom:1px;width:34px;display:grid;place-items:center;border:0;border-left:1px solid var(--line);border-radius:0 var(--radius-sm) var(--radius-sm) 0;background:none;color:var(--muted-2)}
+.num-toggle:hover{color:var(--set-accent)}
+.num-listbox{position:absolute;z-index:26;top:calc(100% + 5px);left:0;min-width:100%;max-height:240px;overflow:auto;padding:5px;border:1px solid var(--line-strong);border-radius:var(--radius);background:var(--inset);box-shadow:0 12px 28px #000b;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
+.num-listbox.drop-up{top:auto;bottom:calc(100% + 5px)}
+.num-option{width:100%;display:flex;align-items:baseline;gap:16px;padding:7px 8px;border:1px solid transparent;border-radius:var(--radius-sm);background:none;text-align:left;font-size:12px}
+.num-option span{min-width:0;flex:1;color:var(--text)}
+.num-option b{color:var(--muted-2);font:10px Consolas,monospace;text-align:right}
+.num-option:hover,.num-option.focused{border-color:var(--set-accent);background:var(--set-accent-soft)}
+.num-option.selected span{color:var(--set-accent)}
+
 /* ---- 开关：文字在左、开关贴右（启用 / 能力项共用） ---- */
 .settings-dialog .toggle,.settings-toggle{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--text);font-size:12px}
 .settings-dialog .toggle{min-height:52px}
@@ -804,6 +820,8 @@
 .model-line strong{color:var(--text-bright);font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-line small{color:var(--muted-2);font:10px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .model-ctx{flex:0 0 auto;padding:1px 7px;border-radius:9px;background:var(--surface-2);color:var(--muted-2);font:9px/1.7 Consolas,monospace}
+/* 只有候选数据、还没写进配置时用虚框：胶囊在不在，就等于字段填没填 */
+.model-ctx.is-fallback{background:none;border:1px dashed var(--line-strong);color:var(--muted-2)}
 .settings-model .model-api{flex:0 0 auto;max-width:24%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted-2);font:9px Consolas,monospace}
 .settings-model[open] .model-api{color:var(--set-accent)}
 .model-delete{flex:0 0 auto;width:24px;height:24px;padding:0;border:0;border-radius:var(--radius-sm);background:none;color:var(--muted-2);font-size:15px;line-height:1;opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease}
@@ -863,6 +881,7 @@
   .settings-field{grid-template-columns:minmax(0,1fr);row-gap:6px;padding:9px 0}
   .srow-2{grid-template-columns:minmax(0,1fr)}
   .settings-field>input,.settings-field>select{max-width:none}
+  .settings-field>.num-combobox{max-width:none}
   .model-rows{padding-left:10px}
   .add-model{margin:12px -12px -12px;padding:12px}
   .settings-actions{padding:10px 12px}

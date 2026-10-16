@@ -20,7 +20,7 @@ const state = {
   controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
   modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, categoryListOpen: false, categoryTouched: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
   attachments: [], uploading: 0,
-  settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{},modelMeta:null,refreshingMeta:false,metaError:"",metaErrorKind:"",metaStatus:null,},
+  settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{},modelMeta:null,refreshingMeta:false,metaError:"",metaErrorKind:"",metaStatus:null,capsTouched:null,},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
   // 用量面板：视图状态自持，图表只负责渲染并回传新的时间视窗
@@ -2191,7 +2191,9 @@ const PROVIDER_PRESETS = {
   compatible:{name:"OpenAI-compatible",base_url:"",default_api:"openai-chat",discovery_api:"openai"},
   ollama:{name:"Ollama",base_url:"http://localhost:11434/v1",default_api:"openai-chat",discovery_api:"openai"},
 };
-const CAPABILITIES = [["tools","Tools"],["parallel_tools","Parallel tools"],["reasoning","Reasoning"],["vision","Vision"],["stream_usage","Stream usage"]];
+// 模型能力：界面上只摆这四项（中文）。后端 schema 里还有 tools / parallel_tools /
+// stream_usage 三个旧键，那是为了兼容存量 config.json，界面不展示也不自动填充。
+const CAPABILITIES = [["vision","视觉"],["video","视频"],["audio","音频"],["reasoning","推理"]];
 function clone(value) { return JSON.parse(JSON.stringify(value)); }
 function draftProvider() { const draft = state.settings.draft; return draft && draft.providers ? draft.providers.find(item => item.id === state.settings.activeProviderId) : undefined; }
 function providerModels(id = state.settings.activeProviderId) { const draft = state.settings.draft; return ((draft && draft.models) || []).filter(item => item.provider === id); }
@@ -2248,6 +2250,7 @@ function metaTitleText() {
   if (meta.file_time) bits.push(`文件写入 ${meta.file_time}`);
   if (meta.fetched_at) bits.push(`数据抓取于 ${meta.fetched_at}`);
   bits.push(`收录 ${meta.models} 个模型 / ${meta.providers} 家供应商`);
+  if (meta.hosts) bits.push(`${meta.hosts} 个主机映射`);
   return bits.join(" · ");
 }
 function formatMetaDate(value) { const parts = String(value || "").split("-"); return parts.length === 3 ? `${parts[0]}年${Number(parts[1])}月${Number(parts[2])}日` : String(value || ""); }
@@ -2260,6 +2263,7 @@ async function loadModelMetadata() {
   try { state.settings.modelMeta = await request("/config/model-metadata"); setMetaError(null); }
   catch (error) { setMetaError(error, "load"); }
   if (state.settings.open) renderProviderEditor();
+  backfillModelMetadata();
 }
 async function refreshModelMetadata() {
   if (state.settings.refreshingMeta) return;
@@ -2270,6 +2274,7 @@ async function refreshModelMetadata() {
   finally { state.settings.refreshingMeta = false; if (state.settings.open) renderProviderEditor(); }
 }
 function renderProviderEditor() {
+  closeNumList();
   const provider = draftProvider(); if (!provider) { el.providerEditor.innerHTML = '<div class="placeholder-panel"><strong>添加供应商以开始配置</strong></div>'; return; }
   const models = providerModels(); const discovered = state.settings.discoveredModels[provider.id] || [];
   const caPath = provider.ssl_verify && provider.ssl_verify !== true && provider.ssl_verify !== false && provider.ssl_verify !== "true" && provider.ssl_verify !== "false" ? `<div class="srow">${field("CA 证书路径","ssl_verify_path",provider.ssl_verify,"text",'placeholder="/path/to/ca.pem"')}</div>` : "";
@@ -2292,13 +2297,143 @@ function renderProviderEditor() {
 function formatTokens(value) { return value >= 1000000 ? `${Math.round(value / 100000) / 10}M` : value >= 1000 ? `${Math.round(value / 100) / 10}K` : String(value); }
 function candidateLimits(model) { return ((state.settings.discoveredModels || {})[model.provider] || []).find(item => (item.id || item.model_id) === model.id) || null; }
 function autoLimit(model, name) { const limits = candidateLimits(model), value = limits && limits[name]; return value ? `自动 · ${formatTokens(value)}` : "保存时自动识别"; }
+// 数值字段：输入框照旧可手填，右侧按钮放预设档位。
+// 档位名是约定叫法（64K 对应 65536，不是 formatTokens 算出来的 65.5K），所以写死配对。
+const CHEVRON_ICON = '<svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>';
+const CONTEXT_PRESETS = [[65536, "64K"], [131072, "128K"], [200000, "200K"], [262144, "256K"], [1048576, "1M"]];
+const OUTPUT_PRESETS = [[8192, "8K"], [16384, "16K"], [32768, "32K"], [65536, "64K"], [131072, "128K"], [262144, "256K"]];
+function formatCount(value) { return Number(value).toLocaleString("en-US"); }
+function numberField(label, name, value, presets, placeholder) {
+  const current = value === "" || value == null ? "" : Number(value);
+  const options = presets.map(([preset, text]) => `<button type="button" class="num-option${current === preset ? " selected" : ""}" role="option" aria-selected="${current === preset}" data-value="${preset}"><span>${text}</span><b>${formatCount(preset)}</b></button>`).join("");
+  return `<label class="settings-field"><span><b>${label}</b></span><div class="num-combobox"><input type="number" min="1" data-model-field="${name}" value="${escapeHtml(current)}" placeholder="${escapeHtml(placeholder)}"><button type="button" class="num-toggle" aria-haspopup="listbox" aria-expanded="false" aria-label="${label} 预设">${CHEVRON_ICON}</button><div class="num-listbox hidden" role="listbox">${options}</div></div></label>`;
+}
+let openNumCombobox = null;
+function closeNumList() {
+  if (!openNumCombobox) return;
+  $(".num-listbox", openNumCombobox).classList.add("hidden");
+  $(".num-toggle", openNumCombobox).setAttribute("aria-expanded", "false");
+  openNumCombobox = null;
+}
+function toggleNumList(combo) {
+  if (openNumCombobox === combo) { closeNumList(); return; }
+  closeNumList();
+  const box = $(".num-listbox", combo);
+  box.classList.remove("hidden");
+  $(".num-toggle", combo).setAttribute("aria-expanded", "true");
+  // 就在面板底边时朝上展开，否则会被滚动区裁掉
+  const area = el.providerEditor.getBoundingClientRect(), rect = combo.getBoundingClientRect();
+  box.classList.toggle("drop-up", rect.bottom + box.offsetHeight + 8 > area.bottom && rect.top - box.offsetHeight - 8 > area.top);
+  openNumCombobox = combo;
+  const selected = $(".num-option.selected", combo);
+  if (selected) selected.scrollIntoView({block: "nearest"});
+}
+function wireNumberCombobox(combo) {
+  const input = $("input", combo), box = $(".num-listbox", combo);
+  $(".num-toggle", combo).onclick = event => { event.preventDefault(); toggleNumList(combo); };
+  input.addEventListener("keydown", event => {
+    if (event.key === "Escape") { event.preventDefault(); closeNumList(); return; }
+    if (event.key === "ArrowDown") { event.preventDefault(); toggleNumList(combo); }
+  });
+  // 选档位等于手填：写回输入框再派一个 change，让原有的 [data-model-field] 接线拾到；
+  // 顺手把折叠行上的胶囊改成新值（没有重新渲染，那一格不会自己更新）
+  box.querySelectorAll(".num-option").forEach(option => option.onclick = () => {
+    input.value = option.dataset.value;
+    box.querySelectorAll(".num-option").forEach(item => { const on = item === option; item.classList.toggle("selected", on); item.setAttribute("aria-selected", String(on)); });
+    const card = combo.closest(".settings-model"), chip = card && card.querySelector("summary .model-ctx");
+    if (chip) { chip.textContent = formatTokens(option.dataset.value); chip.classList.remove("is-fallback"); chip.removeAttribute("title"); }
+    input.dispatchEvent(new Event("change", {bubbles: true}));
+    closeNumList();
+  });
+}
+document.addEventListener("click", event => { if (openNumCombobox && !event.target.closest(".num-combobox")) closeNumList(); });
 function renderModelCard(model, parent) {
-  const limits = candidateLimits(model), ctx = model.context_window || (limits && limits.context_window);
-  const card = document.createElement("details"); card.className = "settings-model"; card.innerHTML = `<summary><span class="model-line"><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.id)}</small></span>${ctx ? `<em class="model-ctx">${formatTokens(ctx)}</em>` : ""}<code class="model-api">${escapeHtml(model.api || "继承供应商")}</code><button type="button" class="model-delete" aria-label="删除模型">×</button></summary><div class="model-rows"><div class="srow"><div class="settings-field"><span><b>ID</b></span><code class="model-id">${escapeHtml(model.id)}</code></div></div><div class="srow">${modelField("显示名称","name",model.name || "")}</div><div class="srow"><label class="settings-field"><span><b>API 协议</b><small>仅覆盖此模型的 API 协议；自动模式沿用供应商默认值。</small></span><select data-model-field="api"><option value="">自动（供应商默认）</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label></div><div class="srow srow-2">${modelField("Context window","context_window",model.context_window ?? "","number",`min="1" placeholder="${autoLimit(model,"context_window")}"`)}${modelField("Max output tokens","max_output_tokens",model.max_output_tokens ?? "","number",`min="1" placeholder="${autoLimit(model,"max_output_tokens")}"`)}</div><div class="srow"><label class="settings-field"><span><b>思考强度</b><small>控制该模型的推理档位；默认不干预。</small></span><select data-reasoning-mode><option value="">默认（不干预）</option><option value="off">关闭思考</option><option value="minimal">最小</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label></div>${CAPABILITIES.map(([key,label]) => `<label class="settings-toggle"><span>${label}</span><input type="checkbox" data-capability="${key}" ${model.capabilities && model.capabilities[key] ? "checked" : ""}></label>`).join("")}</div>`;
-  card.querySelector('[data-model-field="api"]').value = model.api || ""; card.querySelectorAll("[data-model-field]").forEach(input => input.onchange = () => { const name = input.dataset.modelField; if (input.type === "number") { const value = input.value.trim(); if (value) model[name] = Number(value); else delete model[name]; } else model[name] = input.value || null; markSettingsDirty(); }); card.querySelectorAll("[data-capability]").forEach(input => input.onchange = () => { if (!model.capabilities) model.capabilities = {}; model.capabilities[input.dataset.capability] = input.checked; markSettingsDirty(); }); const reasoningSelect = card.querySelector("[data-reasoning-mode]"), reasoningCompat = model.compat || (model.compat = {}); const reasoningMode = reasoningCompat.thinking === "disabled" ? "off" : (reasoningCompat.reasoning_effort || ""); reasoningSelect.value = ["", "off", "minimal", "low", "medium", "high"].includes(reasoningMode) ? reasoningMode : ""; reasoningSelect.onchange = () => { const value = reasoningSelect.value; delete reasoningCompat.thinking; delete reasoningCompat.reasoning_effort; if (value === "off") reasoningCompat.thinking = "disabled"; else if (value) reasoningCompat.reasoning_effort = value; markSettingsDirty(); }; $(".model-delete",card).onclick = event => { event.preventDefault(); const deletedKey = `${model.provider}/${model.id}`; state.settings.draft.models = state.settings.draft.models.filter(item => item !== model); if (state.settings.draft.default_model === deletedKey) { const fallback = state.settings.draft.models.find(item => item.enabled !== false); state.settings.draft.default_model = fallback ? `${fallback.provider}/${fallback.id}` : ""; } markSettingsDirty(); renderSettings(); }; parent.append(card);
+  const limits = candidateLimits(model), own = model.context_window, ctx = own || (limits && limits.context_window);
+  const card = document.createElement("details"); card.className = "settings-model"; card.innerHTML = `<summary><span class="model-line"><strong>${escapeHtml(model.name || model.id)}</strong><small>${escapeHtml(model.id)}</small></span>${ctx ? `<em class="model-ctx${own ? "" : " is-fallback"}"${own ? "" : ' title="来自模型信息，尚未写入配置"'}>${formatTokens(ctx)}</em>` : ""}<code class="model-api">${escapeHtml(model.api || "继承供应商")}</code><button type="button" class="model-delete" aria-label="删除模型">×</button></summary><div class="model-rows"><div class="srow"><div class="settings-field"><span><b>ID</b></span><code class="model-id">${escapeHtml(model.id)}</code></div></div><div class="srow">${modelField("显示名称","name",model.name || "")}</div><div class="srow"><label class="settings-field"><span><b>API 协议</b><small>仅覆盖此模型的 API 协议；自动模式沿用供应商默认值。</small></span><select data-model-field="api"><option value="">自动（供应商默认）</option><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label></div><div class="srow srow-2">${numberField("上下文长度","context_window",model.context_window ?? "",CONTEXT_PRESETS,autoLimit(model,"context_window"))}${numberField("最大输出","max_output_tokens",model.max_output_tokens ?? "",OUTPUT_PRESETS,autoLimit(model,"max_output_tokens"))}</div><div class="srow"><label class="settings-field"><span><b>思考强度</b><small>控制该模型的推理档位；默认不干预。</small></span><select data-reasoning-mode><option value="">默认（不干预）</option><option value="off">关闭思考</option><option value="minimal">最小</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label></div>${CAPABILITIES.map(([key,label]) => `<label class="settings-toggle"><span>${label}</span><input type="checkbox" data-capability="${key}" ${model.capabilities && model.capabilities[key] ? "checked" : ""}></label>`).join("")}</div>`;
+  card.querySelector('[data-model-field="api"]').value = model.api || ""; card.querySelectorAll(".num-combobox").forEach(wireNumberCombobox); card.querySelectorAll("[data-model-field]").forEach(input => input.onchange = () => { const name = input.dataset.modelField; if (input.type === "number") { const value = input.value.trim(); if (value) model[name] = Number(value); else delete model[name]; } else model[name] = input.value || null; markSettingsDirty(); }); card.querySelectorAll("[data-capability]").forEach(input => input.onchange = () => { if (!model.capabilities) model.capabilities = {}; model.capabilities[input.dataset.capability] = input.checked; markCapsTouched(model); markSettingsDirty(); }); const reasoningSelect = card.querySelector("[data-reasoning-mode]"), reasoningCompat = model.compat || (model.compat = {}); const reasoningMode = reasoningCompat.thinking === "disabled" ? "off" : (reasoningCompat.reasoning_effort || ""); reasoningSelect.value = ["", "off", "minimal", "low", "medium", "high"].includes(reasoningMode) ? reasoningMode : ""; reasoningSelect.onchange = () => { const value = reasoningSelect.value; delete reasoningCompat.thinking; delete reasoningCompat.reasoning_effort; if (value === "off") reasoningCompat.thinking = "disabled"; else if (value) reasoningCompat.reasoning_effort = value; markSettingsDirty(); }; $(".model-delete",card).onclick = event => { event.preventDefault(); const deletedKey = `${model.provider}/${model.id}`; state.settings.draft.models = state.settings.draft.models.filter(item => item !== model); if (state.settings.draft.default_model === deletedKey) { const fallback = state.settings.draft.models.find(item => item.enabled !== false); state.settings.draft.default_model = fallback ? `${fallback.provider}/${fallback.id}` : ""; } markSettingsDirty(); renderSettings(); }; parent.append(card);
 }
 function renderCandidates(candidates, query = "") { const root = $("#model-candidates",el.providerEditor); if (!root) return; const added = new Set(providerModels().map(item => item.id)); root.innerHTML = ""; candidates.filter(item => !query || String(item.id || item.model_id).toLowerCase().includes(query.toLowerCase())).forEach(item => { const id = item.id || item.model_id, button = document.createElement("button"); button.type = "button"; button.disabled = added.has(id); const limits = [item.context_window ? `${formatTokens(item.context_window)} 输入` : "", item.max_output_tokens ? `${formatTokens(item.max_output_tokens)} 输出` : ""].filter(Boolean).join(" · "); button.innerHTML = `<span>${added.has(id) ? "✓" : "+"}</span><strong>${escapeHtml(item.name || id)}</strong><small>${escapeHtml(id)}${limits ? `<em>${escapeHtml(limits)}</em>` : ""}</small>`; button.onclick = () => addModel(id,item.name); root.append(button); }); if (!root.children.length) root.innerHTML = '<div class="listbox-empty">暂无候选，可手动添加</div>'; }
-function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{tools:false,parallel_tools:false,reasoning:false,vision:false,stream_usage:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); }
+// 新增模型时用第三方元数据快照里的上限当场填好，别再留空回落到保守默认值。
+// 上限只填空字段；能力项只把数据里说支持的勾上，从不反向取消。
+function applyModelLimits(model, limits) {
+  if (!limits) return false;
+  let changed = false;
+  if (!model.context_window && limits.context_window) { model.context_window = limits.context_window; changed = true; }
+  if (!model.max_output_tokens && limits.max_output_tokens) {
+    const window = model.context_window || limits.context_window;
+    if (window) { model.max_output_tokens = Math.min(limits.max_output_tokens, window); changed = true; }
+  }
+  if (applyModelCapabilities(model, limits.capabilities)) changed = true;
+  return changed;
+}
+// 能力项：数据里标了支持的才勾上；用户手动改过的不碰。
+// 「改过」记忆到 localStorage，否则用户取消勾选后，下次打开设置又会被自动勾回来。
+function capsTouchedSet() {
+  if (!state.settings.capsTouched) {
+    let stored = [];
+    try { stored = JSON.parse(localStorage.getItem("gs-caps-touched") || "[]"); } catch (error) { stored = []; }
+    state.settings.capsTouched = new Set(Array.isArray(stored) ? stored : []);
+  }
+  return state.settings.capsTouched;
+}
+function markCapsTouched(model) {
+  const touched = capsTouchedSet();
+  touched.add(`${model.provider}/${model.id}`);
+  try { localStorage.setItem("gs-caps-touched", JSON.stringify([...touched])); } catch (error) { /* 存不进去就算了，下次再勾一次而已 */ }
+}
+function applyModelCapabilities(model, caps) {
+  if (!caps) return false;
+  if (capsTouchedSet().has(`${model.provider}/${model.id}`)) return false;
+  if (!model.capabilities) model.capabilities = {};
+  let changed = false;
+  CAPABILITIES.forEach(([name]) => {
+    if (caps[name] === true && !model.capabilities[name]) { model.capabilities[name] = true; changed = true; }
+  });
+  return changed;
+}
+async function fillModelLimits(model) {
+  const known = candidateLimits(model);
+  let filled = applyModelLimits(model, known), found = Boolean(known && known.context_window);
+  // 候选数据里没有能力项（或压根没有候选数据）时，再问一次解析接口把缺的补齐
+  if (!(known && known.capabilities)) {
+    const provider = draftProvider();
+    if (provider) {
+      try {
+        const data = await request("/config/model-metadata/resolve", {method: "POST", body: JSON.stringify({models: [{id: model.id, base_url: provider.base_url || ""}]})});
+        const limits = (data.limits || {})[model.id];
+        if (limits) { found = true; if (applyModelLimits(model, limits)) filled = true; }
+      } catch (error) {
+        // 静默失败最难查：这里必须说清是哪一步断的
+        el.settingsStatus.textContent = `自动填入模型信息失败：${error.message}${error.status ? `（HTTP ${error.status}）` : ""}${error.status === 404 ? "，该接口未注册，重启后端服务后再试" : ""}`;
+        return;
+      }
+    }
+  }
+  if (filled) { markSettingsDirty(); if (state.settings.open) renderSettings(); return; }
+  // 查不到不算失败：模型信息里没有这个 ID，留空让保存时的兜底再试一次
+  if (!found) el.settingsStatus.textContent = `模型信息中没有 ${model.id} 的上限与能力项，留空（保存时会再试一次）`;
+}
+// 打开设置时，把已在列表里的模型按同一份快照补齐上限与能力项。
+// 这里刻意不标 dirty：否则用户只是打开看一眼，关闭时就要面对「放弃未保存的修改」。
+// 值本来就会在保存时由后端 _apply_model_limits 补上，这里只是让它提前可见。
+async function backfillModelMetadata() {
+  const draft = state.settings.draft;
+  if (!draft || !Array.isArray(draft.models) || !draft.models.length) return;
+  const baseUrls = {};
+  (draft.providers || []).forEach(provider => { baseUrls[provider.id] = provider.base_url || ""; });
+  let data;
+  try {
+    data = await request("/config/model-metadata/resolve", {method: "POST", body: JSON.stringify({models: draft.models.map(model => ({id: model.id, base_url: baseUrls[model.provider] || ""}))})});
+  } catch (error) {
+    el.settingsStatus.textContent = `自动补全模型信息失败：${error.message}${error.status ? `（HTTP ${error.status}）` : ""}${error.status === 404 ? "，该接口未注册，重启后端服务后再试" : ""}`;
+    return;
+  }
+  const limits = data.limits || {};
+  let changed = false;
+  draft.models.forEach(model => { if (applyModelLimits(model, limits[model.id])) changed = true; });
+  if (changed && state.settings.open) renderProviderEditor();
+}
+function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{vision:false,video:false,audio:false,reasoning:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); fillModelLimits(model); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
 function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); if (tab === "memory") memoryEnterTab(); else memoryStopPolling(); }
 function schemaParams(schema) {
@@ -2356,14 +2491,14 @@ async function loadSkills() {
   } catch (error) { state.skillsError = error.message; }
   finally { state.skillsLoading = false; if (el.refreshSkills) el.refreshSkills.disabled = false; renderSkills(); }
 }
-async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); loadModelMetadata(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
+async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; state.settings.capsTouched = null; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); loadModelMetadata(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
 function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; memoryStopPolling(); el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
 function providerPayload(provider) { return {provider:{...provider,headers:provider.headers || {},discover_models:provider.discover_models !== false}}; }
 async function testProvider() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.test) state.settings.controllers.test.abort(); state.settings.controllers.test = controller; state.settings.testingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/test",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); if (state.settings.activeProviderId === id) el.settingsStatus.textContent = data.message || `连接成功 · ${data.latency_ms || 0}ms`; } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.testingProviderId === id) { state.settings.testingProviderId = null; renderProviderEditor(); } } }
-async function readProviderModels() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.models) state.settings.controllers.models.abort(); state.settings.controllers.models = controller; state.settings.readingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/models",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); state.settings.discoveredModels[id] = [...new Map((data.models || []).map(item => [item.id || item.model_id,item])).values()].sort((a,b) => String(a.id || a.model_id).localeCompare(String(b.id || b.model_id))); if (state.settings.activeProviderId === id) renderProviderEditor(); } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.readingProviderId === id) { state.settings.readingProviderId = null; renderProviderEditor(); } } }
+async function readProviderModels() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.models) state.settings.controllers.models.abort(); state.settings.controllers.models = controller; state.settings.readingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/models",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); state.settings.discoveredModels[id] = [...new Map((data.models || []).map(item => [item.id || item.model_id,item])).values()].sort((a,b) => String(a.id || a.model_id).localeCompare(String(b.id || b.model_id))); let patched = false; providerModels(id).forEach(model => { if (applyModelLimits(model, candidateLimits(model))) patched = true; }); if (patched) markSettingsDirty(); if (state.settings.activeProviderId === id) renderProviderEditor(); } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.readingProviderId === id) { state.settings.readingProviderId = null; renderProviderEditor(); } } }
 function addProvider() { if (!state.settings.draft.providers) state.settings.draft.providers = []; const providers = state.settings.draft.providers; let id = "custom", suffix = 2; while (providers.some(item => item.id === id)) id = `custom-${suffix++}`; providers.push({id,...PROVIDER_PRESETS.compatible,name:"新供应商",api_key:"",api_key_env:"",headers:{},discover_models:true,enabled:true}); state.settings.activeProviderId = id; markSettingsDirty(); renderSettings(); const nameInput = el.providerEditor.querySelector('[data-provider-field="name"]'); if (nameInput) { nameInput.focus(); nameInput.select(); } }
 function deleteProvider() { const provider = draftProvider(), models = providerModels(); if (models.length) { el.settingsStatus.textContent = "请先删除该供应商下的模型"; return; } const defaultModel = state.settings.draft.default_model; if (defaultModel && defaultModel.startsWith(`${provider.id}/`)) { el.settingsStatus.textContent = "默认模型属于该供应商，无法删除"; return; } state.settings.draft.providers = state.settings.draft.providers.filter(item => item !== provider); const nextProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = nextProvider ? nextProvider.id : null; markSettingsDirty(); renderSettings(); }
-function validateSettings() { const errors = []; for (const provider of state.settings.draft.providers) { try { const url = new URL(provider.base_url); if (!["http:","https:"].includes(url.protocol)) errors.push(`${provider.name} 的 API 地址无效`); } catch (_) { errors.push(`${provider.name} 的 API 地址无效`); } } for (const model of state.settings.draft.models) { if (model.context_window < model.max_output_tokens) errors.push(`${model.id} 的 context window 不能小于最大输出`); } const enabledModels = state.settings.draft.models.filter(item => item.enabled !== false); if (!enabledModels.some(item => `${item.provider}/${item.id}` === state.settings.draft.default_model)) { const fallback = enabledModels[0]; if (fallback) state.settings.draft.default_model = `${fallback.provider}/${fallback.id}`; else errors.push("请至少添加一个已启用模型"); } el.settingsStatus.textContent = errors[0] || ""; return !errors.length; }
+function validateSettings() { const errors = []; for (const provider of state.settings.draft.providers) { try { const url = new URL(provider.base_url); if (!["http:","https:"].includes(url.protocol)) errors.push(`${provider.name} 的 API 地址无效`); } catch (_) { errors.push(`${provider.name} 的 API 地址无效`); } } for (const model of state.settings.draft.models) { if (model.context_window < model.max_output_tokens) errors.push(`${model.id} 的上下文长度不能小于最大输出`); } const enabledModels = state.settings.draft.models.filter(item => item.enabled !== false); if (!enabledModels.some(item => `${item.provider}/${item.id}` === state.settings.draft.default_model)) { const fallback = enabledModels[0]; if (fallback) state.settings.draft.default_model = `${fallback.provider}/${fallback.id}`; else errors.push("请至少添加一个已启用模型"); } el.settingsStatus.textContent = errors[0] || ""; return !errors.length; }
 async function saveSettings() { if (!validateSettings()) return; el.saveSettings.disabled = true; try { const payload = {revision:state.settings.revision,config:state.settings.draft}; const data = await request("/config",{method:"POST",body:JSON.stringify(payload)}); state.settings.dirty = false; closeSettings(true); state.configLoaded = true; el.warning.classList.add("hidden"); await refreshModels(null, data.config && data.config.default_model); updateSendState(); showToast("模型设置已保存"); } catch(error) { el.settingsStatus.textContent = error.status === 409 ? "配置已被其他窗口修改，请关闭后重新加载" : error.message; } finally { el.saveSettings.disabled = false; } }
 async function refreshModels(models = null, defaultModel = null) { if (!models) { const data = await request("/config/models"); models = data.models || []; defaultModel = data.default_model || defaultModel; } const previous = el.model.value; state.models = models; const keys = visibleModels().map(modelKey); selectModel(keys.includes(previous) ? previous : (defaultModel && keys.includes(defaultModel) ? defaultModel : keys[0] || "")); }
 
