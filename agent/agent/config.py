@@ -23,11 +23,22 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class ModelCapabilities:
+    """模型能力。界面上只摆最后四项（见 webui 的 CAPABILITIES）。
+
+    tools / parallel_tools / stream_usage 保留在这里是为了兼容存量 config.json
+    （未知键会被 _require_fields 拒掉），界面不再展示：
+    tools 与 parallel_tools 目前没有任何消费方；stream_usage 仍在 openai_chat 适配器里
+    控制着 stream_options.include_usage，默认打开（用量才能回传真实 token），
+    个别不认 stream_options 的网关在模型上写 compat.stream_options=false 关掉。
+    """
+
     tools: bool = False
     parallel_tools: bool = False
     reasoning: bool = False
     vision: bool = False
-    stream_usage: bool = False
+    stream_usage: bool = True
+    video: bool = False
+    audio: bool = False
 
 
 @dataclass(frozen=True)

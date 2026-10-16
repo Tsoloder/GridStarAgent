@@ -546,8 +546,11 @@ def _apply_model_limits(raw_config):
     """为未显式配置上限的模型补上元数据里的真实值。
 
     只有 JSON 中缺失字段时才补：写进配置的字段会被 `_specified_fields` 记为用户显式
-    指定，此后任何自动结果都不再覆盖它。所以「前端不填、保存时补」是唯一的写入时机，
-    补完之后值就固化在 config.json 里，运行时（ModelRuntime）直接用它算压缩预算。
+    指定，此后任何自动结果都不再覆盖它。所以值一旦落进 config.json 就固化了，运行时
+    （ModelRuntime）直接用它算压缩预算。
+
+    前端新增模型时会用同一份快照当场填一次（POST /config/model-metadata/resolve），
+    所以这里是兜底：手工改过 config.json、或旧配置里缺字段的情况仍然由它补。
     """
     if not isinstance(raw_config, dict):
         return raw_config
@@ -888,6 +891,7 @@ async def provider_models(body: dict):
                     "owned_by": item.get("owned_by"),
                     "context_window": limits.context_window if limits else None,
                     "max_output_tokens": limits.max_output_tokens if limits else None,
+                    "capabilities": limits.capabilities if limits else None,
                 }
         return {"models": [by_id[key] for key in sorted(by_id, key=str.casefold)]}
     except (ConfigError, ValueError) as exc:
@@ -958,6 +962,35 @@ async def refresh_model_metadata():
     except Exception as exc:
         return JSONResponse({"error": f"更新模型信息失败：{exc}"}, status_code=502)
     return {"ok": True, **info}
+
+
+@app.post("/config/model-metadata/resolve")
+async def resolve_model_metadata(body: dict):
+    """按模型 ID + API 地址查快照里的上下文窗口/最大输出，供新增模型时当场填。
+
+    纯内存查表（首次会读一遍快照文件），不必放线程池。查不到的 ID 返回 null，
+    由调用方决定是留空还是让保存时的 _apply_model_limits 兜底。
+    """
+    items = body.get("models") if isinstance(body, dict) else None
+    if not isinstance(items, list):
+        items = [body if isinstance(body, dict) else {}]
+    limits = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        model_id = str(item.get("id") or "").strip()
+        if not model_id:
+            continue
+        found = resolve_model_limits(model_id, str(item.get("base_url") or ""))
+        limits[model_id] = (
+            {
+                "context_window": found.context_window,
+                "max_output_tokens": found.max_output_tokens,
+                "capabilities": found.capabilities,
+            }
+            if found is not None else None
+        )
+    return {"limits": limits}
 
 
 def _parse_local_dt(value):

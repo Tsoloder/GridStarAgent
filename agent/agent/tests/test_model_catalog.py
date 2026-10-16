@@ -48,7 +48,11 @@ def test_discovery_merge_status_defaults_and_same_model_ids():
         assert discovered.status == "discovered"
         assert discovered.config.context_window == 32768
         assert discovered.config.max_output_tokens == 4096
-        assert not any(vars(discovered.config.capabilities).values())
+        # 全新模型没有任何能力信息：内容向的能力一个都不该有；
+        # stream_usage 是「用量回传」开关，默认打开（见 ModelCapabilities 的说明）
+        caps = vars(discovered.config.capabilities)
+        assert [name for name, on in caps.items() if name != "stream_usage" and on] == []
+        assert caps["stream_usage"] is True
 
     asyncio.run(scenario())
 

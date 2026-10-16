@@ -5,7 +5,8 @@
 - app._apply_model_limits：保存配置前，只为「未显式填写」的字段补上解析结果
 """
 import app as server
-from llm_client.model_metadata import _provider_hint, _variant_ids, resolve
+from config import ModelCapabilities, _CAPABILITY_FIELDS, api_config_to_dict, config_from_dict
+from llm_client.model_metadata import _caps_flag, _caps_from_flag, _provider_hint, _variant_ids, resolve
 
 
 def test_resolve_scoped_by_base_url_host():
@@ -18,10 +19,14 @@ def test_resolve_scoped_by_base_url_host():
 
 
 def test_resolve_strips_date_suffix_variant():
-    # Anthropic 的带日期写法在数据源里登记为不带日期的形式
+    # 按 API 地址落到 anthropic，并解析出一个具体值。
+    # 数值随快照走：models.dev 把 Sonnet 4.5 从 1M beta 改成了 200K 标准窗口，
+    # 刷新快照后这里的期望值要跟着改；「退到不带日期写法」的行为由
+    # test_variant_ids_orders_by_confidence 单独覆盖。
     limits = resolve("claude-sonnet-4-5-20250929", "https://api.anthropic.com")
     assert limits is not None
-    assert limits.context_window == 1000000
+    assert limits.provider == "anthropic"
+    assert limits.context_window == 200000
     assert limits.max_output_tokens == 64000
 
 
@@ -105,3 +110,40 @@ def test_apply_model_limits_ignores_malformed_input():
            "models": [{"provider": "openai"}, "junk", {"id": "gpt-4o", "provider": "openai"}]}
     result = server._apply_model_limits(raw)
     assert result["models"][2]["context_window"] == 128000
+
+
+def test_caps_flag_maps_four_capabilities():
+    # models.dev 的字段 → 我们界面上那四项：modalities.input 里的 image/video/audio，
+    # 加上 reasoning。tool_call 不在界面里，不再进标志串。
+    meta = {"reasoning": True, "tool_call": True,
+            "modalities": {"input": ["text", "image", "video"], "output": ["text"]}}
+    assert _caps_flag(meta) == "vdr"
+    assert _caps_from_flag("vdr") == {"vision": True, "video": True, "reasoning": True}
+    assert _caps_flag({"modalities": {"input": ["audio"]}}) == "a"
+    assert _caps_flag({"modalities": {"input": ["text"]}}) == ""
+    assert _caps_flag({}) == ""
+    assert _caps_flag("nope") == ""
+
+
+def test_capability_schema_accepts_video_audio_and_keeps_legacy_keys():
+    # 新增的 video / audio 必须被 schema 接受，否则前端一保存就被 _require_fields 拒掉；
+    # 旧的三个键必须继续被接受，否则存量 config.json 会加载失败。
+    assert {"video", "audio"} <= set(ModelCapabilities.__dataclass_fields__)
+    assert {"video", "audio"} <= _CAPABILITY_FIELDS
+    assert {"tools", "parallel_tools", "stream_usage"} <= _CAPABILITY_FIELDS
+
+
+def test_stream_usage_defaults_on_for_models_without_the_key():
+    # 界面只写四项能力（不含 stream_usage），新模型因此走默认值：打开，
+    # 用量才会回传真实 token；不认 stream_options 的网关在模型上写 compat.stream_options=false 关。
+    assert ModelCapabilities().stream_usage is True
+    raw = {
+        "version": 1, "default_model": "p/m",
+        "providers": [{"id": "p", "name": "P", "base_url": "https://api.openai.com/v1",
+                       "default_api": "openai-chat", "discovery_api": "openai"}],
+        "models": [{"id": "m", "provider": "p", "name": "M",
+                    "capabilities": {"vision": True, "video": True, "audio": True, "reasoning": True}}],
+    }
+    caps = api_config_to_dict(config_from_dict(raw))["models"][0]["capabilities"]
+    assert caps["stream_usage"] is True
+    assert caps["video"] is True and caps["audio"] is True

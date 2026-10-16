@@ -14,7 +14,9 @@ class ModelCapabilities:
     parallel_tools: bool = False
     reasoning: bool = False
     vision: bool = False
-    stream_usage: bool = False
+    stream_usage: bool = True
+    video: bool = False
+    audio: bool = False
 
 
 @dataclass(frozen=True)
