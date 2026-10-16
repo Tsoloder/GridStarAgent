@@ -713,3 +713,157 @@
 .context-pop .pop-bar{height:4px;margin-top:7px;border-radius:2px;background:var(--surface-3);overflow:hidden}
 .context-pop .pop-bar>i{display:block;height:100%;width:0;border-radius:2px;background:var(--cyan);transition:width .35s ease,background .25s ease}
 .context-pop .pop-note{margin-top:6px;color:var(--muted-2);font-size:9px}
+
+/* ===========================================================================
+   设置中心 · 模型页（参考图骨架）
+   ---------------------------------------------------------------------------
+   骨架照搬参考图：左栏分组列表 + 右栏「标签在左、控件在右」的行式表单，行间一条发丝线；
+   每块内容各自成卡、卡间留白；模型列表单行（名称 + ID + 右侧信息 + 箭头）；
+   「添加模型」常驻在列表卡底部，「模型信息」单独成一张状态卡。
+   颜色不照抄参考图的藏青 + 玫瑰，仍用主窗口自己的色板：强调色统一取青色，
+   色彩统一取青色，收在下面的 --set-accent* 四个变量上，将来要换只改那一处。
+   Qt5.12 WebEngine（Chromium 69）可用范围内：不用 :has / clamp / accent-color。
+   =========================================================================== */
+
+/* 强调色：设置中心的选中、开关、链接、主按钮都走这四个变量，统一取主窗口的青色；
+   以后若要换一支强调色，改这一行即可 */
+:root{--set-accent:var(--cyan);--set-accent-soft:var(--accent-tint);--set-accent-deep:var(--cyan-dark);--set-accent-glow:var(--cyan-glow)}
+
+/* ---- 弹窗与页头 ---- */
+.settings-dialog{position:relative;max-width:920px;border:1px solid var(--line-strong);background:var(--glass-bg-2);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);box-shadow:0 30px 80px rgba(0,0,0,.45)}
+.settings-head{padding:15px 20px 13px;border-bottom:1px solid var(--line);background:var(--band-2)}
+.settings-head>div{min-width:0}
+.settings-head h2{margin:3px 0 0;font-size:17px}
+.settings-head .icon-button{width:28px;height:28px;border-color:transparent;background:none;color:var(--muted-2)}
+.settings-head .icon-button:hover{border-color:var(--line-strong);background:var(--surface-2);color:var(--set-accent)}
+
+/* ---- 页签：下划线式，选中线用强调色 ---- */
+.settings-tabs{padding:0 14px;border-bottom:1px solid var(--line);background:var(--band-3)}
+.settings-tabs button{height:38px;padding:0 16px;border-bottom:2px solid transparent;background:none;color:var(--muted);font-size:12px;letter-spacing:.4px}
+.settings-tabs button:hover{background:var(--band-2);color:var(--text)}
+.settings-tabs button[aria-selected="true"]{border-bottom-color:var(--set-accent);color:var(--text-bright)}
+
+/* ---- 左栏：分组列表（组标题 + 行：色标 / 名称 / 模型数） ---- */
+.models-panel{grid-template-columns:212px minmax(0,1fr)}
+.provider-sidebar{padding:16px 10px 14px;border-right:1px solid var(--line);background:var(--band-3)}
+.provider-sidebar .section-label{padding:0 8px 4px}
+.provider-group+.provider-group{margin-top:16px}
+.provider-group-label{padding:0 8px 6px;color:var(--muted-2);font-size:9px;font-weight:700;letter-spacing:1.2px}
+.provider-sidebar nav button{display:flex;align-items:center;gap:9px;width:100%;padding:8px;border:0;border-radius:var(--radius);background:none;color:var(--text);text-align:left;transition:background .14s ease,color .14s ease}
+.provider-sidebar nav button:hover{background:var(--band-2)}
+.provider-sidebar nav button.active{background:var(--set-accent-soft);color:var(--set-accent)}
+.provider-mark{flex:0 0 auto;width:8px;height:8px;border-radius:3px;background:var(--muted)}
+.provider-mark[data-group="openai"]{background:var(--cyan)}
+.provider-mark[data-group="anthropic"]{background:var(--warn-text)}
+.provider-name{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.provider-sidebar nav button b{min-width:22px;padding:1px 6px;border:0;border-radius:3px;background:var(--surface-2);color:var(--muted);text-align:center;font-size:9px;font-weight:500}
+.provider-sidebar nav button.active b{background:var(--set-accent-deep);color:var(--text-bright)}
+
+/* ---- 右栏：每块内容一张圆角卡，卡间留白 ---- */
+.provider-editor{padding:16px 18px 20px}
+.provider-section{border:1px solid var(--line);border-radius:var(--radius-lg);background:var(--band-2);padding:4px 18px 14px;margin-bottom:12px}
+.models-meta{display:flex;align-items:center;gap:16px;padding:14px 18px}
+.models-meta-text{min-width:0;flex:1}
+.models-meta .link-button{flex:0 0 auto}
+.editor-title,.section-head{margin:14px 0 2px}
+.editor-title h3,.section-head h3{font-size:15px}
+.section-head h3 small{color:var(--muted-2);font-size:11px;font-weight:400}
+
+/* ---- 行式表单：标签固定左列，控件占右侧，行间一条发丝线 ---- */
+.srow{display:grid;grid-template-columns:minmax(0,1fr);column-gap:24px;border-bottom:1px solid var(--line)}
+.srow-2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.settings-field{display:grid;grid-template-columns:minmax(96px,104px) minmax(0,1fr);align-items:center;column-gap:14px;min-height:52px}
+.settings-field>span{display:block;min-width:0;margin-bottom:0;color:var(--muted);font-size:12px}
+.settings-field>span b{display:block;font-weight:500}
+.settings-field>span small{display:block;margin-top:3px;color:var(--muted-2);font-size:10px;line-height:1.5}
+.settings-field>input,.settings-field>select{max-width:460px}
+.settings-dialog .settings-field input,.settings-dialog .settings-field select,.settings-dialog .add-model input{height:34px;padding:0 11px;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset);transition:border-color .14s ease,box-shadow .14s ease}
+.settings-dialog .settings-field input:hover:not(:disabled),.settings-dialog .settings-field select:hover,.settings-dialog .add-model input:hover{border-color:var(--line-strong)}
+.settings-dialog .settings-field input:focus,.settings-dialog .settings-field select:focus,.settings-dialog .add-model input:focus{border-color:var(--set-accent);box-shadow:0 0 0 2px var(--set-accent-glow)}
+.settings-dialog .settings-field input:disabled{color:var(--muted-2);background:var(--band-3)}
+.settings-field code{font:11px/1.5 Consolas,monospace;color:var(--muted-2);overflow-wrap:anywhere}
+
+/* ---- 开关：文字在左、开关贴右（启用 / 能力项共用） ---- */
+.settings-dialog .toggle,.settings-toggle{display:flex;align-items:center;justify-content:space-between;gap:14px;color:var(--text);font-size:12px}
+.settings-dialog .toggle{min-height:52px}
+.settings-toggle{min-height:50px;border-bottom:1px solid var(--line)}
+.model-rows>.settings-toggle:last-child{border-bottom:0}
+.settings-dialog .toggle input,.settings-toggle input{-webkit-appearance:none;appearance:none;position:relative;flex:0 0 auto;width:34px;height:20px;margin:0;border:1px solid var(--line-strong);border-radius:10px;background:var(--surface-3);cursor:pointer;transition:background .16s ease,border-color .16s ease}
+.settings-dialog .toggle input::after,.settings-toggle input::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--muted);transition:transform .16s ease,background .16s ease}
+.settings-dialog .toggle input:checked,.settings-toggle input:checked{border-color:var(--set-accent);background:var(--set-accent)}
+.settings-dialog .toggle input:checked::after,.settings-toggle input:checked::after{transform:translateX(16px);background:#fff}
+
+/* ---- 模型列表：单行「名称 + ID + 右侧信息 + 箭头」 ---- */
+.model-settings-list{display:flex;flex-direction:column;margin-top:10px;border-top:1px solid var(--line)}
+.settings-model{border:0;border-bottom:1px solid var(--line);border-radius:0;background:none;margin-bottom:0;overflow:visible}
+.settings-model>summary{display:flex;align-items:center;gap:10px;min-height:50px;padding:0 2px;list-style:none;transition:background .14s ease}
+.settings-model>summary>*+*{margin-left:0}
+.settings-model>summary::-webkit-details-marker{display:none}
+.settings-model>summary:hover{background:var(--band-3)}
+.model-line{display:flex;align-items:baseline;gap:10px;min-width:0;flex:1}
+.model-line strong{color:var(--text-bright);font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-line small{color:var(--muted-2);font:10px Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.model-ctx{flex:0 0 auto;padding:1px 7px;border-radius:9px;background:var(--surface-2);color:var(--muted-2);font:9px/1.7 Consolas,monospace}
+.settings-model .model-api{flex:0 0 auto;max-width:24%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted-2);font:9px Consolas,monospace}
+.settings-model[open] .model-api{color:var(--set-accent)}
+.model-delete{flex:0 0 auto;width:24px;height:24px;padding:0;border:0;border-radius:var(--radius-sm);background:none;color:var(--muted-2);font-size:15px;line-height:1;opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease}
+.settings-model:hover .model-delete,.settings-model[open] .model-delete{opacity:1}
+.model-delete:hover{background:var(--err-tint);color:var(--err-text)}
+.settings-model>summary::after{content:"";flex:0 0 auto;width:6px;height:6px;border-right:1px solid var(--muted-2);border-bottom:1px solid var(--muted-2);transform:rotate(-45deg);transition:transform .15s ease,border-color .15s ease}
+.settings-model[open]>summary::after{transform:rotate(45deg);border-color:var(--set-accent)}
+.settings-model[open]{background:var(--band-3)}
+.model-rows{padding:0 2px 10px 22px;border-top:1px solid var(--line)}
+
+/* ---- 添加模型：贴在列表卡末尾的一节（不用 sticky 浮起来，别盖住末尾几行） ---- */
+.add-model{margin:12px -18px -14px;padding:12px 18px;border:0;border-top:1px solid var(--line);border-radius:0;background:var(--band-2)}
+.add-model-bar{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:14px}
+.add-model-bar .settings-field{min-height:0}
+.add-model-bar .settings-field>input{max-width:none}
+.settings-dialog .add-model label>span{margin-bottom:0;color:var(--muted);font-size:12px}
+.settings-dialog .link-button{color:var(--set-accent);font-size:12px;white-space:nowrap}
+.settings-dialog .link-button:hover{text-decoration:underline}
+.model-candidates{max-height:168px;overflow:auto;margin:10px 0 0;border:1px solid var(--line);border-radius:var(--radius);background:var(--inset)}
+.model-candidates button{padding:8px 10px;border-bottom:1px solid var(--line);background:none}
+.model-candidates button:last-child{border-bottom:0}
+.model-candidates button:hover:not(:disabled){background:var(--set-accent-soft)}
+.model-candidates button>*:first-child{color:var(--set-accent);font-size:12px;text-align:center}
+.model-candidates button:disabled>*:first-child{color:var(--ok-text)}
+.model-candidates strong{color:var(--text);font-size:12px;font-weight:500}
+.model-candidates small{display:flex;gap:8px;color:var(--muted-2);font:9px Consolas,monospace}
+.model-candidates small em{color:var(--set-accent);font-style:normal}
+.manual-model{display:flex;gap:8px;margin-top:10px}
+.manual-model>*+*{margin-left:0}
+.manual-model input{min-width:0;flex:1;max-width:none}
+
+/* ---- 模型信息状态卡 ---- */
+.models-meta h4{margin:0;color:var(--text-bright);font-size:13px}
+.models-meta p{margin:5px 0 0;color:var(--muted);font-size:11px;line-height:1.6}
+
+/* ---- 按钮 ---- */
+.settings-dialog .secondary,.settings-dialog .danger-button{min-height:32px;padding:5px 12px;border-radius:var(--radius)}
+.settings-dialog .secondary:hover{border-color:var(--set-accent);background:var(--surface-3)}
+.settings-dialog .primary{border-color:var(--set-accent);background:var(--set-accent-deep);color:var(--text-bright);border-radius:var(--radius)}
+.settings-dialog .primary:hover{background:var(--set-accent)}
+.provider-actions{margin:4px 0 0;padding-top:14px}
+.inline-result{font-size:11px}
+.settings-actions{min-height:58px;padding:11px 20px;background:var(--band-3)}
+.settings-actions button{min-width:90px;height:34px}
+.placeholder-panel{gap:6px}
+.placeholder-panel p{color:var(--muted-2);font-size:11px}
+
+@media(max-width:640px){
+  .settings-dialog{border-radius:0}
+  .settings-head{padding:12px 14px}
+  .settings-tabs{padding:0 6px}
+  .settings-tabs button{padding:0 10px}
+  .models-panel{grid-template-columns:132px minmax(0,1fr)}
+  .provider-sidebar{padding:12px 6px}
+  .provider-editor{padding:12px}
+  .provider-section{padding:2px 12px 12px;border-radius:var(--radius)}
+  .settings-field{grid-template-columns:minmax(0,1fr);row-gap:6px;padding:9px 0}
+  .srow-2{grid-template-columns:minmax(0,1fr)}
+  .settings-field>input,.settings-field>select{max-width:none}
+  .model-rows{padding-left:10px}
+  .add-model{margin:12px -12px -12px;padding:12px}
+  .settings-actions{padding:10px 12px}
+}

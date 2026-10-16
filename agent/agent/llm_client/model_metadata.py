@@ -7,14 +7,17 @@
 
     python -m llm_client.model_metadata build
 
+设置中心的「模型信息」走同一个入口刷新（POST /config/model-metadata/refresh）。
+
 快照缺失或损坏时解析结果为 None，调用方继续使用原有默认值。
 """
 import json
 import logging
+import os
 import re
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Mapping, Optional
 from urllib.parse import urlparse
@@ -224,11 +227,56 @@ def build_snapshot(source: str = SOURCE_URL, out_path: Path = SNAPSHOT_PATH) -> 
         "providers": providers,
     }
     count = sum(len(item) for item in providers.values())
-    out_path.write_text(
+    # 先写临时文件再替换：读端（_index/resolve）可能正好在读，不能让它看到半截文件。
+    tmp_path = out_path.with_name(out_path.name + ".tmp")
+    tmp_path.write_text(
         json.dumps(snapshot, separators=(",", ":"), ensure_ascii=False, sort_keys=True),
         encoding="utf-8",
     )
+    os.replace(tmp_path, out_path)
     return count
+
+
+def snapshot_info() -> dict:
+    """快照自身的元信息：来源、抓取日期、收录规模。
+
+    fetched_at 是快照内部记录的抓取日期；file_time 是文件自身的修改时间，
+    留给手工替换过文件的情况兜底。快照缺失或损坏时返回空信息，不抛异常。
+    """
+    info: dict = {"source": SOURCE_URL, "fetched_at": None, "file_time": None,
+                  "providers": 0, "models": 0, "available": False}
+    try:
+        stat = SNAPSHOT_PATH.stat()
+    except OSError:
+        return info
+    info["file_time"] = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+    try:
+        payload = json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return info
+    if not isinstance(payload, Mapping):
+        return info
+    providers = payload.get("providers")
+    providers = providers if isinstance(providers, Mapping) else {}
+    fetched_at = payload.get("fetched_at")
+    info["source"] = str(payload.get("source") or SOURCE_URL)
+    info["fetched_at"] = str(fetched_at) if fetched_at else None
+    info["providers"] = len(providers)
+    info["models"] = sum(len(item) for item in providers.values() if isinstance(item, Mapping))
+    info["available"] = bool(providers)
+    return info
+
+
+def refresh_snapshot() -> dict:
+    """重新抓取快照，并让模块内索引失效，返回刷新后的元信息。
+
+    网络与写盘都是阻塞的，调用方必须放到线程里跑，别堵事件循环。
+    抓取失败会直接抛出，原快照保持不动。
+    """
+    global _INDEX, _LOAD_FAILED
+    build_snapshot()
+    _INDEX, _LOAD_FAILED = None, False
+    return snapshot_info()
 
 
 def _main(argv: list[str]) -> int:

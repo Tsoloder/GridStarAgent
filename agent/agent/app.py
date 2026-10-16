@@ -48,7 +48,9 @@ from document_loader import (
     load_attachments,
 )
 from llm_client.catalog import ModelCatalog as DiscoveryCatalog
+from llm_client.model_metadata import refresh_snapshot as refresh_model_snapshot
 from llm_client.model_metadata import resolve as resolve_model_limits
+from llm_client.model_metadata import snapshot_info as model_metadata_info
 from llm_client.providers import AnthropicProvider, OpenAICompatibleProvider, OpenAIProvider
 from llm_client.registry import ProviderRegistry, default_adapter_registry
 from llm_client.runtime import ModelCatalog as RuntimeCatalog, ModelRuntime
@@ -940,6 +942,22 @@ async def refresh_models():
         return JSONResponse({"error": "no config"}, status_code=400)
     await _model_catalog.refresh()
     return await get_models()
+
+
+@app.get("/config/model-metadata")
+async def get_model_metadata():
+    """第三方模型元数据快照的状态：来源、抓取日期、收录规模。"""
+    return await asyncio.get_running_loop().run_in_executor(None, model_metadata_info)
+
+
+@app.post("/config/model-metadata/refresh")
+async def refresh_model_metadata():
+    """重新抓取第三方模型元数据快照。抓取或写盘失败就整体失败，原快照不动。"""
+    try:
+        info = await asyncio.get_running_loop().run_in_executor(None, refresh_model_snapshot)
+    except Exception as exc:
+        return JSONResponse({"error": f"更新模型信息失败：{exc}"}, status_code=502)
+    return {"ok": True, **info}
 
 
 def _parse_local_dt(value):
