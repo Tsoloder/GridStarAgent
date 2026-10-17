@@ -822,6 +822,11 @@
 .model-ctx{flex:0 0 auto;padding:1px 7px;border-radius:9px;background:var(--surface-2);color:var(--muted-2);font:9px/1.7 Consolas,monospace}
 /* 只有候选数据、还没写进配置时用虚框：胶囊在不在，就等于字段填没填 */
 .model-ctx.is-fallback{background:none;border:1px dashed var(--line-strong);color:var(--muted-2)}
+/* 模型行左侧那排能力小图标：只画已启用的，安静地待在上下文胶囊左边。
+   选择器必须写到 .settings-model>summary>.model-caps：原始那条
+   .settings-model>summary>span{flex:1} 会把所有子 span 都撑满，改用那种就会把图标顶到名字旁边。 */
+.settings-model>summary>.model-caps{flex:0 0 auto;display:flex;align-items:center;gap:7px;color:var(--muted)}
+.model-caps svg{display:block}
 .settings-model .model-api{flex:0 0 auto;max-width:24%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--muted-2);font:9px Consolas,monospace}
 .settings-model[open] .model-api{color:var(--set-accent)}
 .model-delete{flex:0 0 auto;width:24px;height:24px;padding:0;border:0;border-radius:var(--radius-sm);background:none;color:var(--muted-2);font-size:15px;line-height:1;opacity:0;transition:opacity .14s ease,color .14s ease,background .14s ease}
@@ -882,6 +887,7 @@
   .srow-2{grid-template-columns:minmax(0,1fr)}
   .settings-field>input,.settings-field>select{max-width:none}
   .settings-field>.num-combobox{max-width:none}
+  .settings-model>summary>.model-caps{display:none}
   .model-rows{padding-left:10px}
   .add-model{margin:12px -12px -12px;padding:12px}
   .settings-actions{padding:10px 12px}
