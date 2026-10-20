@@ -14,7 +14,7 @@ from fastmcp import FastMCP
 
 from client import headers, send_post_request, url
 from registry import register_tools
-from tools import advanced, boundary, cad, generation, mesh, project, quality, query
+from tools import advanced, boundary, cad, generation, mesh, missile, project, quality, query
 
 # 桌面自动化工具依赖可选包（mss / uiautomation），导入失败时只丢这一组工具。
 try:
@@ -114,6 +114,7 @@ GetAllSpitAssemblyGroupProperty = query.GetAllSpitAssemblyGroupProperty
 GenerateSurMeshBySpitAssemblyGroupProperty = generation.GenerateSurMeshBySpitAssemblyGroupProperty
 GetGenerateSurMeshDefaultParam = query.GetGenerateSurMeshDefaultParam
 GetCreateBlockDefaultParam = query.GetCreateBlockDefaultParam
+GenerateANisoDomainGrid = generation.GenerateANisoDomainGrid
 ProcessWithServer = advanced.ProcessWithServer
 ClassifyTrailingEdgeDomains = advanced.ClassifyTrailingEdgeDomains
 DetermineDirectionForType1 = advanced.DetermineDirectionForType1

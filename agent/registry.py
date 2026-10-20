@@ -14,6 +14,7 @@ from tools import generation
 from tools import boundary
 from tools import quality
 from tools import advanced
+from tools import missile
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,7 @@ _CORE_TOOL_GROUPS = (
             generation.NacelleAnisoProcessNacelleAnisotropy,
             generation.TailAnisoProcessTailAnisotropy,
             generation.RemainingAnisoProcessRemainingAnisotropy,
+            generation.GenerateANisoDomainGrid,
         ),
     },
     {

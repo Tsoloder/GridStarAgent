@@ -61,13 +61,6 @@
    - 如未自定义分组属性，使用 `GetAllSpitAssemblyGroupProperty` 获取的默认值直接传入。
    - 详细参数计算和调用流程见 `references/part-based-surface-mesh.md`。
 
-### 3.1 碎面合并
-
-用户提到碎面、合并面、合并碎面时，在分部件之后、表面网格之前执行：
-
-1. 数模面合并用 `UGSurfaceProcessing`（`type=-1` 表示合并）；网格面合并用 `UGJoinDomain`。
-2. 合并原则：机头、机尾数模面尽量保证为一个面；机翼一般分为上翼面、下翼面、翼稍面、后缘面；其他位置尽量保证数模面平整，仅保留关键特征。
-
 ## 4. 默认参数生成表面网格
 
 1. 如果已通过 AI 自动部件分割（`ProcessWithServer`）或手动分组完成了分部件处理，且 MAC 值已知，则改用 `references/part-based-surface-mesh.md` 的流程。`GenerateSurMeshBySpitAssemblyGroupProperty` 能为不同部件组设置差异化的网格尺寸参数，比统一默认参数更合理。

@@ -45,7 +45,7 @@ def UGUGSp(generateWay: int, ids: str, layer: int, growRate: float, caliperFirst
     """生成空间网格.
 
     Args:
-        generateWay: 生成方法,默认值为2。0 表示综合法,1 表示层推法,2 表示减层法.
+        generateWay: 生成方法,默认值为0。0 表示减层法, 1 表示综合法,2 表示层推法,.
         ids: 选择的网格块 ID,例如"5,6,7"
         layer: 附面层层数,默认值为60.
         growRate: 增长率,默认值为1.2.
@@ -150,3 +150,27 @@ def RemainingAnisoProcessRemainingAnisotropy():
     """
     return send_post_request("RemainingAnisoProcessRemainingAnisotropy", {})
 
+def GenerateANisoDomainGrid(anisoGroupsJson: str):
+    """【底层原子工具】按给定参数生成各向异性域网格，支持多个各向异性组同时设置。
+
+    与 WingAnisoProcessWingAnisotropy / NacelleAnisoProcessNacelleAnisotropy / TailAnisoProcessTailAnisotropy / RemainingAnisoProcessRemainingAnisotropy
+    这四个一键流程工具不同，本工具是「通用设置原语」：
+    - 不自动判断部件类型，由调用者指定网格线和参数
+    - 不包含尺寸数据获取、线分类、分布计算等前置步骤
+    - 适合局部精细控制、非标部件调整、或作为流程工具的内部步骤
+
+    使用方式：先通过手动分析或流程工具确定各向异性组参数，再调用本工具一次性下发。
+
+    Args:
+        anisoGroupsJson: JSON 字符串，包含多个各向异性组的信息。
+            外层为 JSON 数组，每个元素包含：
+            - objects: 对象列表，每个对象含 domainID（网格面ID）和 connectorIDs（网格线ID数组）
+            - firstHigh: 首层高度
+            - growthRate: 增长率
+            - controlLayer: 控制层数
+            示例：[{"objects":[{"domainID":5,"connectorIDs":[6,7,8]}],"firstHigh":0.001,"growthRate":1.2,"controlLayer":40}]
+
+    Returns:
+        工具调用结果,"true"代表成功,"false"代表失败.
+    """
+    return send_post_request("GenerateANisoDomainGrid", {"anisoGroupsJson": anisoGroupsJson})
