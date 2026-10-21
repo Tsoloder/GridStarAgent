@@ -322,3 +322,61 @@ def test_retry_delay_prefers_retry_after_and_respects_the_ceiling():
     assert 1.0 <= policy.delay(0) <= 1.25  # 没有 Retry-After 时指数退避 + jitter
     assert 2.0 <= policy.delay(1) <= 2.25
     assert RetryPolicy(max_delay=5.0).delay(6) == 5.0
+
+
+def test_tool_arguments_with_trailing_segment_keep_the_first_object():
+    """参数后面挂着第二段 JSON 时（并行调用被并进同一 index），
+    第一个对象要能取回，多余部分留档，不能让整轮以 Extra data 失败。"""
+    builder = StreamBuilder("response")
+    first = json.dumps({"question": "下一步怎么走？", "options": [{"label": "A", "value": "a"}]},
+                       ensure_ascii=False)
+    second = json.dumps({"phases": [{"id": "p1", "title": "导出", "status": "pending"}]},
+                        ensure_ascii=False)
+    builder.start()
+    builder.tool_start(0, "call_a", "ask_user_question")
+    builder.tool_delta(0, first)
+    builder.tool_delta(0, second)  # 参数已闭合又来一段
+    sealed = [builder.tool_end(0)]
+
+    end = sealed[0]
+    assert end.parse_error is None
+    assert end.arguments == json.loads(first)
+    assert "phases" in end.discarded_arguments and "p1" not in end.arguments
+
+
+def test_duplicate_full_arguments_are_not_concatenated():
+    """网关把整段参数重发一遍时只该保留一份，拼起来就是 Extra data。"""
+    builder = StreamBuilder("response")
+    payload = json.dumps({"x": 1, "y": "网格"})
+    builder.start()
+    builder.tool_start(0, "call_a", "Demo")
+    builder.tool_delta(0, payload)
+    builder.tool_delta(0, payload)
+
+    end = builder.tool_end(0)
+    assert end.parse_error is None and end.arguments == {"x": 1, "y": "网格"}
+    assert end.discarded_arguments == ""
+
+
+def test_openai_chat_splits_parallel_calls_sharing_one_index():
+    """并行调用的增量都挂在 index=0 时，要拆成两次 tool_call，
+    而不是把两段 arguments 拼成一个非法 JSON。"""
+    def chunk(delta):
+        return b"data: " + json.dumps({"choices": [{"delta": {"tool_calls": [delta]}}]},
+                                      ensure_ascii=False).encode() + b"\n\n"
+
+    events_bytes = b"".join([
+        chunk({"index": 0, "id": "call_a", "function": {"name": "ask_user_question",
+                                                        "arguments": "{\"question\": \"怎么走？\"}"}}),
+        chunk({"index": 0, "id": "call_b", "function": {"name": "update_plan",
+                                                        "arguments": "{\"phases\": []}"}}),
+        b"data: [DONE]\n\n",
+    ])
+
+    events = _chat_events(lambda request: httpx.Response(
+        200, content=events_bytes, headers={"content-type": "text/event-stream"}))
+
+    ends = [e for e in events if e.type == "tool_call_end"]
+    assert [e.name for e in ends] == ["ask_user_question", "update_plan"]
+    assert [e.arguments for e in ends] == [{"question": "怎么走？"}, {"phases": []}]
+    assert all(e.parse_error is None for e in ends)

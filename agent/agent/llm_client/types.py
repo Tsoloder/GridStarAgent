@@ -78,6 +78,9 @@ class ToolCallBlock:
     arguments: Optional[dict[str, Any]]
     raw_arguments: Optional[str] = None
     parse_error: Optional[str] = None
+    # 参数后面多挂的那一段（并行调用被并进同一 index、或网关重发整段参数时
+    # 出现）。主参数照旧是第一个完整 JSON 对象，这段只留档，不参与执行。
+    discarded_arguments: str = ""
     type: Literal["tool_call"] = "tool_call"
 
 
@@ -177,6 +180,7 @@ class ToolCallEnd(StreamEvent):
     arguments: Optional[dict[str, Any]]
     raw_arguments: str
     parse_error: Optional[str] = None
+    discarded_arguments: str = ""
     type: Literal["tool_call_end"] = "tool_call_end"
 
 

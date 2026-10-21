@@ -82,13 +82,22 @@ async def _stream_runtime(runtime, model_key, messages, system_prompt, tools):
         elif event.type == "thinking_delta":
             yield {"type": "reasoning_chunk", "delta": event.delta}
         elif event.type == "tool_call_end":
+            if getattr(event, "discarded_arguments", ""):
+                logger.warning(
+                    "[tool args] %s(%s) 参数后面多出 %d 字符，已丢弃",
+                    event.name, event.call_id, len(event.discarded_arguments),
+                )
             if event.parse_error or not isinstance(event.arguments, dict):
                 yield {
                     "type": "error",
                     "message": "Invalid tool arguments for %s: %s" % (
                         event.name, event.parse_error or "arguments must be an object"
                     ),
-                    "retryable": False,
+                    # 模型输出的工具参数无法解析：修的是模型输出/网关拼接，
+                    # 不是服务端故障，单列一个类别免得前端说成"模型服务异常"。
+                    # 重发同一条提问有机会拿到一次合法输出，所以允许重试。
+                    "category": "tool_arguments",
+                    "retryable": True,
                 }
             else:
                 yield {"type": "tool_call", "id": event.call_id,

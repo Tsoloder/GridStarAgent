@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 
 from .types import (
@@ -6,6 +7,36 @@ from .types import (
     ThinkingBlock, ThinkingDelta, ThinkingEnd, ThinkingStart, ToolCallBlock,
     ToolCallDelta, ToolCallEnd, ToolCallStart, Usage,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _json_complete(text: str) -> bool:
+    """整段文本是否已经是一个完整 JSON 值（不允许多余尾巴）。"""
+    if not text:
+        return False
+    try:
+        json.loads(text)
+        return True
+    except (json.JSONDecodeError, ValueError):
+        return False
+
+
+def decode_first_value(text: str):
+    """取开头第一个 JSON 值，返回 (value, 消耗的字符数)。
+
+    兼容网关会把两段工具参数拼进同一个 index（并行调用共用 index，或整段
+    参数被重发），于是 raw 长成 ``{...}{...}``。json.loads 对此一律报
+    "Extra data"，而第一个对象本身是好的，用 raw_decode 就能拿回来。
+    """
+    stripped = (text or "").lstrip()
+    if not stripped:
+        return None, 0
+    try:
+        value, end = json.JSONDecoder().raw_decode(stripped)
+    except (json.JSONDecodeError, ValueError):
+        return None, 0
+    return value, (len(text) - len(stripped)) + end
 
 
 class StreamBuilder:
@@ -54,11 +85,28 @@ class StreamBuilder:
     def tool_start(self, index, call_id, name):
         if any(v["id"] == call_id for v in self._tools.values()):
             raise ValueError(f"duplicate tool call id: {call_id}")
-        self._tools[index] = {"id": call_id, "name": name, "raw": ""}
+        self._tools[index] = {"id": call_id, "name": name, "raw": "", "tail": ""}
         return self._event(ToolCallStart, index=index, call_id=call_id, name=name)
+
+    def arguments_raw(self, index):
+        """已经收下的参数原文；适配器靠它判断一次调用是否已经闭合。"""
+        state = self._tools.get(index)
+        return state["raw"] if state else ""
+
+    def arguments_complete(self, index):
+        return _json_complete(self.arguments_raw(index))
 
     def tool_delta(self, index, delta):
         state = self._tools[index]
+        if delta and state["raw"] and _json_complete(state["raw"]):
+            if delta.strip() == state["raw"].strip():
+                # 上游把整段参数又发了一遍：丢掉重复的一份，不能直接拼。
+                delta = ""
+            else:
+                # 参数已闭合却又来了一段：并进 tail 留档，保持 raw 是合法的
+                # 单个对象。适配器按 index 拆不干净时靠这一步兜底。
+                state["tail"] += delta
+                delta = ""
         state["raw"] += delta
         partial = None
         try:
@@ -71,16 +119,28 @@ class StreamBuilder:
     def tool_end(self, index):
         state = self._tools.pop(index)
         raw, args, parse_error = state["raw"], None, None
+        tail = state.get("tail") or ""
         try:
             parsed = json.loads(raw or "{}")
             if not isinstance(parsed, dict):
                 raise ValueError("tool arguments must be a JSON object")
             args = parsed
         except (json.JSONDecodeError, ValueError) as exc:
-            parse_error = str(exc)
-        self.blocks.append(ToolCallBlock(state["id"], state["name"], args, raw, parse_error))
+            # 兜底：raw 里第一个对象完整、后面还挂着内容时，取第一个继续走，
+            # 尾巴单独留档。整轮不该为了一个多余片段直接失败。
+            salvaged, consumed = decode_first_value(raw)
+            if isinstance(salvaged, dict):
+                args, parse_error = salvaged, None
+                tail = (tail + raw[consumed:]).strip()
+            else:
+                parse_error = str(exc)
+        if tail:
+            logger.warning("[tool args] %s(%s) 丢弃多余片段 %d 字符: %s",
+                           state["name"], state["id"], len(tail), tail[:200])
+        self.blocks.append(ToolCallBlock(state["id"], state["name"], args, raw, parse_error, tail))
         return self._event(ToolCallEnd, index=index, call_id=state["id"], name=state["name"],
-                           arguments=args, raw_arguments=raw, parse_error=parse_error)
+                           arguments=args, raw_arguments=raw, parse_error=parse_error,
+                           discarded_arguments=tail)
 
     def usage(self, **kwargs): return self._event(Usage, **kwargs)
 

@@ -1966,6 +1966,7 @@ const FAILURE_HINTS = {
   stream_error: "模型流式响应中断",
   upstream_http: "模型服务返回错误",
   provider_error: "模型服务异常",
+  tool_arguments: "模型输出的工具参数无法解析",
   busy: "上一轮还没停下来",
 };
 function streamFailure(event, fallback = "Agent 处理失败") {

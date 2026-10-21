@@ -60,6 +60,14 @@ class OpenAIChatAdapter(Adapter):
     async def attempt(self, provider, model, request, builder, state):
         text_open = thinking_open = False
         open_tools = set()
+        # 上游 index 不等于一次调用：并行调用时部分网关把两次调用的增量都挂在
+        # index=0 上，另一些还会在流末把整段参数重发一遍。slots 记录每个上游
+        # index 当前对应的槽位，opened 记录槽位对应的 id/name，next_slot 用来给
+        # 后续冒出来的调用（同 index）另开一个槽位，保证每段 arguments 各归各的。
+        slots = {}      # 上游 index → 槽位
+        call_slots = {}  # 上游 call id → 槽位
+        opened = {}     # 槽位 → {"id", "name"}
+        next_slot = 0
         finish = "stop"
         async with provider.client().stream("POST", "/chat/completions", json=request) as response:
             await ensure_response_ok(response)
@@ -91,11 +99,45 @@ class OpenAIChatAdapter(Adapter):
                         if not text_open: yield builder.text_start(); text_open = True
                         yield builder.text_delta(delta["content"])
                     for call in delta.get("tool_calls", []):
-                        idx = call.get("index", 0); function = call.get("function", {})
-                        if idx not in open_tools:
-                            yield builder.tool_start(idx, call.get("id", f"call_{idx}"), function.get("name", "")); open_tools.add(idx)
-                        if function.get("arguments") is not None:
-                            yield builder.tool_delta(idx, function["arguments"])
+                        index = call.get("index", 0)
+                        idx = index if isinstance(index, int) else 0
+                        call_id = str(call.get("id") or "").strip()
+                        function = call.get("function") or {}
+                        chunk = function.get("arguments")
+                        slot = call_slots.get(call_id) if call_id else None
+                        if slot is None:
+                            current = slots.get(idx)
+                            if current is not None:
+                                # 同一 index 上出现新的 id，说明网关又把并行调用的
+                                # 增量并过来了；没有 id 时靠"参数已闭合却又以 { 开头"
+                                # 判断是另起一段。
+                                restarted = (
+                                    isinstance(chunk, str)
+                                    and chunk.lstrip().startswith("{")
+                                    and builder.arguments_complete(current)
+                                )
+                                if call_id and call_id != opened[current]["id"]:
+                                    slot = None
+                                elif restarted and not call_id:
+                                    slot = None
+                                else:
+                                    slot = current
+                        if slot is None:
+                            slot = next_slot; next_slot += 1
+                            name = str(function.get("name") or "")
+                            if not name and idx in slots:
+                                # 续上来的第二段参数不带 name，沿用同 index 上的旧名
+                                name = opened[slots[idx]]["name"]
+                            new_id = call_id or f"call_{slot}"
+                            if new_id in call_slots:  # 同一 id 重发整段参数
+                                new_id = "%s_%d" % (new_id, slot)
+                            call_slots[new_id] = slot
+                            slots[idx] = slot
+                            opened[slot] = {"id": new_id, "name": name}
+                            open_tools.add(slot)
+                            yield builder.tool_start(slot, new_id, name)
+                        if isinstance(chunk, str) and chunk:
+                            yield builder.tool_delta(slot, chunk)
                     if choice.get("finish_reason"):
                         finish = {"tool_calls": "tool_use", "max_tokens": "length"}.get(choice["finish_reason"], choice["finish_reason"])
         if thinking_open: yield builder.thinking_end()

@@ -1086,7 +1086,10 @@ async def test_invalid_tool_arguments_are_not_executed(arguments, parse_error):
     assert mcp.calls == []
     assert not any(event["type"] == "tool_call" for event in events)
     assert events[-1]["type"] == "error"
-    assert events[-1]["retryable"] is False
+    # 参数解析失败是模型输出/网关拼接的问题：单列一个类别，别让前端
+    # 说成"模型服务异常"；重发同一条提问有机会拿到合法输出，所以可重试。
+    assert events[-1]["category"] == "tool_arguments"
+    assert events[-1]["retryable"] is True
 
 
 @pytest.mark.asyncio
