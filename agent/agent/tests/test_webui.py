@@ -204,7 +204,7 @@ def test_webui_history_render_matches_live_stream():
     assert "setBubbleUsage(turn" in close
     # 实时流里一轮对话只有一个气泡，而持久化会按迭代拆成多条 assistant/tool 消息，
     # 历史渲染必须按轮次合并，否则重开会话后变成"一条消息一个工具调用"
-    assert "function renderHistory(messages)" in close
+    assert "function renderHistory(messages, {resume = false} = {})" in close
     assert 'message.role === "assistant" || message.role === "tool"' in close
     assert "renderHistoryMessage(message, turn)" in close
     assert "item.text += " in render
@@ -456,7 +456,9 @@ def test_webui_choice_card_contract():
     assert "function renderChoiceCard(payload, parent)" in script
     assert 'else if (type === "options_offered") { assistant.pendingAsk = event; }' in script
     assert 'if (!deferred && message.pendingAsk && message.node.isConnected) openChoiceOverlay(message.pendingAsk);' in script
-    assert "if (last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);" in script
+    assert "if (!resume && last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);" in script
+    # 重连前重放历史不算待答：末尾那轮的询问已经被本轮 user 消息回答过
+    assert "renderHistory(kept, {resume: true})" in script
     assert "finishAssistant(turn, true);" in script
     # 询问类调用不落成工具条目：实时流与历史重放保持一致
     assert 'if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node);' in script

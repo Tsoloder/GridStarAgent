@@ -1841,7 +1841,10 @@ function finishHistoryTurn(turn) {
 }
 // 一条 user 消息之后、下一条 user/workflow 消息之前的 assistant/tool 消息属于同一轮
 // 返回最后一轮是否停在未应答的选项/参数卡片上（用于恢复「待确认」徽标）
-function renderHistory(messages) {
+// resume：这批历史后面还要接上正在跑的新一轮。此时末尾那轮的询问已经被这轮 user 消息
+// 回答过了（只是那条 user 被切掉了），不能再当待答弹出来——否则刷新后会把已审批的旧
+// 参数卡重新弹回输入框上方。
+function renderHistory(messages, {resume = false} = {}) {
   let turn = null;
   (messages || []).forEach(message => {
     if (message.role === "assistant" || message.role === "tool") { turn = renderHistoryMessage(message, turn) || turn; return; }
@@ -1850,8 +1853,8 @@ function renderHistory(messages) {
   const last = turn;
   finishHistoryTurn(turn);
   // 只有最后一轮仍停在未作答的询问上才弹浮层；已作答/更早的卡片不再出现在历史里
-  if (last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);
-  return Boolean(last && last.awaitingInput);
+  if (!resume && last && last.awaitingInput && last.pendingAsk) openChoiceOverlay(last.pendingAsk);
+  return Boolean(!resume && last && last.awaitingInput);
 }
 function showWelcome() { el.messages.innerHTML = '<div id="welcome" class="empty-state"><div class="empty-symbol">⌁</div><strong>对话已就绪</strong><p>描述你的工程目标，Agent 将按当前模式执行。</p></div>'; el.welcome = $("#welcome"); }
 // 切离正在流式输出的会话：摘下当前消息 DOM 暂存，回复继续在后台跑，切回时原样挂回
@@ -2029,7 +2032,15 @@ async function consumeSse(response, onEvent, controller) {
 function handleStreamEvent(id, type, event, assistant) {
   const hidden = hiddenFor(id);
   if (!hidden && TRAJ_LIVE_TYPES.indexOf(type) >= 0) { trajIngest(event); scheduleTrajRender(); }
-  if (type === "text_chunk") { settleThink(assistant); assistant.text += event.delta || ""; assistant.body.innerHTML = basicMarkdown(assistant.text); scrollMessages(); }
+  if (type === "text_chunk") {
+    settleThink(assistant);
+    assistant.text += event.delta || "";
+    // 已经闭合的结构化块（tool_params / options）不必等到收尾再脱：流里一旦闭合成
+    // 功就从正文里拿掉，交给收尾时的浮层。否则长流程跑到一半时，气泡里会长时间
+    // 挂着一大贴裸 JSON，看起来像参数没被识别。
+    assistant.body.innerHTML = basicMarkdown(structuredBlocks(assistant.text).visible);
+    scrollMessages();
+  }
   else if (type === "reasoning_chunk") appendReasoning(assistant,event.delta);
   else if (type === "plan_updated") { if (!hidden) renderPhase(event.plan); }
   else if (type === "tool_call") { settleThink(assistant); if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node); }
@@ -2051,6 +2062,9 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   const sentAttachments = retryAttachments != null ? retryAttachments
     : state.attachments.filter(item => !item.uploading).map(item => ({kind:item.kind,name:item.name,path:item.path,url:item.url,media_type:item.media_type}));
   if (!message && !sentAttachments.length) return;
+  // 新一轮提问让上一轮遗留的确认浮层立即收起：流程已经往下走了，那张卡里的参数
+  // 再提交一次就是错数据；本轮结束时自然会有新的卡顶上
+  closeChoiceOverlay();
   if (retryAttachments == null && state.uploading > 0) { showToast("附件还在上传中，请稍候再发送"); return; }
   if (!state.session) { await createSession(); if (!state.session) return; }
   // 会话 id 立即锁定：后续任何 await 期间用户切走会话，消息也必须发进原会话
@@ -2165,7 +2179,10 @@ async function maybeReconnect(id) {
   const cut = info.turn_msg_count == null ? messages.length : Math.min(info.turn_msg_count, messages.length);
   const kept = messages.slice(0, cut);
   el.messages.innerHTML = "";
-  if (kept.length) renderHistory(kept);
+  // 本轮即将重连：先把旧浮层收起，历史重放也不再弹末尾询问（那条询问已经被本轮
+  // 用户消息回答过了）
+  closeChoiceOverlay();
+  if (kept.length) renderHistory(kept, {resume: true});
   // messages[cut] 即本轮用户消息（turn_msg_count 在其落盘前记录），取原始 ts 显示
   const turnMsg = messages[cut];
   const turnTs = turnMsg && turnMsg.role === "user" && turnMsg.ts ? turnMsg.ts : null;
