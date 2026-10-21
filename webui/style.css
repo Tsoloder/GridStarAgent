@@ -953,8 +953,7 @@
 .kb-option-text small{display:block;color:var(--muted-2);font-size:10px;line-height:1.35;font-family:inherit}
 .kb-option[aria-selected="true"]{background:var(--accent-tint)}
 .kb-option[aria-selected="true"] .kb-option-text strong{color:var(--cyan)}
-/* 触发器贴着发送键，下拉默认 left:0 会顶出窗口右缘，改成贴着触发器右侧向左展开 */
-.kb-control .model-listbox{left:auto;right:0}
+/* 知识库下拉的左右回收由 openKbList() 按实际渲染位置计算，这里不写死锚边 */
 #kb-trigger{display:inline-flex;align-items:center;gap:5px;max-width:160px}
 #kb-trigger>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 

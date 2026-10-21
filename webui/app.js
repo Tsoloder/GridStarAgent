@@ -206,7 +206,7 @@ function renderModelList() {
   if (!groups.size) el.modelListbox.innerHTML = '<div class="listbox-empty">没有已配置的模型</div>';
 }
 function selectModel(key) { const item = visibleModels().find(model => modelKey(model) === key); el.model.value = key || ""; el.modelLabel.textContent = item ? modelName(item) : "未配置"; closeModelList(); renderModelList(); renderContextRing(); }
-function openModelList() { closeModeList(); closeSlashMenu(); closeCategoryList(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
+function openModelList() { closeModeList(); closeSlashMenu(); closeCategoryList(); closeKbList(); renderModelList(); state.modelListOpen = true; state.modelOptionIndex = Math.max(0, [...el.modelListbox.querySelectorAll(".model-option")].findIndex(item => item.dataset.value === el.model.value)); el.modelListbox.classList.remove("hidden"); el.modelTrigger.setAttribute("aria-expanded","true"); focusModelOption(); }
 function closeModelList() { state.modelListOpen = false; state.modelSearch = ""; el.modelListbox.classList.add("hidden"); el.modelTrigger.setAttribute("aria-expanded","false"); }
 function focusModelOption() { const options = [...el.modelListbox.querySelectorAll(".model-option")]; options.forEach((item,index) => item.classList.toggle("focused",index === state.modelOptionIndex)); const active = options[state.modelOptionIndex]; if (active) active.scrollIntoView({block:"nearest"}); }
 function handleModelKeys(event) {
@@ -469,7 +469,7 @@ function selectMode(value) {
   closeModeList();
   renderModeList();
 }
-function openModeList() { closeModelList(); closeSlashMenu(); closeCategoryList(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
+function openModeList() { closeModelList(); closeSlashMenu(); closeCategoryList(); closeKbList(); renderModeList(); state.modeListOpen = true; el.modeListbox.classList.remove("hidden"); el.modeTrigger.setAttribute("aria-expanded","true"); }
 function closeModeList() { state.modeListOpen = false; el.modeListbox.classList.add("hidden"); el.modeTrigger.setAttribute("aria-expanded","false"); }
 function selectCategory(value, explicit) {
   state.selectedCategory = value;
@@ -489,7 +489,7 @@ function syncCategoryFromMeta(id, category) {
   state.session.meta.category = category || "";
   if ((state.selectedCategory || "") !== (category || "")) selectCategory(category || "");
 }
-function openCategoryList() { closeModelList(); closeSlashMenu(); state.categoryListOpen = true; el.categoryListbox.classList.remove("hidden"); el.categoryTrigger.setAttribute("aria-expanded","true"); }
+function openCategoryList() { closeModelList(); closeSlashMenu(); closeKbList(); state.categoryListOpen = true; el.categoryListbox.classList.remove("hidden"); el.categoryTrigger.setAttribute("aria-expanded","true"); }
 function closeCategoryList() { state.categoryListOpen = false; el.categoryListbox.classList.add("hidden"); el.categoryTrigger.setAttribute("aria-expanded","false"); }
 function handleCategoryKeys(event) {
   if (!["ArrowDown","ArrowUp","Enter","Escape"].includes(event.key)) return;
@@ -2523,6 +2523,23 @@ function openKbList() {
   kbState.listOpen = true;
   el.kbListbox.classList.remove("hidden");
   el.kbTrigger.setAttribute("aria-expanded", "true");
+  alignKbListbox();
+}
+
+// 知识库控件挤在控件行最右侧，面板宽 330px：如果按 left:0 向右展开会顶出右缘，
+// 按 right:0 向左展开又会盖到输入区长甚至溢出左缘。算了就知道：先默认对齐
+// 触发器左缘（和其他下拉一致），再根据实际位置往回收。
+function alignKbListbox() {
+  const box = el.kbListbox;
+  if (!box) return;
+  box.style.left = "0px";
+  box.style.right = "auto";
+  const rect = box.getBoundingClientRect();
+  const pad = 8;
+  let shift = 0;
+  if (rect.right > window.innerWidth - pad) shift = window.innerWidth - pad - rect.right;
+  if (rect.left + shift < pad) shift = pad - rect.left;
+  if (shift) box.style.left = `${Math.round(shift)}px`;
 }
 function closeKbList() {
   kbState.listOpen = false;
@@ -4680,7 +4697,7 @@ document.addEventListener("click", event => {
   if (state.slashOpen && !inside("#slash-menu") && event.target !== el.input) closeSlashMenu();
   if (!el.sessionPanel.classList.contains("hidden") && !inside("#session-panel,#session-trigger,.dialog-backdrop")) closeSessions();
 });
-document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); closeCategoryList(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
+document.addEventListener("keydown", event => { if (event.key === "Escape") { if (state.settings.open) closeSettings(); else { closeModelList(); closeSlashMenu(); closeModeList(); closeSessions(); closeCategoryList(); closeKbList(); } } if (event.key === "Tab" && state.settings.open) { const focusable = [...el.settingsModal.querySelectorAll('button:not([disabled]),input:not([disabled]),select:not([disabled]),details summary')].filter(item => item.offsetParent !== null); if (focusable.length && ((event.shiftKey && document.activeElement === focusable[0]) || (!event.shiftKey && document.activeElement === focusable[focusable.length - 1]))) { event.preventDefault(); focusable[event.shiftKey ? focusable.length - 1 : 0].focus(); } } });
 
 // --- 语音转文字（voice_asr）：点击录音 → 浏览器端编码 16kHz WAV → POST /asr → 回填输入框 ---
 const voice = {
