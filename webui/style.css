@@ -989,3 +989,35 @@
 .kb-doc-grip{flex:none;color:var(--muted-2);font-size:10px;letter-spacing:-2px;opacity:.55;user-select:none}
 .kb-tree-row.kb-drop-target{border-color:var(--cyan);border-style:dashed;background:var(--accent-tint);color:var(--cyan)}
 .kb-tree-row.kb-drop-target .kb-tree-count{background:var(--cyan-dark);color:#fff}
+/* JSON 参数表格编辑器：审批面板里 object/array 类参数的表格编辑入口 */
+.param-row textarea{width:100%;min-width:0;border:1px solid var(--line);background:var(--inset);padding:6px 7px;outline:none;resize:vertical}
+.param-row textarea:focus{border-color:var(--cyan)}
+.param-json-field{display:flex;align-items:stretch;gap:6px;min-width:0}
+.param-json-field input,.param-json-field textarea{flex:1;min-width:0}
+.param-json-btn{flex:0 0 auto;min-width:42px;padding:0 8px;border:1px solid var(--line-strong);border-radius:var(--radius-sm);background:var(--surface-2);color:var(--muted);font-size:11px;letter-spacing:.5px}
+.param-json-btn:hover{border-color:var(--cyan-mid);color:var(--cyan);background:var(--accent-tint)}
+.json-editor-backdrop{z-index:120}
+.json-editor{width:min(760px,94vw);max-height:min(78vh,640px);display:flex;flex-direction:column;border:1px solid var(--line-strong);background:var(--panel);box-shadow:0 26px 70px #000d}
+.json-editor-head{display:flex;align-items:center;gap:10px;padding:12px 14px;border-bottom:1px solid var(--line);background:var(--band-2)}
+.json-editor-head>div{flex:1;min-width:0}
+.json-editor-head strong{display:block;color:var(--text-bright);font-size:14px;overflow-wrap:anywhere}
+.json-editor-head small{display:block;margin-top:2px;color:var(--muted-2);font-size:11px}
+.json-editor-close{width:26px;height:26px;flex:none;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--muted);font-size:17px;line-height:1}
+.json-editor-close:hover{background:var(--surface-3);color:var(--text-bright)}
+.json-editor-body{min-height:0;flex:1;overflow:auto;padding:10px 14px}
+.json-editor-scroll{overflow:auto}
+.json-editor-table{width:100%;border-collapse:collapse;font-size:11px}
+.json-editor-table th{position:sticky;top:0;padding:5px 6px;border-bottom:1px solid var(--line-strong);background:var(--band-3);color:var(--muted-2);font-weight:600;text-align:left;white-space:nowrap}
+.json-editor-table td{padding:3px 4px;border-bottom:1px solid var(--line)}
+.json-editor-table input{width:100%;min-width:80px;height:26px;border:1px solid var(--line);background:var(--inset);padding:0 6px;font:11px/1.4 Consolas,monospace;outline:none}
+.json-editor-table input:focus{border-color:var(--cyan)}
+.json-editor-table input.invalid{border-color:var(--red);background:var(--err-tint)}
+.json-editor-hint:empty{display:none}
+.json-editor-del-col{width:28px}
+.json-editor-static{display:block;max-width:190px;padding:0 2px;color:var(--muted);font:11px/26px Consolas,monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.json-editor-del{width:22px;height:22px;border:0;border-radius:var(--radius-sm);background:transparent;color:var(--muted-2);font-size:15px;line-height:1}
+.json-editor-del:hover{background:var(--err-tint);color:var(--red)}
+.json-editor-hint{min-height:16px;margin:8px 0 0;color:var(--err-text);font-size:11px}
+.json-editor-foot{display:flex;align-items:center;gap:7px;padding:10px 14px;border-top:1px solid var(--line);background:var(--band-3)}
+.json-editor-grow{flex:1}
+.json-editor-foot .action-button{min-width:72px}

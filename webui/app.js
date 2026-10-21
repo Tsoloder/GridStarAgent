@@ -1368,7 +1368,28 @@ function renderChoiceCard(payload, parent) {
     field.id = `choice-param-${index}`;
     if (structured) { field.rows = 3; field.style.font = "11px/1.4 Consolas,monospace"; } else field.type = "text";
     field.value = valueForInput(entry.value);
-    row.append(field); paramHost.append(row); paramInputs.push(field);
+    // JSON 形态的参数（对象/数组，或本身就是一段 JSON 文本，如 groupProperty）
+    // 给一个表格入口：按钮贴在输入框左边，改完把 JSON 文本写回输入框，
+    // 提交逻辑（coerceSchemaValue）完全不变
+    if (jsonTableShape(parseJsonValue(field.value)).mode !== "raw") {
+      const holder = document.createElement("div");
+      holder.className = "param-json-field";
+      const tableButton = document.createElement("button");
+      tableButton.type = "button";
+      tableButton.className = "param-json-btn";
+      tableButton.textContent = "表格";
+      tableButton.title = "用表格编辑这个 JSON 参数";
+      tableButton.onclick = () => openJsonTableEditor({
+        name: entry.name,
+        text: field.value,
+        onApply: next => { field.value = next; field.dispatchEvent(new Event("input", {bubbles: true})); },
+      });
+      holder.append(tableButton, field);
+      row.append(holder);
+    } else {
+      row.append(field);
+    }
+    paramHost.append(row); paramInputs.push(field);
   });
   // 参数值随提交一起回填：按条目类型还原数字/布尔/对象的原始形态
   const paramValues = () => {
@@ -1489,6 +1510,257 @@ function renderChoiceCard(payload, parent) {
   head.onkeydown = event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggleCollapse(); } };
   $(".choice-close", card).onclick = event => { event.stopPropagation(); closeChoiceOverlay(); };
   parent.append(card);
+}
+// —— JSON 参数表格编辑器 ——
+// 审批面板里 object/array 一类参数（典型是 groupProperty）直接改文本很容易错位，
+// 给一张表格：数组按元素成行、对象按键值成行，改完重建 JSON 写回参数框。
+function parseJsonValue(text) {
+  const raw = String(text == null ? "" : text).trim();
+  if (!raw) return undefined;
+  try { return JSON.parse(raw); } catch (_) { return undefined; }
+}
+// 结构不规整（嵌套数组混标量、或根本不是 JSON）时退回文本编辑，不做有损转换
+// 分组参数（典型是 groupProperty）长这样：
+// [{"nose":{"domain":[{"angle":10,"ids":[...],"minSize":..,"targetSize":..}],"line":[{...}]}}, ...]
+// 按对象数组直接铺表只会得到一列组名，单元格里一贴嵌套 JSON，内层属性改不了。
+// 这里改成“一行一个分部件组”：拿 domain 的属性当组属性铺成列，改完把
+// 可编辑属性同步写回该组的 domain 与 line（ids 是两套不同的对象编号，保持原样）。
+function jsonGroupShape(value) {
+  if (!Array.isArray(value) || !value.length) return null;
+  const groups = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+    const keys = Object.keys(item);
+    if (keys.length === 1) {
+      const body = item[keys[0]];
+      if (body && typeof body === "object" && !Array.isArray(body)) { groups.push({name: keys[0], body}); continue; }
+      return null;
+    }
+    if (typeof item.name === "string") {
+      const body = {};
+      keys.forEach(key => { if (key !== "name") body[key] = item[key]; });
+      groups.push({name: item.name, body});
+      continue;
+    }
+    return null;
+  }
+  // 组属性取一份样本：优先 domain，其次 line，再退到任意对象段
+  const sampleOf = body => {
+    const order = ["domain", "line"].concat(Object.keys(body).filter(key => key !== "domain" && key !== "line"));
+    for (const section of order) {
+      const list = body[section];
+      const items = Array.isArray(list) ? list : (list && typeof list === "object" ? [list] : []);
+      const hit = items.find(entry => entry && typeof entry === "object" && !Array.isArray(entry));
+      if (hit) return hit;
+    }
+    return null;
+  };
+  const samples = groups.map(group => sampleOf(group.body));
+  if (samples.some(sample => !sample)) return null;
+  const attrColumns = [];
+  samples.forEach(sample => Object.keys(sample).forEach(key => {
+    if (!attrColumns.includes(key)) attrColumns.push(key);
+  }));
+  if (!attrColumns.length) return null;
+  // 数组/对象型属性（ids）只展示不回写：domain 的面编号和 line 的线编号不是一回事
+  const readonlyAttrs = attrColumns.filter(key =>
+    samples.some(sample => sample[key] !== null && typeof sample[key] === "object"));
+  return {
+    mode: "groupRows",
+    columns: ["组"].concat(attrColumns),
+    attrColumns,
+    readonlyAttrs,
+    readonlyCount: 1,
+    groups,
+    samples,
+    rows: groups.map((group, index) =>
+      [group.name].concat(attrColumns.map(key => samples[index][key]))),
+  };
+}
+// 回写前对齐原值类型：表格的输入值万一是字符串，也不能把 angle 由 10 写成 "10"
+function jsonGroupCellValue(value, sample) {
+  if (typeof sample === "number" && typeof value === "string") {
+    const num = Number(value.trim());
+    return Number.isNaN(num) ? value : num;
+  }
+  if (typeof sample === "boolean" && typeof value === "string") return value.trim() === "true";
+  return value;
+}
+// 分组表格的回写：可编辑属性统一写到该组的每个段（domain / line 都同步），
+// ids 这类数组属性保持各自原值，不跟着被盖掉
+function jsonGroupApply(shape, rows) {
+  const writable = shape.attrColumns.filter(key => !shape.readonlyAttrs.includes(key));
+  rows.forEach((row, rowIndex) => {
+    const group = shape.groups[rowIndex];
+    if (!group) return;
+    const sample = (shape.samples && shape.samples[rowIndex]) || {};
+    const patch = {};
+    writable.forEach(key => {
+      patch[key] = jsonGroupCellValue(row[1 + shape.attrColumns.indexOf(key)], sample[key]);
+    });
+    Object.keys(group.body).forEach(section => {
+      const list = group.body[section];
+      const items = Array.isArray(list) ? list : (list && typeof list === "object" ? [list] : []);
+      items.forEach(entry => {
+        if (entry && typeof entry === "object" && !Array.isArray(entry)) Object.assign(entry, patch);
+      });
+    });
+  });
+  return shape.groups.map(group => ({[group.name]: group.body}));
+}
+function jsonTableShape(value) {
+  if (Array.isArray(value)) {
+    if (!value.length) return {mode: "scalarRows", columns: ["值"], rows: []};
+    if (value.every(item => item && typeof item === "object" && !Array.isArray(item))) {
+      const columns = [];
+      value.forEach(item => Object.keys(item).forEach(key => { if (!columns.includes(key)) columns.push(key); }));
+      return {mode: "objectRows", columns, rows: value.map(item => columns.map(col => item[col]))};
+    }
+    if (value.every(item => item === null || typeof item !== "object")) {
+      return {mode: "scalarRows", columns: ["值"], rows: value.map(item => [item])};
+    }
+    return {mode: "raw"};
+  }
+  if (value && typeof value === "object") {
+    return {mode: "pairs", columns: ["键", "值"], rows: Object.entries(value).map(([key, item]) => [key, item])};
+  }
+  return {mode: "raw"};
+}
+function jsonCellText(value) {
+  if (value === undefined) return "";
+  if (value !== null && typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+// typeHint 取单元格原本的类型：输入过程中值会被改成新值，不能拿它再判类型
+function jsonCellValue(text, typeHint) {
+  const raw = String(text == null ? "" : text).trim();
+  if (typeHint === "number") { const num = Number(raw); return Number.isNaN(num) ? text : num; }
+  if (typeHint === "boolean") return ["true", "1", "yes"].includes(raw.toLowerCase());
+  if (typeHint === "object") { const parsed = parseJsonValue(raw); return parsed === undefined ? text : parsed; }
+  if (typeHint === "null") return raw === "" ? null : text;
+  if (typeHint === "new") {
+    if (raw === "") return "";
+    if (raw === "null") return null;
+    if (raw === "true" || raw === "false") return raw === "true";
+    if (/^-?(0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$/.test(raw)) return Number(raw);
+    if (raw.startsWith("{") || raw.startsWith("[")) {
+      const parsed = parseJsonValue(raw);
+      if (parsed !== undefined) return parsed;
+    }
+    return text;
+  }
+  return text;
+}
+function openJsonTableEditor({name, text, onApply}) {
+  if (document.querySelector(".json-editor-backdrop")) return;
+  const parsed = parseJsonValue(text);
+  const shape = jsonGroupShape(parsed) || jsonTableShape(parsed);
+  if (shape.mode === "raw") { showToast("这个参数不是可表格化的 JSON（对象或数组），请直接在输入框里改"); return; }
+  const columns = shape.columns.slice();
+  const rows = shape.rows.map(row => row.slice());
+  const modal = document.createElement("div");
+  modal.className = "modal-backdrop json-editor-backdrop";
+  modal.innerHTML = '<section class="json-editor" role="dialog" aria-modal="true">'
+    + '<div class="json-editor-head"><div><strong></strong><small></small></div>'
+    + '<button type="button" class="json-editor-close" aria-label="关闭">×</button></div>'
+    + '<div class="json-editor-body"><div class="json-editor-scroll"><table class="json-editor-table">'
+    + '<thead></thead><tbody></tbody></table></div><p class="json-editor-hint"></p></div>'
+    + '<div class="json-editor-foot"><span class="json-editor-grow"></span>'
+    + '<button type="button" class="action-button json-editor-cancel">取消</button>'
+    + '<button type="button" class="action-button primary json-editor-apply">应用到参数</button></div>'
+    + '</section>';
+  $(".json-editor-head strong", modal).textContent = `${name} · 表格编辑`;
+  $(".json-editor-head small", modal).textContent = shape.mode === "groupRows"
+    ? "分部件组 · 改完的属性会同时应用到该组的 domain 与 line"
+    : shape.mode === "pairs" ? "对象 · 每行一个键值对"
+    : shape.mode === "scalarRows" ? "值列表 · 每行一个值" : "对象数组 · 每行一项，列名即字段名";
+  const head = $("thead", modal), body = $("tbody", modal);
+  const hint = $(".json-editor-hint", modal);
+  const rebuild = () => {
+    head.innerHTML = "<tr>" + columns.map(col => `<th>${escapeHtml(col)}</th>`).join("")
+      + '<th class="json-editor-del-col"></th></tr>';
+    body.innerHTML = "";
+    rows.forEach((row, rowIndex) => {
+      const tr = document.createElement("tr");
+      columns.forEach((col, colIndex) => {
+        const td = document.createElement("td");
+        // 组名与数组型属性（ids）只展示：domain 的面编号和 line 的线编号不是一回事，
+        // 在这张表里改它们只会把一份编号写到另一份上
+        const locked = colIndex < (shape.readonlyCount || 0)
+          || (Array.isArray(shape.readonlyAttrs) && shape.readonlyAttrs.includes(col));
+        if (locked) {
+          const staticCell = document.createElement("span");
+          staticCell.className = "json-editor-static";
+          staticCell.textContent = jsonCellText(row[colIndex]);
+          staticCell.title = jsonCellText(row[colIndex]);
+          td.append(staticCell); tr.append(td);
+          return;
+        }
+        const cell = document.createElement("input");
+        cell.type = "text";
+        cell.spellcheck = false;
+        cell.value = jsonCellText(row[colIndex]);
+        const typeHint = row[colIndex] === undefined ? "new"
+          : (row[colIndex] === null ? "null" : typeof row[colIndex]);
+        cell.oninput = () => {
+          row[colIndex] = jsonCellValue(cell.value, typeHint);
+          // 嵌套对象/数组的单元格：文本已开始写括号却解析不开时标红
+          const bad = typeof row[colIndex] === "string"
+            && /^\s*[{\[]/.test(row[colIndex]) && parseJsonValue(row[colIndex]) === undefined;
+          cell.classList.toggle("invalid", bad);
+          if (bad) hint.textContent = "这个单元格里的 JSON 语法不合法"; else hint.textContent = "";
+        };
+        td.append(cell); tr.append(td);
+      });
+      const delCell = document.createElement("td");
+      const del = document.createElement("button");
+      del.type = "button"; del.className = "json-editor-del"; del.title = "删除这一行"; del.textContent = "×";
+      del.onclick = () => {
+        rows.splice(rowIndex, 1);
+        if (Array.isArray(shape.groups)) shape.groups.splice(rowIndex, 1);
+        if (Array.isArray(shape.samples)) shape.samples.splice(rowIndex, 1);
+        rebuild(); hint.textContent = "";
+      };
+      delCell.append(del); tr.append(delCell);
+      body.append(tr);
+    });
+  };
+  const buildValue = () => {
+    if (shape.mode === "groupRows") return jsonGroupApply(shape, rows);
+    if (shape.mode === "pairs") {
+      const obj = {};
+      rows.forEach(row => {
+        const key = String(row[0] == null ? "" : row[0]).trim();
+        if (key) obj[key] = row[1];
+      });
+      return obj;
+    }
+    if (shape.mode === "scalarRows") return rows.map(row => row[0]);
+    return rows.map(row => {
+      const obj = {};
+      columns.forEach((col, index) => { if (row[index] !== undefined) obj[col] = row[index]; });
+      return obj;
+    });
+  };
+  const close = () => {
+    document.removeEventListener("keydown", onKey, true);
+    modal.remove();
+  };
+  const onKey = event => {
+    if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+  };
+  $(".json-editor-close", modal).onclick = close;
+  $(".json-editor-cancel", modal).onclick = close;
+  $(".json-editor-apply", modal).onclick = () => {
+    const broken = rows.some(row => row.some(cell => typeof cell === "string"
+      && /^\s*[{\[]/.test(cell) && parseJsonValue(cell) === undefined));
+    if (broken) { hint.textContent = "有单元格的 JSON 语法不合法，修正后再应用"; return; }
+    onApply(JSON.stringify(buildValue(), null, 2));
+    close();
+  };
+  document.addEventListener("keydown", onKey, true);
+  document.body.append(modal);
+  rebuild();
 }
 function valueForInput(value) { return typeof value === "object" ? JSON.stringify(value) : String(value == null ? "" : value); }
 function inferValueType(value) { return typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : (value !== null && typeof value === "object" ? "object" : "string"); }

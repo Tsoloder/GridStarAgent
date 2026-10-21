@@ -460,6 +460,38 @@ def test_webui_choice_card_contract():
     # 重连前重放历史不算待答：末尾那轮的询问已经被本轮 user 消息回答过
     assert "renderHistory(kept, {resume: true})" in script
     assert "finishAssistant(turn, true);" in script
+
+
+def test_webui_json_param_table_editor():
+    """JSON 类参数（如 groupProperty）在审批卡里要能开表格改值，而不是硬改文本。"""
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    # 表格入口贴在参数输入框左边，只在可表格化的 JSON 参数上出现
+    assert "function jsonTableShape(" in script
+    assert "function jsonCellValue(" in script
+    assert "function openJsonTableEditor(" in script
+    assert 'tableButton.className = "param-json-btn";' in script
+    assert 'tableButton.textContent = "表格";' in script
+    assert "holder.append(tableButton, field);" in script
+    # 改完回写参数输入框的文本，提交仍走 coerceSchemaValue
+    assert 'field.value = next; field.dispatchEvent(new Event("input", {bubbles: true}));' in script
+    # 对象数组按行铺开、对象按键值成行；分组参数（groupProperty）一行一个组，
+    # 拿 domain 的属性当组属性，改完同时写到该组的 domain 与 line
+    assert 'mode: "objectRows"' in script and 'mode: "pairs"' in script and 'mode: "raw"' in script
+    assert "function jsonGroupShape(" in script
+    assert "function jsonGroupApply(" in script
+    assert 'mode: "groupRows"' in script
+    assert "jsonGroupApply(shape, rows)" in script
+    # ids 是两套不同的对象编号：只展示、不回写
+    assert "readonlyAttrs" in script
+    # 只支持修改现有参数，不提供新增入口
+    assert "json-editor-add" not in script
+    assert "添加一行" not in script
+    assert "onApply(JSON.stringify(buildValue(), null, 2));" in script
+    assert ".json-editor-table{" in stylesheet
+    assert ".param-json-btn{" in stylesheet
+    assert ".json-editor-static{" in stylesheet
     # 询问类调用不落成工具条目：实时流与历史重放保持一致
     assert 'if (event.name !== ASK_USER_TOOL) renderToolCall(event,assistant.node);' in script
     assert 'if (name === ASK_USER_TOOL) { item.pendingAsk = args; return; }' in script
