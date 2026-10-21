@@ -838,6 +838,23 @@ async def run_agent_loop(
     is_param_cancelled = bool(structured_state.get("cancelled"))
     cancelled_tool = str(structured_state.get("tool") or "")
     is_structured_continuation = is_structured_message and not is_param_cancelled
+    # 用户确认的是某一个工具的参数，不是"这一轮所有工具都免审批"。
+    # confirmed_tool 记下被确认的工具名，confirmed_used 保证这份授权只花一次：
+    # 模型在同一轮里接着调别的操作类工具（常见于 multi-step 流程）时，仍要重新弹审批。
+    confirmed_tool = str(structured_state.get("tool") or "") if is_structured_continuation else ""
+    confirmed_used = False
+
+    def _confirmed_exempt(tool_name: str) -> bool:
+        """这次调用能否直接执行（不再弹审批）。
+
+        只放行用户刚确认的那一个工具，而且只用一次；工具名对不上或配额已用完
+        就返回 False，回落到正常审批。
+        """
+        nonlocal confirmed_used
+        if not confirmed_tool or confirmed_used or str(tool_name) != confirmed_tool:
+            return False
+        confirmed_used = True
+        return True
     continued_skills = set()
     if is_structured_message:
         for previous in reversed(session.messages):
@@ -979,6 +996,9 @@ async def run_agent_loop(
                 "\n当前消息是用户对 tool_params 的确认结果。"
                 "请直接调用对应的 MCP 工具执行，不要再次输出 tool_params。"
                 "用户已确认的参数即为最终参数，无需再次询问。"
+                "这次确认只覆盖 %s 这一个工具的这一次调用：本轮若还要继续执行"
+                "其它操作类工具，仍会重新弹审批面板，不要假定它们已被批准。"
+                % (confirmed_tool or "被确认的那个工具")
             )
         system_parts.append("".join(manual_parts))
     memory_schemas = mcp.tool_schemas() if hasattr(mcp, "tool_schemas") else {}
@@ -1022,6 +1042,9 @@ async def run_agent_loop(
             _fmt_parts.append(
                 "- 当前是 tool_params 确认延续，不再需要输出 tool_params JSON 块。\n"
                 "- 用户已确认参数，直接调用对应的 MCP 工具执行，禁止再次输出 tool_params。\n"
+                "- 用户这次只确认了 %s 一个工具；本阶段内不要再输出 tool_params 文本块，"
+                "下一步需要的操作类工具交给审批面板确认。\n"
+                % (confirmed_tool or "被确认的那个工具")
             )
         else:
             _fmt_parts.append(
@@ -1773,14 +1796,13 @@ async def run_agent_loop(
                             )
                         elif not _tool_allowed_by_loaded_skills(tc["name"], loaded_skills, skill_registry):
                             result = "Tool blocked by active Skill policy: %s" % tc["name"]
-                        elif interaction_mode != "auto" and request_tool_approval and not is_structured_continuation and not _is_query_tool(tc["name"]):
+                        elif interaction_mode != "auto" and request_tool_approval and not _confirmed_exempt(tc["name"]) and not _is_query_tool(tc["name"]):
                             # manual mode: intercept tool call and ask user to
                             # confirm parameters via the approval panel.
-                            # Skip this when the current request is a structured
-                            # continuation (e.g. tool_params_confirmed) — the
-                            # user already confirmed the parameters via the
-                            # tool_params text protocol, so executing the tool
-                            # directly avoids a double-confirmation loop.
+                            # 结构化延续（tool_params_confirmed）只免除被确认的那一个工具的
+                            # 一次性审批：用户点的是“执行这组参数”，不是“这一轮随便跑”。
+                            # 否则模型会在同一轮里接着把后续操作类工具全部执行完，
+                            # 用户看不到任何参数确认。
                             yield {
                                 "type": "tool_approval_required",
                                 "call_id": tc["id"], "name": tc["name"], "args": tc["args"],

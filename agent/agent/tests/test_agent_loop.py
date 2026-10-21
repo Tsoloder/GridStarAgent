@@ -1005,6 +1005,63 @@ async def test_structured_continuation():
     assert "导入完成" in _full_text(events)
 
 
+@pytest.mark.asyncio
+async def test_structured_continuation_only_exempts_confirmed_tool_once():
+    """用户确认的是某一个工具的一次调用，不是“这一轮所有工具都免审批”。
+
+    模型在一轮里连着跑多个操作类工具时，除被确认那一个之外都要弹审批面板。
+    """
+    import agent_loop
+
+    session = _make_session("test-approval-once")
+    mock_llm = MockLLMClient([
+        {"events": [
+            {"type": "tool_call", "id": "tc-1", "name": "DealWatertight",
+             "args": {"tolenrance": 0.07}},
+            {"type": "usage", "input": 10, "output": 5, "total": 15},
+        ]},
+        {"events": [
+            {"type": "text_chunk", "delta": "水密性完成，继续分割。"},
+            {"type": "tool_call", "id": "tc-2", "name": "ProcessWithServer",
+             "args": {"serverHost": "127.0.0.1", "serverPort": 9008}},
+            {"type": "usage", "input": 20, "output": 5, "total": 25},
+        ]},
+        {"events": [
+            {"type": "text_chunk", "delta": "分割完成。"},
+            {"type": "usage", "input": 30, "output": 5, "total": 35},
+        ]},
+    ])
+    mock_mcp = MockMcpBridge({"DealWatertight": "ok", "ProcessWithServer": "ok"})
+    asked = []
+
+    async def approve(session_id, call_id, name, args):
+        asked.append(name)
+        return {"approved": True, "args": args}
+
+    events = []
+    async for event in agent_loop.run_agent_loop(
+        session=session,
+        user_message=(
+            '<structured_interaction>{"type":"tool_params_confirmed",'
+            '"tool":"DealWatertight","confirmed":true,'
+            '"params":{"tolenrance":0.07}}</structured_interaction>'
+        ),
+        base_system_prompt="",
+        config=_make_config(),
+        mcp=mock_mcp,
+        ctx_mgr=MockContextManager(),
+        skill_registry=MockSkillRegistry(),
+        request_tool_approval=approve,
+        interaction_mode="manual",
+        model_runtime=mock_llm,
+    ):
+        events.append(event)
+
+    # 被确认的工具直接执行，后续那个必须重新审批
+    assert asked == ["ProcessWithServer"]
+    assert [e["name"] for e in events if e["type"] == "tool_approval_required"] == ["ProcessWithServer"]
+
+
 def test_parse_structured_interaction_confirmed_flag():
     """取消与确认必须解析成不同状态；旧 XML 形态无 confirmed 字段时按已确认处理。"""
     import agent_loop
