@@ -23,6 +23,7 @@ from document_loader import (
 from llm_client.adapters.base import is_retryable
 from mcp_bridge import McpBridge
 from paths import UPLOADS_DIR
+import kb_tools
 from session import Session, export_session_markdown
 from tool_memory import (
     merge as merge_tool_memory,
@@ -441,7 +442,7 @@ def _list_directory(path_string: str, pattern: str = "", recursive: bool = False
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
                    UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME,
                    EXPORT_SESSION_TOOL_NAME, SET_CATEGORY_TOOL_NAME,
-                   LIST_DIRECTORY_TOOL_NAME}
+                   LIST_DIRECTORY_TOOL_NAME} | kb_tools.KB_TOOL_NAMES
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -1252,7 +1253,7 @@ async def run_agent_loop(
             runtime_tools = skill_registry.internal_tools() + [
                 UPDATE_PLAN_TOOL, ASK_USER_TOOL, EXPORT_SESSION_TOOL,
                 SET_CATEGORY_TOOL, LIST_DIRECTORY_TOOL,
-            ]
+            ] + kb_tools.tools()
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
             if model_runtime is None:
@@ -1545,10 +1546,11 @@ async def run_agent_loop(
             if not _batch_persisted:
                 session.append_assistant_with_tool_calls(text_acc, tool_calls, reasoning_acc)
             for _step_idx, tc in enumerate(tool_calls, 1):
-                internal_tool = tc["name"] in {"read_skill", "read_skill_resource",
+                internal_tool = tc["name"] in ({"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,
                                                ASK_USER_TOOL_NAME, EXPORT_SESSION_TOOL_NAME,
                                                LIST_DIRECTORY_TOOL_NAME}
+                                              | kb_tools.KB_TOOL_NAMES)
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
                             tc["name"], json.dumps(tc["args"], ensure_ascii=False)[:500])
@@ -1748,6 +1750,9 @@ async def run_agent_loop(
                             _dir_args.get("pattern", ""),
                             bool(_dir_args.get("recursive", False)),
                         )
+                    elif kb_tools.is_kb_tool(tc["name"]):
+                        # 内置知识库检索：只读本地索引，不走 MCP、不走审批
+                        result = kb_tools.execute(tc["name"], tc.get("args") or {})
                     else:
                         if is_param_cancelled and cancelled_tool and tc["name"] == cancelled_tool:
                             # 用户已取消这组参数：即便模型仍然发起调用也拦下，不再兜底执行

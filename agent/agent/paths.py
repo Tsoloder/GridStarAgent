@@ -97,10 +97,15 @@ UPLOADS_DIR = DATA_DIR / "uploads"
 # working.db，与本模块无关，新库固定叫 memory.db，不去动别人的文件。
 MEMORY_DIR = DATA_DIR / "memory"
 MEMORY_DB_PATH = MEMORY_DIR / "memory.db"
+# 本地知识库：索引库 + 原始文件副本。原始文件单独留一份，是为了「回源核对」
+# 有个稳定的落点，不依赖用户本地目录还在原位。
+KB_DIR = DATA_DIR / "kb"
+KB_DB_PATH = KB_DIR / "kb.db"
+KB_SOURCES_DIR = KB_DIR / "sources"
 
 # 子目录建不出来不阻断启动：日志、会话、技能各自在真正写入时才有依赖，
 # 让它们报到自己的调用点上，比在 import 阶段让整个进程崩掉更好定位。
-for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR):
+for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR, KB_SOURCES_DIR):
     try:
         directory.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -114,7 +119,7 @@ def ensure_subdirs() -> list:
     席，/uploads 静态挂载和附件落盘在本次运行里就永久失效了。
     """
     failures = []
-    for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR):
+    for directory in (SESSIONS_DIR, LOG_DIR, SKILLS_DIR, UPLOADS_DIR, MEMORY_DIR, KB_SOURCES_DIR):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as exc:

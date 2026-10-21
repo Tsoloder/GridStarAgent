@@ -296,8 +296,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=75" in index
-    assert "style.css?v=58" in index
+    assert "app.js?v=86" in index
+    assert "style.css?v=65" in index
 
 
 def test_webui_storage_issue_surfacing_contract():
@@ -318,6 +318,61 @@ def test_webui_storage_issue_surfacing_contract():
     assert "warnedStorageIssues.has(issue)" in script
 
 
+def test_webui_kb_panel_contract():
+    """知识库页签：多库选择、导入入口、状态区、检索试跑都要在，接口路径也要对得上。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+    backend = (Path(__file__).resolve().parents[1] / "app.py").read_text(encoding="utf-8")
+
+    # 页签与面板
+    assert 'data-settings-tab="kb"' in index
+    assert 'id="panel-kb"' in index
+    assert 'id="kb-file-input"' in index and 'id="kb-search-btn"' in index
+    assert ".kb-panel{display:block" in stylesheet
+    # 多库：设置页的库选择与增删改，加上输入框下方的选择器
+    assert 'id="kb-lib-select"' in index and 'id="kb-lib-new"' in index
+    assert 'id="kb-lib-delete"' in index
+    assert 'id="kb-trigger"' in index and 'id="kb-listbox"' in index
+    assert ".kb-libbar{" in stylesheet
+
+    # 切到该页签时要拉取状态，不能只切显示
+    assert 'if (tab === "kb") kbEnterTab();' in script
+    assert "function kbEnterTab()" in script
+    # 输入框下方的选择只有三态：具体库 / 全部 / 不使用
+    assert 'const KB_USE_ALL = "*";' in script
+    assert 'const KB_USE_NONE = "";' in script
+    assert "function selectKbLibrary(value, options = {})" in script
+    # 文件夹归档：左侧折叠树 + 右侧列表，且只做收纳不改检索范围
+    assert 'id="kb-tree-list"' in index and 'id="kb-folder-new"' in index
+    assert 'id="kb-folder-delete"' in index and 'id="kb-doc-title"' in index
+    assert ".kb-body{display:grid" in stylesheet and ".kb-tree-row" in stylesheet
+    assert "function renderKbTree()" in script
+    assert 'if (!kbState.expanded.has("root")) return;' in script
+    # 发送消息必须把选择带给后端，否则后端无从得知本轮查哪个库
+    assert "kb_library:kbState.selected" in script
+    # 上传走 XHR：大文件要能发裸字节
+    assert 'xhr.open("POST", "/kb/upload?name="' in script
+    for route in (
+        '@app.get("/kb/status")',
+        '@app.get("/kb/documents")',
+        '@app.get("/kb/folders")',
+        '@app.post("/kb/folders")',
+        '@app.patch("/kb/folders/{folder_id}")',
+        '@app.delete("/kb/folders/{folder_id}")',
+        '@app.patch("/kb/documents/{doc_id}")',
+        '@app.get("/kb/libraries")',
+        '@app.post("/kb/libraries")',
+        '@app.patch("/kb/libraries/{library_id}")',
+        '@app.delete("/kb/libraries/{library_id}")',
+        '@app.post("/kb/upload")',
+        '@app.post("/kb/import")',
+        '@app.delete("/kb/documents/{doc_id}")',
+        '@app.get("/kb/search")',
+    ):
+        assert route in backend
+
+
 def test_webui_voice_input_contract():
     index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
     script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
@@ -329,8 +384,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=58" in index
-    assert "app.js?v=75" in index
+    assert "style.css?v=65" in index
+    assert "app.js?v=86" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (

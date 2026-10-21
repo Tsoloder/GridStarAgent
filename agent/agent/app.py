@@ -59,8 +59,10 @@ from llm_client.types import ProviderConfig as RuntimeProviderConfig
 from data_dir_guard import guard_data_dir
 from logging_setup import setup_logging
 from mcp_bridge import McpBridge
+import kb_tools
 from memory_store import MemoryFault, MemoryService
 from paths import DATA_DIR, UPLOADS_DIR, ensure_subdirs
+import kb_index
 from session import (
     InvalidSessionId,
     clear_session,
@@ -530,6 +532,261 @@ async def get_mcp_tools(refresh: bool = False):
         key=lambda item: item["name"].lower(),
     )
     return {"connected": _mcp.connected, "error": error, "tools": tools}
+
+
+# --------------------------------------------------------------------------
+# 知识库：索引状态、导入、试跑检索
+# --------------------------------------------------------------------------
+
+# 知识库文件普遍比聊天附件大（手册动辄几十 MB），单独给一个上限
+KB_MAX_FILE_BYTES = 64 * 1024 * 1024
+
+
+def _kb_call(fn, *args, **kwargs):
+    """知识库出错不该 500 打穿设置页：统一转成 503 + 可读原因。"""
+    try:
+        return fn(*args, **kwargs)
+    except kb_index.KBUnavailable as exc:
+        return JSONResponse({"error": str(exc), "code": "kb_unavailable"}, status_code=400)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("kb operation failed: %s: %s", type(exc).__name__, exc)
+        return JSONResponse(
+            {"error": "知识库操作失败", "detail": "%s: %s" % (type(exc).__name__, exc),
+             "code": "kb_error"},
+            status_code=503,
+        )
+
+
+@app.get("/kb/libraries")
+async def kb_libraries():
+    """库列表。下拉框、设置页侧栏都读它。"""
+    return _kb_call(lambda: {"libraries": kb_index.list_libraries()})
+
+
+@app.post("/kb/libraries")
+async def kb_create_library(body: dict = None):
+    payload = body or {}
+    created = _kb_call(
+        kb_index.create_library, str(payload.get("name", "") or ""),
+        str(payload.get("note", "") or ""),
+    )
+    if isinstance(created, JSONResponse):
+        return created
+    return {"library": created, "libraries": kb_index.list_libraries()}
+
+
+@app.patch("/kb/libraries/{library_id}")
+async def kb_update_library(library_id: str, body: dict = None):
+    payload = body or {}
+    note = payload.get("note") if "note" in payload else None
+    updated = _kb_call(
+        kb_index.rename_library, library_id,
+        str(payload.get("name", "") or ""),
+        None if note is None else str(note or ""),
+    )
+    if isinstance(updated, JSONResponse):
+        return updated
+    return {"library": updated, "libraries": kb_index.list_libraries()}
+
+
+@app.delete("/kb/libraries/{library_id}")
+async def kb_delete_library(library_id: str):
+    removed = _kb_call(kb_index.delete_library, library_id)
+    if isinstance(removed, JSONResponse):
+        return removed
+    return {"removed": removed, "libraries": kb_index.list_libraries()}
+
+
+@app.get("/kb/folders")
+async def kb_folders(library_id: str = ""):
+    """文件夹树。根节点 id 为空串，前端直接渲染折叠树。"""
+    scope = library_id or kb_index.DEFAULT_LIBRARY_ID
+    return _kb_call(
+        lambda: {
+            "library_id": scope,
+            "tree": kb_index.folder_tree(scope),
+            "folders": kb_index.list_folders(scope),
+        }
+    )
+
+
+@app.post("/kb/folders")
+async def kb_create_folder(body: dict = None):
+    payload = body or {}
+    created = _kb_call(
+        kb_index.create_folder,
+        str(payload.get("library_id", "") or ""),
+        str(payload.get("name", "") or ""),
+        str(payload.get("parent_id", "") or ""),
+    )
+    if isinstance(created, JSONResponse):
+        return created
+    return {"folder": created}
+
+
+@app.patch("/kb/folders/{folder_id}")
+async def kb_update_folder(folder_id: str, body: dict = None):
+    payload = body or {}
+    updated = _kb_call(kb_index.rename_folder, folder_id, str(payload.get("name", "") or ""))
+    if isinstance(updated, JSONResponse):
+        return updated
+    return {"folder": updated}
+
+
+@app.delete("/kb/folders/{folder_id}")
+async def kb_delete_folder(folder_id: str):
+    """删文件夹不删资料：里面的文档与子文件夹上移到上一层。"""
+    removed = _kb_call(kb_index.delete_folder, folder_id)
+    if isinstance(removed, JSONResponse):
+        return removed
+    return {"removed": removed}
+
+
+@app.get("/kb/status")
+async def kb_status(library_id: str = ""):
+    return _kb_call(kb_index.status, library_id or None)
+
+
+@app.get("/kb/documents")
+async def kb_documents(library_id: str = "", folder: str = "all", deep: bool = False):
+    """folder=all 列全库；folder=root 只列库根；其余当作文件夹 id。"""
+    if folder == "all":
+        target: Optional[str] = None
+    elif folder == "root":
+        target = ""
+    else:
+        target = folder
+    return _kb_call(
+        lambda: {
+            "documents": kb_index.list_documents(
+                library_id or None, folder_id=target, deep=bool(deep and target)
+            )
+        }
+    )
+
+
+@app.patch("/kb/documents/{doc_id}")
+async def kb_move_document(doc_id: str, body: dict = None):
+    payload = body or {}
+    moved = _kb_call(
+        kb_index.move_document, doc_id, str(payload.get("folder_id", "") or "")
+    )
+    if isinstance(moved, JSONResponse):
+        return moved
+    return {"document": moved}
+
+
+@app.post("/kb/upload")
+async def kb_upload(
+    request: Request, name: str = "", library_id: str = "", folder_id: str = ""
+):
+    """接收一份知识库文件（正文即文件字节），落进 sources 目录并立即建索引。"""
+    display = Path(str(name or "").replace("\\", "/")).name or "document"
+    suffix = Path(display).suffix.lower()
+    if suffix not in kb_index.SUPPORTED_SUFFIXES:
+        return JSONResponse(
+            {"error": "不支持的文件类型 %s" % (suffix or "(无扩展名)")},
+            status_code=400,
+        )
+    data = await request.body()
+    if not data:
+        return JSONResponse({"error": "文件内容为空"}, status_code=400)
+    if len(data) > KB_MAX_FILE_BYTES:
+        return JSONResponse({"error": "单个知识库文件不能超过 64 MB"}, status_code=400)
+
+    def _run():
+        target = kb_index.save_upload(data, display)
+        result = kb_index.index_file(
+            target,
+            library_id=library_id or kb_index.DEFAULT_LIBRARY_ID,
+            folder_id=folder_id or kb_index.FOLDER_ROOT,
+        )
+        kb_index.optimize()
+        return result
+
+    return _kb_call(_run)
+
+
+@app.post("/kb/import")
+async def kb_import(body: dict = None):
+    """按本机路径批量导入：传目录则递归展开，传文件则逐个索引。"""
+    payload = body or {}
+    raw_paths = payload.get("paths") or []
+    if isinstance(raw_paths, str):
+        raw_paths = [raw_paths]
+    paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+    if not paths:
+        return JSONResponse({"error": "未提供任何路径"}, status_code=400)
+    recursive = bool(payload.get("recursive", True))
+    library_id = str(payload.get("library_id", "") or "").strip()
+    folder_id = str(payload.get("folder_id", "") or "").strip()
+    mirror_tree = bool(payload.get("mirror_tree", True))
+    return _kb_call(
+        lambda: kb_index.import_paths(
+            paths, recursive=recursive,
+            library_id=library_id or kb_index.DEFAULT_LIBRARY_ID,
+            folder_id=folder_id or kb_index.FOLDER_ROOT,
+            mirror_tree=mirror_tree,
+        )
+    )
+
+
+@app.delete("/kb/documents/{doc_id}")
+async def kb_delete_document(doc_id: str):
+    removed = _kb_call(kb_index.remove_document, doc_id)
+    if isinstance(removed, JSONResponse):
+        return removed
+    if not removed:
+        return JSONResponse({"error": "文档不存在"}, status_code=404)
+    return {"deleted": doc_id}
+
+
+@app.post("/kb/documents/{doc_id}/reindex")
+async def kb_reindex_document(doc_id: str):
+    def _run():
+        doc = kb_index.get_document(doc_id)
+        if doc is None:
+            raise kb_index.KBUnavailable("文档不存在")
+        # 重建必须回到原库，否则会把文档挤进默认库
+        result = kb_index.index_file(doc["path"], library_id=doc["library_id"])
+        kb_index.optimize()
+        return result
+
+    return _kb_call(_run)
+
+
+@app.get("/kb/search")
+async def kb_search_endpoint(q: str = "", top_k: int = 5, doc_id: str = "", library_id: str = ""):
+    """设置页的试跑入口：不经过模型，直接看检索返回什么。"""
+    query = (q or "").strip()
+    if not query:
+        return JSONResponse({"error": "缺少检索词"}, status_code=400)
+    top_k = max(1, min(20, int(top_k or 5)))
+    scope = library_id or kb_index.LIBRARY_ALL
+
+    def _run():
+        params = kb_index.find_params(query, limit=3, library_id=scope)
+        hits = kb_index.search(query, top_k=top_k, doc_id=doc_id or None, library_id=scope)
+        return {"query": query, "params": params, "hits": hits, "library_id": scope}
+
+    return _kb_call(_run)
+
+
+@app.get("/kb/params")
+async def kb_params(q: str = "", domain: str = "", limit: int = 60, library_id: str = ""):
+    scope = library_id or None
+    if (q or "").strip():
+        return _kb_call(
+            lambda: {"items": kb_index.find_params(q, limit=limit, domain=domain, library_id=scope)}
+        )
+    return _kb_call(
+        lambda: {"items": kb_index.list_params(limit=limit, domain=domain, library_id=scope)["items"]}
+    )
+
+
+@app.post("/kb/optimize")
+async def kb_optimize():
+    return _kb_call(lambda: {"optimized": kb_index.optimize()})
 
 
 @app.get("/config")
@@ -1051,6 +1308,27 @@ async def chat_stream(body: dict):
     writable_skill_root = body.get("writable_skill_root", "") or ""
     model_id = body.get("model_id", "") or ""
 
+    # 知识库选择：「没传字段」和「传了空串」不是一回事——前者沿用会话记住的值，
+    # 后者是用户明确选了「不使用知识库」。此时 session 还没加载，先读 meta。
+    if "kb_library" in body:
+        kb_library = str(body.get("kb_library") or "").strip()
+    else:
+        kb_library = "*"
+        try:
+            _kb_meta_path = session_dir(session_id) / "meta.json"
+            if _kb_meta_path.exists():
+                _kb_meta = json.loads(_kb_meta_path.read_text(encoding="utf-8"))
+                kb_library = str(_kb_meta.get("kb_library", "*") or "*")
+        except Exception:  # noqa: BLE001 - 读不到就按全部库处理
+            kb_library = "*"
+    if kb_library not in ("", "*"):
+        try:
+            if kb_index.get_library(kb_library) is None:
+                # 库已被删：退回全部，不要让本轮静默变空
+                kb_library = "*"
+        except Exception:  # noqa: BLE001 - 索引不可用不影响主任务
+            pass
+
     request_skill_registry = SkillRegistry(SkillRegistry.default_roots())
     if skill_roots:
         request_skill_registry.set_roots(
@@ -1140,6 +1418,7 @@ async def chat_stream(body: dict):
                             interaction_mode, model_id,
                             request_skill_registry,
                             runtime=_model_runtime,
+                            kb_library=kb_library,
                         )
                     )
 
@@ -1344,6 +1623,8 @@ async def get_session(session_id: str):
             "model_id": s.model_id,
             # 会话的活动技能分类，前端切会话时用它把下拉框恢复成服务端真值
             "category": s.category,
+            # 会话的知识库选择，前端切会话时同步输入框下方的下拉框
+            "kb_library": s.kb_library,
         },
         "messages": s.messages,
         "plan": plan,
@@ -1764,6 +2045,7 @@ async def _run_background_loop(
     model_id: str,
     request_skill_registry=None,
     model_runtime=None,
+    kb_library: str = "*",
 ):
     """后台独立运行 agent_loop，事件写入 queue。
 
@@ -1785,6 +2067,16 @@ async def _run_background_loop(
     bg.started_at = datetime.now().isoformat()
     ledger = TaskLedger(session_id)
 
+    # 记住本会话的知识库选择：刷新页面或重连后不需要再选一次。
+    # 已作废的轮次一律不落盘（与下方持久化策略一致）。
+    if not bg.invalidated and getattr(session, "kb_library", None) != kb_library:
+        try:
+            session.kb_library = kb_library
+            with locked_session(session_id):
+                save_session(session)
+        except Exception as exc:  # noqa: BLE001 - 落盘失败不影响本轮
+            logger.warning("persist kb_library failed: %s", type(exc).__name__)
+
     # 轨迹：user 记录先落盘并入队，保证实时视图与 trajectory.jsonl 顺序一致
     _traj_turn = sum(1 for m in session.messages if m.get("role") == "user") + 1
     _traj_user = {
@@ -1797,6 +2089,9 @@ async def _run_background_loop(
     await _bg_put(bg, _traj_user)
 
     _done_sent = False
+    # 本轮使用哪个知识库：上下文变量只在这个请求任务里生效，并发会话互不影响。
+    # 传空串表示用户明确选了「不使用知识库」。
+    _kb_token = kb_tools.set_active_library(kb_library)
     try:
         stored_attachments = []
         if attachments:
@@ -1885,6 +2180,7 @@ async def _run_background_loop(
         logger.exception("background agent loop failed")
         await _bg_put(bg, classify_error(e))
     finally:
+        kb_tools.reset_active_library(_kb_token)
         # agent_loop 正常收尾时已入队带统计字段的 done；再补一个空 done 会被
         # SSE 的 drain 阶段发给前端，导致已渲染的用量/用时按钮被清空。
         if not _done_sent and not bg.invalidated:

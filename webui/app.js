@@ -76,6 +76,16 @@ const el = {
   memoryMore: $("#memory-more"), memoryLoadMore: $("#memory-load-more"),
   memoryMaintResult: $("#memory-maintenance-result"), memoryRunExtract: $("#memory-run-extract"),
   memoryRunGovernance: $("#memory-run-governance"), memoryClearTools: $("#memory-clear-tools"),
+  kbStatus: $("#kb-status"), kbCards: $("#kb-cards"), kbDocs: $("#kb-docs"), kbDocCount: $("#kb-doc-count"),
+  kbDocTitle: $("#kb-doc-title"), kbDocHint: $("#kb-doc-hint"),
+  kbTreeList: $("#kb-tree-list"), kbFolderNew: $("#kb-folder-new"),
+  kbFolderRename: $("#kb-folder-rename"), kbFolderDelete: $("#kb-folder-delete"),
+  kbPick: $("#kb-pick"), kbFileInput: $("#kb-file-input"), kbDir: $("#kb-dir"),
+  kbImportDir: $("#kb-import-dir"), kbRefresh: $("#kb-refresh"),
+  kbLibSelect: $("#kb-lib-select"), kbLibNew: $("#kb-lib-new"),
+  kbLibRename: $("#kb-lib-rename"), kbLibDelete: $("#kb-lib-delete"),
+  kbQuery: $("#kb-query"), kbSearchBtn: $("#kb-search-btn"), kbSearchResult: $("#kb-search-result"),
+  kbSelect: $("#kb-select"), kbTrigger: $("#kb-trigger"), kbLabel: $("#kb-label"), kbListbox: $("#kb-listbox"),
 };
 el.phasePanel.addEventListener("click", event => {
   if (!event.target.closest(".phase-head")) return;
@@ -1883,6 +1893,8 @@ async function loadSession(id) {
     // 会话里存着模型上次用 set_active_category 设的分类：切回来/刷新后要显示它，
     // 而不是永远从「全部」开始。这不是用户的选择，所以不置 categoryTouched。
     state.categoryTouched = false; selectCategory(state.session.meta.category || "");
+    // 会话记着的知识库选择：切回来要跟着变，否则下拉框显示旧值而请求带旧值
+    selectKbLibrary(state.session.meta.kb_library == null ? KB_USE_ALL : String(state.session.meta.kb_library), {silent: true});
     restoreContextRing(state.session.messages);
     el.messages.innerHTML = ""; hidePhasePanel(); state.workflow = null; closeChoiceOverlay();
     // 有暂存视图（本会话的回复还在流式输出，或刚在后台结束）就直接挂回，不用服务端历史重渲染
@@ -2068,7 +2080,7 @@ async function sendMessage(rawMessage = null, displayContent = null, retryAttach
   syncComposer();
   try {
     const selectedSkills = el.skill.value ? [{id:el.skill.value,params:{}}] : [];
-    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,model_id:el.model.value || "",selected_skills:selectedSkills,selected_category:state.selectedCategory || "",category_explicit:!!state.categoryTouched,attachments:sentAttachments})});
+    const response = await fetch("/chat/stream", {method:"POST",headers:{"Content-Type":"application/json"},signal:controller.signal,body:JSON.stringify({session_id:sessionId,message,display_content:shown === message ? "" : shown,interaction_mode:state.mode,kb_library:kbState.selected,model_id:el.model.value || "",selected_skills:selectedSkills,selected_category:state.selectedCategory || "",category_explicit:!!state.categoryTouched,attachments:sentAttachments})});
     await consumeSse(response, async (type, event) => backgroundSafe(sessionId, () => handleStreamEvent(sessionId, type, event, assistant)), controller);
     backgroundSafe(sessionId, () => finishAssistant(assistant));
     // 回合以选项/参数卡片收尾 → 「待确认」，否则「已完成」
@@ -2293,7 +2305,7 @@ function renderProviderEditor() {
   const provider = draftProvider(); if (!provider) { el.providerEditor.innerHTML = '<div class="placeholder-panel"><strong>添加供应商以开始配置</strong></div>'; return; }
   const models = providerModels(); const discovered = state.settings.discoveredModels[provider.id] || [];
   const caPath = provider.ssl_verify && provider.ssl_verify !== true && provider.ssl_verify !== false && provider.ssl_verify !== "true" && provider.ssl_verify !== "false" ? `<div class="srow">${field("CA 证书路径","ssl_verify_path",provider.ssl_verify,"text",'placeholder="/path/to/ca.pem"')}</div>` : "";
-  el.providerEditor.innerHTML = `<section class="provider-section"><div class="editor-title"><div><span class="eyebrow">PROVIDER</span><h3>${escapeHtml(provider.name)}</h3></div></div><div class="srow"><label class="toggle"><span>启用该供应商</span><input type="checkbox" data-provider-field="enabled" ${provider.enabled !== false ? "checked" : ""}></label></div><div class="srow srow-2">${field("供应商名称","name",provider.name)}${field("供应商 ID","id",provider.id,"text","disabled")}</div><div class="srow"><label class="settings-field"><span><b>供应商类型</b><small>决定「读取模型」走哪套目录接口</small></span><select data-provider-field="discovery_api" ${models.length ? "disabled" : ""}><option value="openai">OpenAI / Compatible / Ollama</option><option value="anthropic">Anthropic</option><option value="none">不支持模型发现</option></select></label></div><div class="srow">${field("API 地址","base_url",provider.base_url || "","url")}</div><div class="srow srow-2">${field("API Key 环境变量","api_key_env",provider.api_key_env || "")}${field("API Key","api_key",provider.api_key === "********" ? "" : provider.api_key || "","password",`placeholder="${provider.api_key === "********" ? "已安全保存" : "输入 API Key"}" ${provider.api_key_env ? "disabled" : ""}`)}</div><div class="srow srow-2"><label class="settings-field"><span><b>默认 API 协议</b></span><select data-provider-field="default_api"><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label><label class="settings-field"><span><b>SSL 证书验证</b></span><select data-provider-field="ssl_verify"><option value="true">默认（系统证书）</option><option value="false">跳过验证</option><option value="custom">自定义 CA 证书路径</option></select></label></div>${caPath}<div class="provider-actions"><button type="button" class="secondary" data-action="clear-key">清除 Key</button><button type="button" class="secondary" data-action="test-provider">${state.settings.testingProviderId === provider.id ? "测试中…" : "测试连接"}</button><span class="inline-result" data-result="test"></span><button type="button" class="danger-button" data-action="delete-provider">删除供应商</button></div></section><section class="provider-section models-section"><div class="section-head"><div><span class="eyebrow">MODELS</span><h3>已添加模型 <small>${models.length}</small></h3></div></div><div class="model-settings-list"></div><div class="add-model"><div class="add-model-bar"><label class="settings-field"><span><b>添加模型</b></span><input type="search" id="model-candidate-search" placeholder="搜索模型 ID"></label><button type="button" class="link-button" data-action="read-models">${state.settings.readingProviderId === provider.id ? "读取中…" : "读取模型"}</button></div><div id="model-candidates" class="model-candidates"></div><div class="manual-model"><input id="manual-model-id" placeholder="手动输入模型 ID"><button type="button" class="primary" data-action="add-manual-model">添加</button></div></div></section><section class="provider-section models-meta"><div class="models-meta-text" title="${escapeHtml(metaTitleText())}"><h4>模型信息</h4><p>${metaStatusText()}</p></div><button type="button" class="link-button" data-action="refresh-metadata">${state.settings.refreshingMeta ? "更新中…" : "更新模型信息"}</button></section>`;
+  el.providerEditor.innerHTML = `<section class="provider-section"><div class="editor-title"><div><span class="eyebrow">供应商</span><h3>${escapeHtml(provider.name)}</h3></div></div><div class="srow"><label class="toggle"><span>启用该供应商</span><input type="checkbox" data-provider-field="enabled" ${provider.enabled !== false ? "checked" : ""}></label></div><div class="srow srow-2">${field("供应商名称","name",provider.name)}${field("供应商 ID","id",provider.id,"text","disabled")}</div><div class="srow"><label class="settings-field"><span><b>供应商类型</b><small>决定「读取模型」走哪套目录接口</small></span><select data-provider-field="discovery_api" ${models.length ? "disabled" : ""}><option value="openai">OpenAI / Compatible / Ollama</option><option value="anthropic">Anthropic</option><option value="none">不支持模型发现</option></select></label></div><div class="srow">${field("API 地址","base_url",provider.base_url || "","url")}</div><div class="srow srow-2">${field("API Key 环境变量","api_key_env",provider.api_key_env || "")}${field("API Key","api_key",provider.api_key === "********" ? "" : provider.api_key || "","password",`placeholder="${provider.api_key === "********" ? "已安全保存" : "输入 API Key"}" ${provider.api_key_env ? "disabled" : ""}`)}</div><div class="srow srow-2"><label class="settings-field"><span><b>默认 API 协议</b></span><select data-provider-field="default_api"><option value="openai-chat">OpenAI Chat</option><option value="openai-responses">OpenAI Responses</option><option value="anthropic-messages">Anthropic Messages</option></select></label><label class="settings-field"><span><b>SSL 证书验证</b></span><select data-provider-field="ssl_verify"><option value="true">默认（系统证书）</option><option value="false">跳过验证</option><option value="custom">自定义 CA 证书路径</option></select></label></div>${caPath}<div class="provider-actions"><button type="button" class="secondary" data-action="clear-key">清除 Key</button><button type="button" class="secondary" data-action="test-provider">${state.settings.testingProviderId === provider.id ? "测试中…" : "测试连接"}</button><span class="inline-result" data-result="test"></span><button type="button" class="danger-button" data-action="delete-provider">删除供应商</button></div></section><section class="provider-section models-section"><div class="section-head"><div><span class="eyebrow">模型配置</span><h3>已添加模型 <small>${models.length}</small></h3></div></div><div class="model-settings-list"></div><div class="add-model"><div class="add-model-bar"><label class="settings-field"><span><b>添加模型</b></span><input type="search" id="model-candidate-search" placeholder="搜索模型 ID"></label><button type="button" class="link-button" data-action="read-models">${state.settings.readingProviderId === provider.id ? "读取中…" : "读取模型"}</button></div><div id="model-candidates" class="model-candidates"></div><div class="manual-model"><input id="manual-model-id" placeholder="手动输入模型 ID"><button type="button" class="primary" data-action="add-manual-model">添加</button></div></div></section><section class="provider-section models-meta"><div class="models-meta-text" title="${escapeHtml(metaTitleText())}"><h4>模型信息</h4><p>${metaStatusText()}</p></div><button type="button" class="link-button" data-action="refresh-metadata">${state.settings.refreshingMeta ? "更新中…" : "更新模型信息"}</button></section>`;
   el.providerEditor.querySelector('[data-provider-field="default_api"]').value = provider.default_api;
   el.providerEditor.querySelector('[data-provider-field="discovery_api"]').value = provider.discovery_api || "openai";
   const sslSelect = el.providerEditor.querySelector('[data-provider-field="ssl_verify"]');
@@ -2450,7 +2462,582 @@ async function backfillModelMetadata() {
 }
 function addModel(rawId, name = "") { const id = String(rawId || "").trim(); if (!id) { el.settingsStatus.textContent = "模型 ID 不得为空"; return; } if (providerModels().some(item => item.id === id)) { el.settingsStatus.textContent = "该模型已添加"; return; } const model = {id,provider:state.settings.activeProviderId,api:null,name:name || id,enabled:true,capabilities:{vision:false,video:false,audio:false,reasoning:false},compat:{}}; state.settings.draft.models.push(model); if (!state.settings.draft.default_model) state.settings.draft.default_model = `${model.provider}/${model.id}`; markSettingsDirty(); renderSettings(); fillModelLimits(model); }
 function renderSettings() { renderProviderList(); renderProviderEditor(); }
-function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); if (tab === "memory") memoryEnterTab(); else memoryStopPolling(); }
+// --- 知识库：多库管理 + 导入 + 检索试跑 ---
+// selected 是输入框下方那颗「本轮用哪个库」的选择：库 id / "*"（全部）/ ""（不使用）。
+// panelLibrary 是设置页里正在看哪个库，两者刻意分开：在设置页整理资料不应
+// 默默改掉当前对话的检索范围。
+const kbState = { status: null, docs: [], libraries: [], folders: [], tree: null,
+                  expanded: new Set(), currentFolder: "all", loading: false, busy: false,
+                  selected: "*", panelLibrary: "", listOpen: false, draggingDoc: "" };
+const KB_USE_NONE = "";
+const KB_USE_ALL = "*";
+const KB_STORAGE_KEY = "gridstar.kbLibrary";
+function formatSize(bytes) {
+  const value = Number(bytes || 0);
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(0)} KB`;
+  return `${(value / 1048576).toFixed(1)} MB`;
+}
+function kbLibraryName(id) {
+  if (id === KB_USE_ALL) return "全部知识库";
+  if (!id) return "不使用知识库";
+  const hit = kbState.libraries.find(item => item.id === id);
+  return hit ? hit.name : "未知知识库";
+}
+// 输入框下方的选择：写回隐藏 input、改标签、记到本地，下次打开沿用
+function selectKbLibrary(value, options = {}) {
+  const known = value === KB_USE_ALL || value === KB_USE_NONE || kbState.libraries.some(item => item.id === value);
+  kbState.selected = known ? value : KB_USE_ALL;
+  if (el.kbSelect) el.kbSelect.value = kbState.selected;
+  if (el.kbLabel) el.kbLabel.textContent = kbLibraryName(kbState.selected);
+  closeKbList();
+  renderKbListbox(known ? null : kbState.selected);
+  if (!options.silent) {
+    try { window.localStorage.setItem(KB_STORAGE_KEY, kbState.selected); } catch (_) {}
+  }
+}
+function renderKbListbox(highlightId) {
+  if (!el.kbListbox) return;
+  el.kbListbox.innerHTML = "";
+  const options = [{id: KB_USE_NONE, label: "不使用知识库", hint: "本轮不去查资料"},
+                   {id: KB_USE_ALL, label: "全部知识库", hint: "跨库检索"}]
+    .concat(kbState.libraries.map(item => ({
+      id: item.id, label: item.name,
+      hint: `${item.documents} 份 · ${item.chunks} 块`,
+    })));
+  const active = highlightId != null ? highlightId : kbState.selected;
+  options.forEach(item => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "model-option kb-option";
+    button.setAttribute("role", "option");
+    button.setAttribute("aria-selected", String(item.id === active));
+    button.innerHTML = `<span class="kb-option-text"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(item.hint)}</small></span>`;
+    button.onclick = () => selectKbLibrary(item.id);
+    el.kbListbox.append(button);
+  });
+}
+function openKbList() {
+  closeModelList(); closeCategoryList(); closeModeList(); closeSlashMenu();
+  renderKbListbox();
+  kbState.listOpen = true;
+  el.kbListbox.classList.remove("hidden");
+  el.kbTrigger.setAttribute("aria-expanded", "true");
+}
+function closeKbList() {
+  kbState.listOpen = false;
+  if (el.kbListbox) el.kbListbox.classList.add("hidden");
+  if (el.kbTrigger) el.kbTrigger.setAttribute("aria-expanded", "false");
+}
+async function loadKbLibraries() {
+  try {
+    const data = await request("/kb/libraries");
+    kbState.libraries = data.libraries || [];
+  } catch (error) {
+    kbState.libraries = [];
+  }
+  // 库被删了就把选择收回「全部」，否则界面上会显示一个不存在的库
+  if (kbState.selected !== KB_USE_ALL && kbState.selected !== KB_USE_NONE
+      && !kbState.libraries.some(item => item.id === kbState.selected)) {
+    kbState.selected = KB_USE_ALL;
+  }
+  renderKbListbox();
+  if (el.kbLabel) el.kbLabel.textContent = kbLibraryName(kbState.selected);
+  renderKbLibrarySelect();
+}
+function renderKbLibrarySelect() {
+  if (!el.kbLibSelect) return;
+  el.kbLibSelect.innerHTML = "";
+  if (!kbState.libraries.length) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "还没有知识库";
+    el.kbLibSelect.append(option);
+    return;
+  }
+  kbState.libraries.forEach(item => {
+    const option = document.createElement("option");
+    option.value = item.id;
+    option.textContent = `${item.name}（${item.documents}）`;
+    el.kbLibSelect.append(option);
+  });
+  const wanted = kbState.panelLibrary && kbState.libraries.some(item => item.id === kbState.panelLibrary)
+    ? kbState.panelLibrary
+    : kbState.libraries[0].id;
+  kbState.panelLibrary = wanted;
+  el.kbLibSelect.value = wanted;
+}
+function kbEnterTab() { kbOpenPanel(); }
+async function kbOpenPanel() {
+  await loadKbLibraries();
+  if (!kbState.panelLibrary && kbState.selected !== KB_USE_ALL && kbState.selected !== KB_USE_NONE) {
+    kbState.panelLibrary = kbState.selected;
+  }
+  await loadFolders();
+  await loadKb(true);
+}
+function kbFolderParam() {
+  return kbState.currentFolder || "all";
+}
+// 导入目标文件夹：「全部资料」与「库根」都落到库根，其余落到选中文件夹
+function kbTargetFolder() {
+  const current = kbState.currentFolder;
+  if (!current || current === "all" || current === "root") return "";
+  return current;
+}
+async function loadFolders() {
+  if (!kbState.panelLibrary) { kbState.folders = []; kbState.tree = null; renderKbTree(); return; }
+  try {
+    const data = await request(`/kb/folders?library_id=${encodeURIComponent(kbState.panelLibrary)}`);
+    kbState.folders = data.folders || [];
+    kbState.tree = data.tree || null;
+  } catch (error) {
+    kbState.folders = [];
+    kbState.tree = null;
+  }
+  // 展开状态默认全开：文件夹层级通常很浅，先给人看全貌更容易上手。
+  // 库根也当成一个可折叠节点（key 固定为 "root"），否则收起它时子节点不会跟着收。
+  kbState.expanded.add("root");
+  kbState.folders.forEach(item => kbState.expanded.add(item.id));
+  if (kbState.currentFolder !== "all" && kbState.currentFolder !== "root"
+      && !kbState.folders.some(item => item.id === kbState.currentFolder)) {
+    kbState.currentFolder = "all";
+  }
+  renderKbTree();
+}
+function kbFolderLabel(key) {
+  if (key === "all") return "全部资料";
+  if (key === "root" || !key) return "库根";
+  const hit = kbState.folders.find(item => item.id === key);
+  return hit ? hit.name : "未知文件夹";
+}
+function kbFolderPathText(key) {
+  if (key === "all") return "全部资料";
+  if (key === "root" || !key) return "库根";
+  const byId = new Map(kbState.folders.map(item => [item.id, item]));
+  const names = [];
+  let cursor = key;
+  let guard = 0;
+  while (cursor && byId.has(cursor) && guard < 40) {
+    const item = byId.get(cursor);
+    names.unshift(item.name);
+    cursor = item.parent_id;
+    guard += 1;
+  }
+  return names.join(" / ") || "库根";
+}
+function renderKbTree() {
+  if (!el.kbTreeList) return;
+  el.kbTreeList.innerHTML = "";
+  const addRow = (key, label, count, depth, options = {}) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "kb-tree-row" + (kbState.currentFolder === key ? " active" : "");
+    row.style.paddingLeft = `${6 + depth * 12}px`;
+    row.dataset.folderKey = key;
+    const chevron = options.hasChildren
+      ? `<span class="kb-tree-twisty" data-twisty="${escapeHtml(key)}">${kbState.expanded.has(key) ? "▾" : "▸"}</span>`
+      : '<span class="kb-tree-twisty kb-tree-twisty-empty"></span>';
+    row.innerHTML = `${chevron}<span class="kb-tree-name">${escapeHtml(label)}</span>`
+      + (count ? `<span class="kb-tree-count">${count}</span>` : "");
+    el.kbTreeList.append(row);
+    return row;
+  };
+  addRow("all", "全部资料", kbState.docsTotal || "", 0);
+  addRow("root", "库根", kbState.tree ? kbState.tree.documents : "", 0,
+         {hasChildren: Boolean(kbState.tree && (kbState.tree.children || []).length)});
+  const walk = nodes => {
+    if (!kbState.expanded.has("root")) return;
+    (nodes || []).forEach(node => {
+      if (!kbState.expanded.has(node.id)) return;
+      addRow(node.id, node.name, node.total, node.depth + 1,
+             {hasChildren: Boolean(node.children && node.children.length)});
+      walk(node.children);
+    });
+  };
+  if (kbState.tree) walk(kbState.tree.children);
+  if (!kbState.folders.length) {
+    const empty = document.createElement("div");
+    empty.className = "kb-tree-empty";
+    empty.textContent = "还没有文件夹。导入目录会自动建，或点右上角 ＋ 手动建。";
+    el.kbTreeList.append(empty);
+  }
+  const canEdit = kbState.currentFolder !== "all" && kbState.currentFolder !== "root";
+  if (el.kbFolderRename) el.kbFolderRename.disabled = !canEdit;
+  if (el.kbFolderDelete) el.kbFolderDelete.disabled = !canEdit;
+}
+async function selectKbFolder(key) {
+  kbState.currentFolder = key || "all";
+  renderKbTree();
+  await loadKb(false);
+}
+function toggleKbFolder(key) {
+  if (kbState.expanded.has(key)) kbState.expanded.delete(key);
+  else kbState.expanded.add(key);
+  renderKbTree();
+}
+async function kbCreateFolder() {
+  if (!kbState.panelLibrary) { showToast("请先选一个知识库"); return; }
+  const parent = (!kbState.currentFolder || kbState.currentFolder === "all" || kbState.currentFolder === "root")
+    ? "" : kbState.currentFolder;
+  const name = await showDialog({
+    title: parent ? `在「${kbFolderLabel(parent)}」下新建文件夹` : "在库根新建文件夹",
+    message: "文件夹只用来归档，不影响检索范围。",
+    input: "",
+    confirmText: "新建",
+  });
+  const label = String(name || "").trim();
+  if (!label) return;
+  try {
+    const data = await request("/kb/folders", {method: "POST", body: JSON.stringify({library_id: kbState.panelLibrary, name: label, parent_id: parent})});
+    kbState.expanded.add(data.folder.id);
+    if (parent) kbState.expanded.add(parent);
+    await loadFolders();
+    el.kbStatus.textContent = `已新建文件夹「${label}」`;
+  } catch (error) { showToast(error.message); }
+}
+async function kbRenameFolder() {
+  const folderId = kbState.currentFolder;
+  if (!folderId || folderId === "all" || folderId === "root") return;
+  const name = await showDialog({
+    title: "重命名文件夹",
+    message: "只改显示名，里面的资料不受影响。",
+    input: kbFolderLabel(folderId),
+    confirmText: "保存",
+  });
+  const label = String(name || "").trim();
+  if (!label) return;
+  try {
+    await request(`/kb/folders/${encodeURIComponent(folderId)}`, {method: "PATCH", body: JSON.stringify({name: label})});
+    await loadFolders();
+    await loadKb(false);
+  } catch (error) { showToast(error.message); }
+}
+async function kbDeleteFolder() {
+  const folderId = kbState.currentFolder;
+  if (!folderId || folderId === "all" || folderId === "root") return;
+  const node = kbState.folders.find(item => item.id === folderId);
+  const ok = await showDialog({
+    title: "删除文件夹",
+    message: `确定删除文件夹「${kbFolderLabel(folderId)}」？里面的 ${node ? node.total : 0} 份资料不会被删，会移到上一层。`,
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const data = await request(`/kb/folders/${encodeURIComponent(folderId)}`, {method: "DELETE"});
+    const moved = data.removed || {};
+    kbState.currentFolder = moved.parent_id || "root";
+    await loadFolders();
+    await loadKb(false);
+    el.kbStatus.textContent = `已删除文件夹「${moved.name || ""}」，${moved.moved_documents || 0} 份资料已移到上一层`;
+  } catch (error) { showToast(error.message); }
+}
+async function kbMoveDoc(docId, folderId) {
+  const doc = kbState.docs.find(item => item.doc_id === docId);
+  const docName = doc ? doc.name : "这份资料";
+  const targetLabel = kbFolderLabel(folderId || "root");
+  try {
+    await request(`/kb/documents/${encodeURIComponent(docId)}`, {method: "PATCH", body: JSON.stringify({folder_id: folderId})});
+    await loadFolders();
+    await loadKb(false);
+    // 必须给反馈：在「全部资料」视图下，归档后行不会消失，没提示就看起来像没生效
+    showToast(`已把《${docName}》归到「${targetLabel}」`);
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+// 把资料移到上一层的能力随 ↑ 按钮一起去掉了：拖到「库根」就是同一个效果，
+// 无需在行尾再挂一个只做 “上一层” 的按钮。
+function clearKbDropHints() {
+  document.querySelectorAll(".kb-drop-target").forEach(node => node.classList.remove("kb-drop-target"));
+}
+function markKbDropTarget(row) {
+  if (row.classList.contains("kb-drop-target")) return;
+  clearKbDropHints();
+  row.classList.add("kb-drop-target");
+}
+async function loadKb(showStatus) {
+  if (kbState.loading) return;
+  kbState.loading = true;
+  if (showStatus) el.kbStatus.textContent = "正在读取知识库…";
+  const lib = kbState.panelLibrary ? `library_id=${encodeURIComponent(kbState.panelLibrary)}` : "";
+  const folder = `folder=${encodeURIComponent(kbFolderParam())}`;
+  try {
+    const [status, docs] = await Promise.all([
+      request(`/kb/status${lib ? `?${lib}` : ""}`),
+      request(`/kb/documents?${[lib, folder].filter(Boolean).join("&")}`),
+    ]);
+    kbState.status = status;
+    kbState.docs = docs.documents || [];
+    kbState.docsTotal = Number(status.documents || 0);
+  } catch (error) {
+    kbState.status = {available: false, error: error.message};
+    kbState.docs = [];
+  } finally {
+    kbState.loading = false;
+    renderKb();
+    renderKbTree();
+  }
+}
+function renderKb() {
+  const status = kbState.status || {};
+  const ready = status.available !== false;
+  const scopeName = kbState.panelLibrary ? `「${kbLibraryName(kbState.panelLibrary)}」` : "";
+  if (el.kbStatus) {
+    el.kbStatus.textContent = ready
+      ? (status.fts ? `索引正常${scopeName} · ${status.documents} 份文档 / ${status.chunks} 块 / ${status.params} 条参数`
+                    : `索引可用，但当前 SQLite 不支持 FTS5，已降级为逐行匹配（会慢很多）`)
+      : `知识库不可用：${status.error || "未知原因"}`;
+  }
+  if (el.kbDocTitle) {
+    const label = escapeHtml(kbFolderPathText(kbState.currentFolder));
+    el.kbDocTitle.innerHTML = `${label} <small id="kb-doc-count">${kbState.docs.length}</small>`;
+  } else if (el.kbDocCount) {
+    el.kbDocCount.textContent = String(kbState.docs.length);
+  }
+  if (el.kbCards) {
+    el.kbCards.innerHTML = "";
+    if (ready) {
+      const cards = [
+        ["文档", String(status.documents || 0), "份"],
+        ["分块", String(status.chunks || 0), "个检索单元"],
+        ["参数", String(status.params || 0), "条结构化记录"],
+        ["索引体积", formatSize(status.db_bytes), status.fts ? "FTS5 词法索引" : "降级模式"],
+      ];
+      // 体量是全库的（所有库共一个 db 文件），按库看时不要重复同一个数字
+      if (kbState.panelLibrary) cards[3][2] = "各库共用一个文件";
+      if (status.failed) cards.push(["失败", String(status.failed), "份待处理"]);
+      cards.forEach(([label, value, note]) => {
+        const card = document.createElement("div");
+        card.className = "kb-card" + (label === "失败" ? " kb-card-warn" : "");
+        card.innerHTML = `<span class="kb-card-label">${escapeHtml(label)}</span><strong class="kb-card-value">${escapeHtml(value)}</strong><span class="kb-card-note">${escapeHtml(note)}</span>`;
+        el.kbCards.append(card);
+      });
+    }
+  }
+  renderKbDocs();
+}
+function renderKbDocs() {
+  if (!el.kbDocs) return;
+  el.kbDocs.innerHTML = "";
+  if (!kbState.docs.length) {
+    el.kbDocs.innerHTML = `<div class="listbox-empty">「${escapeHtml(kbFolderPathText(kbState.currentFolder))}」里还没有资料。点「添加文件」，或导入一个目录。</div>`;
+    return;
+  }
+  kbState.docs.forEach(doc => {
+    const row = document.createElement("div");
+    const failed = doc.status !== "ok";
+    row.className = "kb-doc" + (failed ? " kb-doc-failed" : "");
+    row.draggable = !failed;
+    row.dataset.docId = doc.doc_id;
+    row.title = failed ? "" : "拖到左侧文件夹即可归档";
+    const meta = failed
+      ? `导入失败：${escapeHtml(doc.error || "未知原因")}`
+      : `${doc.pages} 页 · ${doc.chunks} 块 · ${doc.params} 条参数 · ${formatSize(doc.size)} · ${escapeHtml(doc.indexed_at || "")}`;
+    row.innerHTML = `<span class="kb-doc-grip" aria-hidden="true">≡</span>`
+      + `<div class="kb-doc-main"><strong title="${escapeHtml(doc.path || "")}">${escapeHtml(doc.name)}</strong>`
+      + `<span class="kb-doc-meta">${meta}</span></div>`
+      + `<div class="kb-doc-ops">`
+      + `<button class="kb-op" type="button" data-kb-reindex="${escapeHtml(doc.doc_id)}">重建</button>`
+      + `<button class="kb-op kb-op-danger" type="button" data-kb-delete="${escapeHtml(doc.doc_id)}">删除</button></div>`;
+    el.kbDocs.append(row);
+  });
+}
+// 大文件用 XHR：fetch 没有上传进度，也无法在旧内核里稳定发裸字节
+function kbUploadOne(file, libraryId, folderId) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const scope = libraryId ? `&library_id=${encodeURIComponent(libraryId)}` : "";
+    const folder = folderId ? `&folder_id=${encodeURIComponent(folderId)}` : "";
+    xhr.open("POST", "/kb/upload?name=" + encodeURIComponent(file.name) + scope + folder, true);
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        try { resolve(JSON.parse(xhr.responseText)); } catch (_) { reject(new Error("响应解析失败")); }
+        return;
+      }
+      let message = `导入失败 (${xhr.status})`;
+      try { const data = JSON.parse(xhr.responseText); if (data && (data.error || data.detail)) message = data.error || data.detail; } catch (_) {}
+      reject(new Error(message));
+    };
+    xhr.onerror = () => reject(new Error("导入失败：网络错误"));
+    xhr.send(file);
+  });
+}
+async function kbAddFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length || kbState.busy) return;
+  if (!kbState.panelLibrary) { showToast("请先在设置页新建或选一个知识库"); return; }
+  kbState.busy = true;
+  if (el.kbPick) el.kbPick.disabled = true;
+  const failures = [];
+  try {
+    for (let index = 0; index < list.length; index += 1) {
+      el.kbStatus.textContent = `正在索引进「${kbFolderPathText(kbTargetFolder() || "root")}」${index + 1}/${list.length}：${list[index].name}…`;
+      try { await kbUploadOne(list[index], kbState.panelLibrary, kbTargetFolder()); }
+      catch (error) { failures.push(`${list[index].name}：${error.message}`); }
+    }
+  } finally {
+    kbState.busy = false;
+    if (el.kbPick) el.kbPick.disabled = false;
+    if (el.kbFileInput) el.kbFileInput.value = "";
+    await loadKbLibraries();
+    await loadKb(false);
+    if (failures.length) showToast(`有 ${failures.length} 份未导入：${failures[0]}`);
+  }
+}
+async function kbImportDir() {
+  const path = (el.kbDir.value || "").trim();
+  if (!path) { el.kbStatus.textContent = "请先填一个本机目录路径"; return; }
+  if (kbState.busy) return;
+  if (!kbState.panelLibrary) { showToast("请先在设置页新建或选一个知识库"); return; }
+  kbState.busy = true; if (el.kbImportDir) el.kbImportDir.disabled = true;
+  el.kbStatus.textContent = `正在扫描并索引进「${kbFolderPathText(kbTargetFolder() || "root")}」…（文件多时请等一会儿）`;
+  try {
+    const data = await request("/kb/import", {method: "POST", body: JSON.stringify({paths: [path], recursive: true, library_id: kbState.panelLibrary, folder_id: kbTargetFolder(), mirror_tree: true})});
+    const ok = (data.indexed || []).length, bad = (data.failed || []).length;
+    const skipped = data.skipped_count || 0;
+    el.kbDir.value = "";
+    await loadFolders();
+    await loadKb(false);
+    el.kbStatus.textContent = `导入完成：成功 ${ok} 份${bad ? `，失败 ${bad} 份` : ""}${skipped ? `，跳过 ${skipped} 个不支持的文件` : ""}`;
+    if (!ok && data.missing && data.missing.length) el.kbStatus.textContent = `路径不存在：${data.missing[0]}`;
+  } catch (error) {
+    el.kbStatus.textContent = `导入失败：${error.message}`;
+  } finally {
+    kbState.busy = false; if (el.kbImportDir) el.kbImportDir.disabled = false;
+  }
+}
+async function kbDeleteDoc(docId, name) {
+  const ok = await showDialog({title: "从知识库移除", message: `确定把《${name}》从知识库移除？只删索引与内部副本，不动你本地的原文件。`, confirmText: "移除", danger: true});
+  if (!ok) return;
+  try { await request(`/kb/documents/${docId}`, {method: "DELETE"}); await loadKb(false); }
+  catch (error) { showToast(error.message); }
+}
+async function kbReindexDoc(docId) {
+  if (kbState.busy) return;
+  kbState.busy = true;
+  el.kbStatus.textContent = "正在重建索引…";
+  try { await request(`/kb/documents/${docId}/reindex`, {method: "POST"}); }
+  catch (error) { showToast(error.message); }
+  finally { kbState.busy = false; await loadKb(false); }
+}
+async function kbRunSearch() {
+  const query = (el.kbQuery.value || "").trim();
+  if (!query) { el.kbSearchResult.innerHTML = '<div class="listbox-empty">先输一个检索词。</div>'; return; }
+  el.kbSearchResult.innerHTML = '<div class="listbox-empty">检索中…</div>';
+  el.kbSearchBtn.disabled = true;
+  try {
+    const scope = kbState.panelLibrary ? `&library_id=${encodeURIComponent(kbState.panelLibrary)}` : "";
+    const data = await request(`/kb/search?q=${encodeURIComponent(query)}&top_k=6${scope}`);
+    renderKbSearch(data);
+  } catch (error) {
+    el.kbSearchResult.innerHTML = `<div class="listbox-empty">检索失败：${escapeHtml(error.message)}</div>`;
+  } finally { el.kbSearchBtn.disabled = false; }
+}
+function renderKbSearch(data) {
+  const params = data.params || [], hits = data.hits || [];
+  if (!params.length && !hits.length) {
+    el.kbSearchResult.innerHTML = `<div class="listbox-empty">「${escapeHtml(kbLibraryName(kbState.panelLibrary))}」没有命中。可能这条内容没收录，或换个手册里的说法再试。</div>`;
+    return;
+  }
+  const parts = [];
+  if (params.length) {
+    parts.push('<div class="kb-result-head">参数命中</div>');
+    parts.push(params.map(row => {
+      const range = (row.min != null || row.max != null)
+        ? ` <em>范围 ${row.min == null ? "" : row.min}~${row.max == null ? "" : row.max}</em>` : "";
+      const dflt = row.default ? ` <em>默认 ${escapeHtml(row.default)}</em>` : "";
+      return `<div class="kb-result-card"><div class="kb-result-title">${escapeHtml(row.name)}<span class="kb-result-tag">${escapeHtml(row.domain || "general")}</span>${dflt}${range}</div>`
+        + `<p>${escapeHtml(row.description || "")}</p>`
+        + `<span class="kb-result-src">${escapeHtml(row.doc || "")} · ${escapeHtml(row.heading_path || "")} · P${escapeHtml(row.page == null ? "?" : row.page)}</span></div>`;
+    }).join(""));
+  }
+  if (hits.length) {
+    parts.push('<div class="kb-result-head">文本命中</div>');
+    parts.push(hits.map((hit, index) => `<div class="kb-result-card"><div class="kb-result-title">#${index + 1}<span class="kb-result-score">${Number(hit.score).toFixed(2)}</span>${escapeHtml(hit.doc)}</div>`
+      + `<p>${escapeHtml(hit.snippet || "")}</p>`
+      + `<span class="kb-result-src">${escapeHtml((hit.heading_path || "").replace(/ \/ /g, " > "))} · P${escapeHtml(hit.page)} · chunk ${escapeHtml(hit.chunk_id)}</span></div>`).join(""));
+  }
+  el.kbSearchResult.innerHTML = parts.join("");
+}
+// --- 知识库的新建 / 重命名 / 删除 / 切换 ---
+async function kbCreateLibrary() {
+  const name = await showDialog({
+    title: "新建知识库",
+    message: "给它起个能看出用途的名字，例如「GridStar 手册」「导弹网格规范」。",
+    input: "",
+    confirmText: "新建",
+  });
+  if (name == null) return;
+  const label = String(name).trim();
+  if (!label) return;
+  try {
+    const data = await request("/kb/libraries", {method: "POST", body: JSON.stringify({name: label})});
+    kbState.libraries = data.libraries || [];
+    kbState.panelLibrary = (data.library && data.library.id) || "";
+    kbState.currentFolder = "all";
+    renderKbLibrarySelect();
+    renderKbListbox();
+    await loadFolders();
+    await loadKb(false);
+    el.kbStatus.textContent = `已新建知识库「${label}」，现在可以往里加文件了`;
+  } catch (error) { showToast(error.message); }
+}
+async function kbRenameLibrary() {
+  const current = kbState.panelLibrary;
+  if (!current) return;
+  const name = await showDialog({
+    title: "重命名知识库",
+    message: "只改显示名，已建的索引与文件不受影响。",
+    input: kbLibraryName(current),
+    confirmText: "保存",
+  });
+  if (name == null) return;
+  const label = String(name).trim();
+  if (!label) return;
+  try {
+    const data = await request(`/kb/libraries/${encodeURIComponent(current)}`, {method: "PATCH", body: JSON.stringify({name: label})});
+    kbState.libraries = data.libraries || [];
+    renderKbLibrarySelect();
+    renderKbListbox();
+    if (el.kbLabel) el.kbLabel.textContent = kbLibraryName(kbState.selected);
+    await loadKb(false);
+  } catch (error) { showToast(error.message); }
+}
+async function kbDeleteLibrary() {
+  const current = kbState.panelLibrary;
+  if (!current) return;
+  const lib = kbState.libraries.find(item => item.id === current);
+  const ok = await showDialog({
+    title: "删除知识库",
+    message: `确定删除知识库「${kbLibraryName(current)}」？库里的 ${lib ? lib.documents : 0} 份资料的索引会一起删掉，本机原文件不动。`,
+    confirmText: "删除",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const data = await request(`/kb/libraries/${encodeURIComponent(current)}`, {method: "DELETE"});
+    kbState.libraries = data.libraries || [];
+    kbState.panelLibrary = "";
+    kbState.currentFolder = "all";
+    renderKbLibrarySelect();
+    await loadKbLibraries();
+    await loadFolders();
+    await loadKb(false);
+  } catch (error) { showToast(error.message); }
+}
+async function kbSwitchPanelLibrary(libraryId) {
+  kbState.panelLibrary = libraryId;
+  // 换库就把归档位置收回「全部资料」，否则会试显示一个不属于这个库的文件夹
+  kbState.currentFolder = "all";
+  kbState.expanded.clear();
+  // 下拉框同步：否则面板已经切到新库，顶部还显示旧库名
+  if (el.kbLibSelect && el.kbLibSelect.value !== libraryId) el.kbLibSelect.value = libraryId;
+  await loadFolders();
+  await loadKb(true);
+}
+function switchSettingsTab(tab) { state.settings.activeTab = tab; document.querySelectorAll("[data-settings-tab]").forEach(button => { const active = button.dataset.settingsTab === tab; button.setAttribute("aria-selected",String(active)); $(`#panel-${button.dataset.settingsTab}`).classList.toggle("hidden",!active); }); el.saveSettings.classList.toggle("hidden",tab !== "models"); closeUsagePopovers(); if (tab === "mcp" && !state.mcp.loaded) loadMcpTools(); if (tab === "skills") renderSkills(); if (tab === "usage") usageEnterTab(); if (tab === "memory") memoryEnterTab(); else memoryStopPolling(); if (tab === "kb") kbEnterTab(); }
 function schemaParams(schema) {
   // 从 JSON Schema 提取入参摘要，用于工具列表展示每个工具的参数
   const props = (schema && schema.properties) || {}, required = new Set((schema && schema.required) || []);
@@ -2506,7 +3093,7 @@ async function loadSkills() {
   } catch (error) { state.skillsError = error.message; }
   finally { state.skillsLoading = false; if (el.refreshSkills) el.refreshSkills.disabled = false; renderSkills(); }
 }
-async function openSettings() { try { const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; state.settings.capsTouched = null; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); loadModelMetadata(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
+async function openSettings() { try { closeKbList(); const data = await request("/config"); const config = data.config || {version:1,default_model:"",providers:[],models:[]}; state.settings.original = clone(config); state.settings.draft = clone(config); if (!state.settings.draft.providers) state.settings.draft.providers = []; if (!state.settings.draft.models) state.settings.draft.models = []; if (!state.settings.draft.default_model) state.settings.draft.default_model = ""; state.settings.revision = data.revision || config.revision || null; delete state.settings.draft.revision; const firstProvider = state.settings.draft.providers[0]; state.settings.activeProviderId = firstProvider ? firstProvider.id : null; state.settings.open = true; state.settings.dirty = false; state.settings.discoveredModels = {}; state.settings.capsTouched = null; el.settingsStatus.textContent = ""; el.settingsModal.classList.remove("hidden"); switchSettingsTab("models"); renderSettings(); loadModelMetadata(); el.closeSettings.focus(); } catch (error) { showToast(error.message); } }
 function closeSettings(force = false) { if (!state.settings.open) return; if (!force && state.settings.dirty) { showDialog({title:"放弃未保存的设置", message:"模型设置尚未保存，确定要关闭吗？", confirmText:"放弃更改", danger:true}).then(ok => { if (ok) closeSettings(true); }); return; } Object.values(state.settings.controllers).forEach(controller => controller.abort()); state.settings.open = false; state.settings.original = state.settings.draft = null; state.settings.discoveredModels = {}; memoryStopPolling(); el.settingsModal.classList.add("hidden"); el.openSettings.focus(); }
 function providerPayload(provider) { return {provider:{...provider,headers:provider.headers || {},discover_models:provider.discover_models !== false}}; }
 async function testProvider() { const provider = draftProvider(), id = provider.id, controller = createAbortController(); if (state.settings.controllers.test) state.settings.controllers.test.abort(); state.settings.controllers.test = controller; state.settings.testingProviderId = id; renderProviderEditor(); try { const data = await request("/config/providers/test",{method:"POST",signal:controller.signal,body:JSON.stringify(providerPayload(provider))}); if (state.settings.activeProviderId === id) el.settingsStatus.textContent = data.message || `连接成功 · ${data.latency_ms || 0}ms`; } catch(error) { if (error.name !== "AbortError" && state.settings.activeProviderId === id) el.settingsStatus.textContent = error.message; } finally { if (state.settings.testingProviderId === id) { state.settings.testingProviderId = null; renderProviderEditor(); } } }
@@ -3896,8 +4483,16 @@ el.categoryTrigger.onkeydown = handleCategoryKeys;
 bindHoverDropdown(el.modelTrigger.closest(".model-control"), openModelList, closeModelList);
 bindHoverDropdown(el.modeTrigger.closest(".mode-control"), openModeList, closeModeList);
 bindHoverDropdown(el.categoryTrigger.closest(".model-control"), openCategoryList, closeCategoryList);
+if (el.kbTrigger) bindHoverDropdown(el.kbTrigger.closest(".model-control"), openKbList, closeKbList);
 selectMode(state.mode);
 selectCategory("");
+// 知识库选择基于浏览器本地记忆恢复，再拉一次库列表把标签和条目刷对
+(function initKbSelector() {
+  let stored = null;
+  try { stored = window.localStorage.getItem(KB_STORAGE_KEY); } catch (_) {}
+  selectKbLibrary(stored == null ? KB_USE_ALL : stored, {silent: true});
+  loadKbLibraries();
+})();
 renderSkillChip();
 // 分类选项点击
 el.categoryListbox.addEventListener("click", event => {
@@ -3909,6 +4504,99 @@ document.querySelectorAll("[data-settings-tab]").forEach(button => button.onclic
 if (el.refreshMcp) el.refreshMcp.onclick = () => loadMcpTools(true);
 if (el.refreshSkills) el.refreshSkills.onclick = () => loadSkills();
 bindUsagePanel();
+// 知识库：设置页的库管理与输入框下方的选择器。元素首次切页前就存在，直接绑一次即可。
+if (el.kbPick) el.kbPick.onclick = () => el.kbFileInput.click();
+if (el.kbFileInput) el.kbFileInput.onchange = () => kbAddFiles(el.kbFileInput.files);
+if (el.kbImportDir) el.kbImportDir.onclick = kbImportDir;
+if (el.kbDir) el.kbDir.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); kbImportDir(); } };
+if (el.kbRefresh) el.kbRefresh.onclick = () => kbOpenPanel();
+if (el.kbLibNew) el.kbLibNew.onclick = kbCreateLibrary;
+if (el.kbLibRename) el.kbLibRename.onclick = kbRenameLibrary;
+if (el.kbLibDelete) el.kbLibDelete.onclick = kbDeleteLibrary;
+if (el.kbLibSelect) el.kbLibSelect.onchange = () => kbSwitchPanelLibrary(el.kbLibSelect.value);
+if (el.kbTreeList) el.kbTreeList.addEventListener("click", event => {
+  const twisty = event.target.closest("[data-twisty]");
+  if (twisty) { event.stopPropagation(); toggleKbFolder(twisty.dataset.twisty); return; }
+  const row = event.target.closest("[data-folder-key]");
+  if (row) selectKbFolder(row.dataset.folderKey);
+});
+// 拖拽归档：只在拖着「库里的某份资料」时才拦事件，避免抢走文件拖进窗口的默认行为
+const kbDropRow = event => {
+  const row = event.target.closest("[data-folder-key]");
+  if (!row) return null;
+  // 「全部资料」不是真实文件夹，不能当落点
+  if (row.dataset.folderKey === "all") return null;
+  return row;
+};
+if (el.kbTreeList) {
+  el.kbTreeList.addEventListener("dragover", event => {
+    if (!kbState.draggingDoc) return;
+    const row = kbDropRow(event);
+    if (!row) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    markKbDropTarget(row);
+  });
+  el.kbTreeList.addEventListener("dragleave", event => {
+    const row = kbDropRow(event);
+    if (!row) return;
+    // 在行内部子元素之间移动也会触发 dragleave，靠 relatedTarget 过滤
+    if (row.contains(event.relatedTarget)) return;
+    row.classList.remove("kb-drop-target");
+  });
+  el.kbTreeList.addEventListener("drop", event => {
+    const row = kbDropRow(event);
+    if (!row) return;
+    event.preventDefault();
+    const docId = (event.dataTransfer && event.dataTransfer.getData("text/plain")) || kbState.draggingDoc;
+    // drop 之后立即清状态：dragend 在源元素上异步触发，不清的话拖拽期间的状态
+    // 会残留，下一次把文件拖进窗口时会被这个处理函数误拦
+    kbState.draggingDoc = "";
+    document.querySelectorAll(".kb-doc-dragging").forEach(node => node.classList.remove("kb-doc-dragging"));
+    clearKbDropHints();
+    if (!docId) return;
+    const folderId = row.dataset.folderKey === "root" ? "" : row.dataset.folderKey;
+    const doc = kbState.docs.find(item => item.doc_id === docId);
+    if (doc && (doc.folder_id || "") === folderId) {
+      showToast("这份资料已经在这个位置");
+      return;
+    }
+    kbMoveDoc(docId, folderId);
+  });
+}
+if (el.kbFolderNew) el.kbFolderNew.onclick = kbCreateFolder;
+if (el.kbFolderRename) el.kbFolderRename.onclick = kbRenameFolder;
+if (el.kbFolderDelete) el.kbFolderDelete.onclick = kbDeleteFolder;
+if (el.kbTrigger) el.kbTrigger.onclick = () => (kbState.listOpen ? closeKbList() : openKbList());
+if (el.kbSearchBtn) el.kbSearchBtn.onclick = kbRunSearch;
+if (el.kbQuery) el.kbQuery.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); kbRunSearch(); } };
+if (el.kbDocs) {
+  el.kbDocs.addEventListener("dragstart", event => {
+    const row = event.target.closest("[data-doc-id]");
+    if (!row || row.draggable === false) return;
+    kbState.draggingDoc = row.dataset.docId;
+    row.classList.add("kb-doc-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      try { event.dataTransfer.setData("text/plain", row.dataset.docId); } catch (_) {}
+    }
+  });
+  el.kbDocs.addEventListener("dragend", event => {
+    const row = event.target.closest("[data-doc-id]");
+    if (row) row.classList.remove("kb-doc-dragging");
+    kbState.draggingDoc = "";
+    clearKbDropHints();
+  });
+  el.kbDocs.addEventListener("click", event => {
+    const reindex = event.target.closest("[data-kb-reindex]");
+    if (reindex) { kbReindexDoc(reindex.dataset.kbReindex); return; }
+    const remove = event.target.closest("[data-kb-delete]");
+    if (remove) {
+      const doc = kbState.docs.find(item => item.doc_id === remove.dataset.kbDelete);
+      kbDeleteDoc(remove.dataset.kbDelete, doc ? doc.name : "这份文档");
+    }
+  });
+}
 // 图表按像素宽度绘制，窗口尺寸变化后需要重画；用量页不可见时跳过
 let usageResizeTimer = null;
 window.addEventListener("resize", () => {
