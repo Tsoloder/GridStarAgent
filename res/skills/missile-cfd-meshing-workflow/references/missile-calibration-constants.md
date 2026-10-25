@@ -22,10 +22,10 @@
 |---|---|---|
 | 翼梢弦长 C_tip(N) | ≈0（无梢部弦长）→ **禁止 0 代入**，梢部端间距钳制到**该对** C_root(N) 计算值（见 §2.2.2） | 按接口返回值正常使用，**不钳制** |
 | 翼拐角数 | **4**（① 翼前缘 ② 翼梢 ③ 翼后缘 ④ 弹体结合处）。三角翼的 ② 翼梢是前/后缘汇聚的**尖点**，仍算一处拐角，不作减项 | 同左：**4**（② 为真实 `wingTipN` 梢部端面） |
-| 翼拐角加密尺寸 | `0.005 × 当地弦长`（**不是整对共用一个 C_root**；C_root(N) 仅在整块子面无法按展向分段时作为代用值） | 同左，按该段当地弦长（含 C_tip(N)） |
+| 翼拐角加密尺寸 | 🔴 **各向异性首层/端间距 = `0.1 × 该对翼厚度`**（`wings[N−1].thickness`，**不是当地弦长**）；中间值 = `0.02 × 该对根弦长` | 同左（厚度基准与翼型无关，**加不加密看的是厚度不是弦长**） |
 | 后缘面 `wingTrailingEdgeN` | 与梯形翼**同款**：一律做各向异性（`generateType=2`，增长率 1）。🔴 **无独立后缘处理阶段、无翼型分支** | 同左 |
 | 梢部端定位 | 以 `wingSideSurfaceN` 自由梢端为相邻对象 | 以 `wingTipN` 面为相邻对象 |
-| 展向分布（前缘线两端） | 两端均为根部/自由梢端，共点端取 0.008×C_root(N) | 同左，但梢部端用 C_tip(N) |
+| 展向分布（前缘线两端） | 两端均为根部/自由梢端，共点端取 `0.1×厚度` | 同左（**共点端间距同样用厚度基准，不受翼型影响**） |
 
 ## §2 🔴 尺寸取值（`GetMissileDimensions` 接口返回即权威，单位 mm）
 
@@ -47,19 +47,20 @@
 | 表面网格有效弹径 | `body_diameter_surface` | 🔴 **表面网格专用**（球头公式**除外**）。规则见 §2.2.1 |
 | 弹尾口径 | `body_diameter_tail` | 失配判据来源；弹尾相关尺寸 |
 | 球头半径 R | `nose_radius` | 球头尺寸 `min(0.01×D, 0.25×R)`；`>0` = 球头，`==0` = 尖头（M3） |
-| 全弹长 | `fuselage_length` | 弓形外场大小（1.2×） |
-| 🔴 **弹翼（按对）** | **`wings[]`** | **数组，下标 = 对数−1**；每项 `root_chord` / `tip_chord` / `half_span`。见 §2.1 |
-| ⌐ 翼根弦长 C_root(N) | `wings[N−1].root_chord` | 第 N 对弹翼尺寸基准（`0.02×`）/ 各向异性当地弦长基准 |
+| 全弹长 | `fuselage_length` | 弓形外场长度（`1.5×`）与另外 3 位（`1.2×`）的基准 |
+| 🔴 **弹翼（按对）** | **`wings[]`** | **数组，下标 = 对数−1**；每项 `root_chord` / `tip_chord` / `half_span` / **`thickness`**。见 §2.1 |
+| ⌐ 翼根弦长 C_root(N) | `wings[N−1].root_chord` | 表面网格尺寸基准（`0.02×`）/ 各向异性**中间值**基准 |
 | ⌐ 翼梢弦长 C_tip(N) | `wings[N−1].tip_chord` | 🔴 **按翼型分叉**（M2 / §2.2.2） |
+| ⌐ 🔴 **翼厚度 T(N)** | `wings[N−1].thickness` | **各向异性首层高度/端间距基准**（`0.1×`，2026-10-22 起）；= 该对翼根部**尾缘带沿厚度方向的跨度** |
 | ⌐ 半翼展 b/2(N) | `wings[N−1].half_span` | 第 N 对展向分布插值跨度（🔴 仅报告，后端不参与尺寸计算） |
-| ⌐ 第 1 对便捷标量键 | `wing_root_chord` / `wing_tip_chord` / `wing_half_span` | = `wings[0]`，同源；多对翼一律走 `wings` 数组 |
+| ⌐ 第 1 对便捷标量键 | `wing_root_chord` / **`wing_thickness`** | = `wings[0]`，同源；多对翼一律走 `wings` 数组。🔴 旧标量键 `wing_tip_chord` / `wing_half_span` **已不再产出**（`tip_chord`/`half_span` 只在 `wings[]` 内） |
 
 #### 2.1 🔴 多对弹翼：`wings` 数组（2026-10-16 新增）
 
 > 🔴 **2026-10-17 更新**：`wings` 数组由分割实算写入——长度 = **分割识别出的翼对数**（按 `wing*N` 组名的 N 推出），**与模型实际对数一致**，不再是"手填几对就是几对"。
 
 - **模型实际对数由分组探测**（`wingSideSurface1` ~ `wingSideSurface3`，见 `missile-segmentation.md`），`wings` 数组长度应与之一致。
-- **取不到的对回退到第 1 对**（后端 `GetWingPairDims`）—— 用作兜底，正常情况下不会命中。
+- **取不到的对回退到第 1 对**（后端对缺项补位）—— 用作兜底，正常情况下不会命中。
 - 🔴 **表面网格与各向异性都必须按对取值**，不得用某一对的 C_root/C_tip 代跑其他对（各对弦长可差 5 倍以上）。翼性子面组名末位数字即 N（`wingSideSurface2` → `wings[1]`）。
 - 🔴 **`half_span` 仅报告字段**：后端不参与任何尺寸计算（`CalcWingPairDimensions` 只读 root/tip 算 MAC），可留 0。
 
@@ -76,23 +77,24 @@
 
 #### 2.2.2 🔴 C_tip 按翼型分叉（原 #4 规则保留，无条件生效）
 
-- **三角翼**（无 `wingTipN`，M2）：C_tip ≈ 0 属正常，**禁止把 0 代入公式**；凡 `0.005×当地弦长` / `0.02×当地弦长` 的"梢部端"间距一律**钳制到该对 C_root 计算值**（`0.005×C_root(N)` / `0.02×C_root(N)`，按 `wings[N−1].root_chord` 现算）。
+- **三角翼**（无 `wingTipN`，M2）：C_tip ≈ 0 属正常，**禁止把 0 代入公式**；凡 `0.02×当地弦长` 的"梢部端"**中间值**一律**钳制到该对 C_root 计算值**（`0.02×C_root(N)`，按 `wings[N−1].root_chord` 现算）。🔴 **各向异性的首层高度/端间距不再涉及弦长**——一律 `0.1×该对厚度`，与翼型无关。
 - **梯形翼**（有 `wingTipN`）：按 `wings[N−1].tip_chord` 正常使用，**不钳制**。
 - 🔴 该规则**无条件生效**，即使接口 C_tip 返回 0 也不得回退到 0 代入。
 - 🔴 **按对生效**：钳制目标是**该对**的 C_root，不得用第 1 对的 C_root 替其他对钳制。
 
-> 🔴 **一站式结果核验**：`step1_dimensions` 的 `body_diameter`、`pairs[].root_chord` / `local_chord` / `half_span` **必须全 > 0**，`body_diameter_surface` 与 §2.2.1 自洽（球头公式仍用原始 D）。详见 `missile-anisotropic-mesh.md` §「一站式结果核验」。
+> 🔴 **一站式返回后不做核验**：`MissileWingAnisoProcessWingAnisotropy()` 返回 `status="success"` 即为该阶段结束，**直接进入下一阶段**——不读 `step1_dimensions` / `step2_classify` / `step3_distribution` / `step4_aniso_line_groups` / `step5_aniso_domains` 做尺寸正值、`body_diameter_surface` 自洽性、各对 `root_chord`/`thickness`、窄面增长率的任何比对。§2.2.1 / §2.2.2 的规则供**表面网格阶段**取口径，以及 `status="failed"` 后的**分步回退**取值使用。详见 `missile-anisotropic-mesh.md` §「判定与路由」。
 >
-> ✅ **一站式工具现状**：`MissileAnisoProcessMissileAnisotropy()`（无参数）。🔴 **弹翼尺寸按对直读尺寸缓存**（`GetWingPairDims`，2026-10-16 起**不再经 `SPIDER::Data` 中转**；该缓存 2026-10-17 起由分割实算写入）；弹体尺寸（D / 尾口径 / R / 全弹长）仍读 `GetMissileDimensions` 写回 `SPIDER::Data` 的值。🔴 **若 `ClassifyMissile` 未跑过或 `GetMissileDimensions` 从未调用过，该工具会直接返 `failed`**（弹体尺寸守卫）→ 按「分步回退」处理。反向要求：**各向异性阶段之前必须先完成分割并调用 `GetMissileDimensions`**。
+> ✅ **一站式工具现状（2026-10-22 替换）**：`MissileWingAnisoProcessWingAnisotropy()`（无参数，后端 `MissileWingAnisotropicProcessor`）。🔴 **弹翼尺寸（根弦长 / 厚度）按对读 `SPIDER::Data` 的数组**（`m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`，由 `GetMissileDimensions` 接口写回）——旧文档所述「直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转」（`GetWingPairDims`）**已作废**；弹体尺寸（D / 尾口径 / R / 全弹长）读 `SPIDER::Data`，来源相同。🔴 **未调 `GetMissileDimensions` → 按对数组为空 → 该工具直接返 `failed`**。反向要求：**各向异性阶段之前必须先完成分割并调用 `GetMissileDimensions`**。
+> ⚠️ **旧一站式 `MissileAnisoProcessMissileAnisotropy`（`MissileAnisotropicProcessor`）已随本次替换弃用**，含其第 7 步弹尾加密；**新工具不含弹尾加密**，弹尾由后续独立工具处理。
 
 ## §3 编码与补偿（实机实测，覆盖工具 Schema 注释）
 
 | # | 项 | 值 | 实测依据 | 恢复接口方式 |
 |---|-----|-----|---------|-------------|
 | 3 | 外场创建工具 | **不用 `CreateMissileFarField`**，统一 `UGBlockCreate`（`chooseParam` 第 3 位=3 弓形即产出外场面） | 两轮实测恒 `true` 但 `GetDomainsByType(3)` 仍空（外场未实建） | 后端补实现后恢复：先调用→校验外场非空→空则回退 |
-| 4 | 弓形外场大小 / 头部距离 | **1.2 × 弹体长度**；头部距离 **0.2 × 弹径 D** | 用户改定 2026-10-13（前值：2× 弹体长度 / 1.5× 弹径 D，2026-10-12） | 需求变更时改 |
+| 4 | 弓形外场 `geoParam` / 头部距离 | 🔴 **外场长度 = `1.5 × 弹体长度`，另外 3 位 = `1.2 × 弹体长度`**（2026-10-23 用户裁定，**固定套用**）；头部距离 **0.2 × 弹径 D** | 2026-10-23 改定（原「2 × 弹体长度」已作废） | 换弹体时按新弹体长度重算，倍数不变 |
 | 5 | `chooseParam` 编码 | 第 2 位恒 `0`（外场）、第 3 位恒 `3`（弓形）；**第 1 位 = 头部方向位**，映射 **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向 0 / 负向 1；X=0、Y=1、Z=2）。按 `nose` 分组相对弹体中心的指向取值。锥顶置于 `centerCoor + 头部方向 × S/2` | 2026-10-14 依后端 `CreatEllipse()` 源码定（映射确定，非试错） | 换弹头朝向不同的弹体时按弹头指向重取，不照抄数字 |
-| 6 | centerCoor 居中 | 🔴 **直接用 `GetCreateBlockDefaultParam()` 返回的 `centerCoor`**——后端按**模型包围盒中心**算好，且已排除远场面（源码 `MergeDomainGrid` 跳过 `OUTFILED`）。弓形**严格以 `centerCoor` 居中**（X 跨 `±S/2`，Y/Z 对称），**无固有偏移、无需补偿、无需试探生成** | 2026-10-14 依后端源码（`CreatEllipse` 的 `beforePts/afterPts` 变换 + `Ellipse` 局部系对称）定 | 自算包围盒时**必须排除外场面**；旧补偿公式 `(S/6,−S/3,0)` 是在补"误含外场线"的错，已作废 |
+| 6 | centerCoor 居中 | 🔴 **直接用 `GetCreateBlockDefaultParam()` 返回的 `centerCoor`**——后端按**模型包围盒中心**算好，且已排除远场面（源码 `MergeDomainGrid` 跳过 `OUTFILED`）。弓形**严格以 `centerCoor` 居中**（X 跨 `±S/2`，Y/Z 对称），**无固有偏移、无需补偿、无需试探生成** | 2026-10-14 依后端源码（`CreatEllipse` 的 `beforePts/afterPts` 变换 + `Ellipse` 局部系对称）定 | 自算包围盒时**必须排除外场面**;|
 | 7 | 空间网格 ids（`UGUGSp`） | 🔴 **先剔幽灵体块**再拼接（见「§4 幽灵块」） | 2026-10-09 审计修正 | 后端块 ID 回收修复后改回 |
 
 ## §4 幽灵块（已删除对象残留 ID）

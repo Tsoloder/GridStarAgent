@@ -22,7 +22,9 @@ allowed-tools: []
 > 🔴 **`GetMissileDimensions` 是 MCP 工具**（注册在 `missile` 工具分组，调用前先 `enable_tool_group("missile")`）——尺寸**唯一权威来源**。历史文档曾写"不是 MCP 工具、不可调用"，**该说法已作废**。
 > 🔴 **2026-10-14 用户裁定**：接口返回值可用，**D / 各对弹翼弦长 `wings[]` / 半翼展等一律直接用接口值**；旧"固定值覆盖接口"的做法**已全部作废**。🔴 **接口返值单位就是 mm，直接传参，禁止再 ×1000**。
 > 🔴 **2026-10-17 更新**：尺寸**恢复为几何实算**——由 `ClassifyMissile` 第 10 步 `CalculateDimensions()` 算出并缓存，`GetMissileDimensions()` 读同一份缓存。**必须先跑分割再取尺寸**（未跑分割返回 `{}`，不再是固定数值）。skill 侧始终不记数值。
-> 🔴 **2026-10-16 起弹翼按对取值**：弹翼尺寸是**数组** `wings[]`（下标 = 对数−1，每项 `root_chord` / `tip_chord` / `half_span`）——第 N 对翼（`wingSideSurfaceN`）一律取 `wings[N−1]`，**不得用某一对的弦长代跑其他对**。详见事实中心 §2.1。
+
+> 🔴 **2026-10-16 起弹翼按对取值**：弹翼尺寸是**数组** `wings[]`（下标 = 对数−1，每项 `root_chord` / `tip_chord` / **`thickness`**）——第 N 对翼（`wingSideSurfaceN`）一律取 `wings[N−1]`，**不得用某一对的弦长/厚度代跑其他对**。详见事实中心 §2.1。
+> 🔴 **2026-10-22 起各向异性尺寸基准是「翼厚度」**：首层高度/端间距 = `0.1 × wings[N−1].thickness`，长边中间值 = `0.02 × wings[N−1].root_chord`。旧口径 `0.005 × 当地弦长`、旧标量键 `wing_tip_chord`/`wing_half_span` **均已作废**。
 
 ## 认定流程
 
@@ -56,10 +58,10 @@ allowed-tools: []
 | 1 | CAD 导入、单位设置（🔴 先查数模是否已在工程，非空则跳过导入，见「开始任务前」三层查询） | `missile-cad-to-mesh.md` §1 |
 | 2 | 水密性处理、缝隙、自由边检查 | `missile-cad-to-mesh.md` §2 |
 | 3 | 导弹分部件、AI 分割（产出**带序号弹翼子组**，无主组、无归并） | `missile-segmentation.md` |
-| 4 | 碎面、合并面、合并碎面（**条件触发**：用户提到时才执行，否则本阶段 `skipped` + `note`；⚠️ 会改超面集合 → **合并后按组名重查分组**，事实中心 G2） | `missile-cad-to-mesh.md` §3.1 |
-| 5 | 弹径/弹尾口径/球头半径、**各对弹翼弦长 `wings[]`**、尺寸测量（🔴 全部**取 `GetMissileDimensions` 接口返回值**，见事实中心 §2；🔴 **须先完成阶段 3 分割**，尺寸由分割实算缓存；接口返 **mm**，禁止 ×1000） | `missile-geometry-parameters.md` |
-| 6 | 导弹表面网格生成 | `missile-surface-mesh.md` |
-| 7 | 各向异性（可选）：弹翼前缘・后缘・梢部・侧面・结合处加密（🔴 仅 wing；**带序号子面分组存在才做**，事实中心 G1）。🔴 **翼后缘一律做各向异性（`generateType=2`），三角翼与梯形翼同款、无分支**——只要是 `wingTrailingEdgeN` 就做（参数见 `missile-anisotropic-mesh.md` §「各位置参数」后缘行）。三角翼无 `wingTipN` 面 → 仅「梢部」一项自然 `skipped`（分组缺失，事实中心 G1），不影响其余位置。🔴 **一站式 `MissileAnisoProcessMissileAnisotropy` 失败（`status="failed"`）时自动回退分步**（`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` + `GenerateANisoDomainGrid`），见 `missile-anisotropic-mesh.md` §「分步回退」；接口恒定值/空则**不回退**、直接 `skipped` | `missile-anisotropic-mesh.md`（判定 → 路由到独立 Skill `missile-anisotropy-processing`） |
+| 4 | 碎面、合并面、合并碎面（⚠️ 会改超面集合 → **合并后按组名重查分组**，事实中心 G2） | `missile-cad-to-mesh.md` §3.1 |
+| 5 | 弹径/弹尾口径/球头半径、**各对弹翼弦长与厚度 `wings[]`**、尺寸测量（🔴 全部**取 `GetMissileDimensions` 接口返回值**，见事实中心 §2；🔴 **须先完成阶段 3 分割**，尺寸由分割实算缓存；接口返 **mm**，禁止 ×1000） | `missile-geometry-parameters.md` |
+| 6 | 导弹表面网格生成 + 碎线合并（🔴 用 **`MissileSurfMeshGenerate`**，无入参，后端按导弹口径逐组自动设尺寸并合并网格线；🔴 **前置：`GetMissileDimensions` 已调用**） | `missile-surface-mesh.md` |
+| 7 | 各向异性（可选）：弹翼前缘・后缘・梢部・侧面・结合处加密（🔴 仅 wing；**带序号子面分组存在才做**，事实中心 G1）。🔴 **翼后缘一律做各向异性（`generateType=2`），三角翼与梯形翼同款、无分支**——只要是 `wingTrailingEdgeN` 就做（参数见 `missile-anisotropic-mesh.md` §「各位置参数」后缘行）。三角翼无 `wingTipN` 面 → 仅「梢部」一项自然 `skipped`（分组缺失，事实中心 G1），不影响其余位置。🔴 **一站式用 `MissileWingAnisoProcessWingAnisotropy`**；失败（`status="failed"`）时自动回退分步（`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` + `GenerateANisoDomainGrid`），见 `missile-anisotropic-mesh.md` §「分步回退」；接口恒定值/空则**不回退**、直接 `skipped`。⚠️ **本阶段只做弹翼，不含弹尾加密** | `missile-anisotropic-mesh.md`（判定 → 路由到独立 Skill `missile-anisotropy-processing`） |
 | 8 | 体网格块创建、外场生成（🔴 不用 `CreateMissileFarField`，统一 `UGBlockCreate`；方向位按弹头指向取、`centerCoor` 用默认值，见事实中心 #5/#6） | `missile-farfield-and-volume.md` §6.1–6.3 |
 | 9 | 空间网格 / 体网格 / 附面层（🔴 `UGUGSp` ids 先剔幽灵块，事实中心 #7/§4） | `missile-farfield-and-volume.md` §6.4 |
 | 10 | 边界条件、BC、物面、远场、对称 | `missile-farfield-and-volume.md` §7.2 |
@@ -78,8 +80,8 @@ allowed-tools: []
 2. **水密闸门**：表面网格生成前必须**实际调用 `DealWatertight` 并验证 `free_edge_count` 为 0**。🔴 不得以"分组已存在 / ClassifyMissile 已运行过 / 记忆中有公差值"为由跳过。`free_edge_count > 0` → 公差 ×5 重试，最多 2 次；仍不过则停止，提示用户当前自由边数并建议检查模型几何。自由边全部位于半模线位置时可接受。
 3. **边界闸门**：首次铺底**必须统一置 `-10`（无 BC）**，严禁在铺底阶段写入 4/7/8 等实际属性值。🔴 实际属性（物面→粘性固壁、外场→远场、对称→对称）**只能在铺底完成后、按用户明确要求**通过 `BorderConditioConfigProperty` 逐组设置；**用户未明确要求前不写入任何实际属性**。物面可按分部件情况拆成多个物面组。
 4. **质量闸门**：🔴 **只查面网格** —— 面网格最小角 > 10°（各向异性单元处不计）。🔴 **不查体网格**：`ExamineBlock(ExamineMaximumIncludeAngle)` 对整套体网格执行时后端**无响应挂死**（四次实跑均卡住，需用户手动停止），导弹流程**不再调用该工具**，体网格质量指标（≤178°/禁止 179.9°）**本流程不检查**。工具与判据见 `missile-farfield-and-volume.md` §7.1。
-5. **前置条件闸门**：分割结果必须由分组查询验证；**带序号子面分组**（`wingSideSurfaceN` 等）缺失时不得调用 `MissileAnisoProcessMissileAnisotropy`。
-6. 🔴 **各向异性结果核验闸门**：一站式 `MissileAnisoProcessMissileAnisotropy()` 是**无参数**工具——`success` 只证明流程跑通、**不证明尺寸可用**。🔴 **该工具的弹体尺寸读 `GetMissileDimensions` 写回 `SPIDER::Data` 的值（未调接口 → 直接 `failed`）；弹翼尺寸则按对直读尺寸缓存 `wings`（2026-10-16 起不经 `SPIDER::Data`；该缓存 2026-10-17 起由分割实算写入，未跑 `ClassifyMissile` 则缓存为空）**。返回后**必须做两查**（未过不得宣告本阶段成功）：① **尺寸可用性** —— `step1_dimensions` 的 `body_diameter`、`pairs[].root_chord`/`local_chord`、`half_span` **必须全 > 0**；🔴 **每对的 `root_chord` 都要查**，且应各自等于该对 `wings[N−1].root_chord`（各对相同即说明回退到了第 1 对）；`body_diameter_surface` 须与事实中心 §2.2.1 规则自洽（`|D−D_tail| > 0.7×D_tail` → 等于尾口径；否则等于 D；**球头公式仍用原始 D**）。🔴 **不再与任何固定值比对**（旧 ≤5% 核验随固定值一并作废）。非正值 → **暂停本阶段**，note 标 `dimension_unavailable`、报告后端；② **窄面增长率一致性** —— `step3_distribution` 与 `step4_aniso_line_groups` 的窄面（前缘/后缘/翼梢）增长率**都须 = 1**，否则 `note` 标 `growth_rate_mismatch` + 报告后端。**两查均不触发分步回退**（回退只由 `status="failed"` 触发）。详见 `missile-anisotropic-mesh.md` §「一站式结果核验」。
+5. **前置条件闸门**：分割结果必须由分组查询验证；**带序号子面分组**（`wingSideSurfaceN` 等）缺失时不得调用 `MissileWingAnisoProcessWingAnisotropy`。🔴 **尺寸前置**：`GetMissileDimensions` 未调用 → 按对尺寸数组为空 → 该工具必 `failed`，须先补调接口。
+6. 🔴 **各向异性结果判定闸门（只看 `status`，不做返回后核验）**：一站式 `MissileWingAnisoProcessWingAnisotropy()` 返回 `status="success"` **即为本阶段结束**，**直接进入阶段 8（体网格块创建、外场生成）**。🔴 **不得做任何返回后核验**——不读 `step1_dimensions` / `step2_classify` / `step3_distribution` / `step4_aniso_line_groups` / `step5_aniso_domains`，不查尺寸是否为正值、不比对 `body_diameter_surface` 自洽性、不比对各对 `root_chord`/`thickness`、不比对窄面增长率。这些检查在此处既不产生决策、又纯耗轮次，已全部删除。🔴 **只有 `status="failed"` 触发自动分步回退**；接口恒定值/空（不可用）→ `skipped` + `note`，不回退。详见 `missile-anisotropic-mesh.md` §「判定与路由」/「分步回退」。
 7. **碎面合并（条件触发）**：用户提到碎面、合并面、合并碎面时，在分部件之后、表面网格之前执行（调用 `UGSurfaceProcessing`）。🔴 用户未提及时不作为必经阶段，标记 `skipped` + `note`；**但若进入表面网格后出现"不封闭"或"网格异常偏密"，须回头补做**（两者同源，见 `missile-mesh-sealing-check.md`「CAD 拓扑体检」）。
 8. **几何闸门**：🔴 **`GetMissileDimensions` 返回值是唯一权威来源，一律直接使用**（任一字段非零即用该值计算对应部件目标尺寸；任一字段为 0 → 该部件按全局默认尺寸生成）。**无固定值例外**（旧 D/C_root/半翼展 固定值已作废，事实中心 §2）。🔴 **弹翼按对取**：第 N 对翼（`wingSideSurfaceN`）一律用 `wings[N−1].root_chord`，**不得各对共用**（各对弦长可差 5 倍以上）。🔴 **表面网格口径**：非球头部分取 `body_diameter_surface`（失配 >70% 时为尾口径），**球头公式仍用原始 `body_diameter` + `nose_radius`**（事实中心 §2.2.1）。🔴 **C_tip 按对并按翼型分叉**（事实中心 M2 / §2.2.2）：三角翼（无 `wingTipN`）≈0 正常，**禁止 0 代入，梢部端间距钳制到该对 C_root 计算值**；梯形翼（有 `wingTipN`）按接口值正常使用。🔴 **接口返值单位本就是 mm，禁止再 ×1000**。**若接口返回异常（0/负值）→ 原样记录并在 note 注明、报告后端，不自行替换/反推**。
 
@@ -88,7 +90,7 @@ allowed-tools: []
 ## 工具与替代路径
 
 - `ClassifyMissile` 失败 → 走分组查询
-- 🔴 **各向异性一站式失败**（`MissileAnisoProcessMissileAnisotropy` 返回 `status="failed"`）→ **自动回退分步**：`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` 各做「线分类+分布设置」，缺失的「线组创建/域生成」用 `GenerateANisoDomainGrid`；映射表见 `missile-anisotropic-mesh.md` §「分步回退」。**接口恒定值/空（不可用）→ 不回退，直接 skip+note**
+- 🔴 **各向异性一站式失败**（`MissileWingAnisoProcessWingAnisotropy` 返回 `status="failed"`）→ **自动回退分步**：`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` 各做「线分类+分布设置」，缺失的「线组创建/域生成」用 `GenerateANisoDomainGrid`；映射表见 `missile-anisotropic-mesh.md` §「分步回退」。**接口恒定值/空（不可用）→ 不回退，直接 skip+note**。⚠️ 回退**不含弹尾加密**（弹尾由后续独立工具处理）
 - `UGSurfaceProcessing` 失败（每次≤1次换参重试）→ `UGDelRedundantDom`，再失败则 skip+note
 - 体创建失败（`UGBlockCreate` 返回 `"false"` 且报不封闭线清单） → `missile-mesh-sealing-check.md`（排查手册）
 

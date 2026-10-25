@@ -2,6 +2,22 @@
 
 导弹专用表面网格参数体系。
 
+> 🔴 **2026-10-22 起首选工具 = `MissileSurfMeshGenerate()`（无参数）** —— 后端 `SuperFacePointCloudProcessorMissile::testSurf()`
+> 已把本文件描述的全部口径**内置**：按组名逐组设 `targetSize`/`minSize`/`angle`，生成 `UGSur`，
+> 随后调用 `SGOP::DomainAPI::DomainUtil::MergeEdges` 做**碎线合并**。
+> | 组名 | 后端内置 targetSize | minSize | angle |
+> |---|---|---|---|
+> | `nose` | 球头 `min(0.01×D, 0.25×R)`；尖头 `0.005×D` | target×0.1 | 10 |
+> | `fuselage` / `tail` | `0.05 × D_tail`（🔴 恒用**弹尾口径**） | target×0.1 | 10 |
+> | `wing*N`（任一翼子面组） | `0.02 × wings[N−1].root_chord` | target×0.1 | 10 |
+>
+> 🔴 **无入参**：尺寸全部由后端从 `SPIDER::Data` 取（弹径 / 弹尾口径 / 球头半径 / 各对翼根弦长），
+> **不由 Agent 传**。因此本文件下文的「逐组算参 → 改 `groupProperty` → 调 `GenerateSurMeshBySpitAssemblyGroupProperty`」
+> 这一整套**只在 `MissileSurfMeshGenerate` 不可用时作为回退路径**，不是常规流程。
+> 🔴 **前置**：`GetMissileDimensions` 必须先调用（尺寸写回 `SPIDER::Data`），否则口径全为 0、各组保持原值。
+> ⚠️ **本工具已内含碎线合并**——走它时**不要再单独调 `UGSurfaceProcessing` 之外的合并步骤**；
+> 流程表阶段 4 的「碎面合并」是**用户显式提到碎面时**对 CAD 面做的处理，与这里的网格线合并不是一回事。
+
 ## 全局设置
 
 - **工具**：`UGSur(type, ids, targetSize, minSize, adaptAngle, way)` `[复用]` 或 `GetGenerateSurMeshDefaultParam()` `[复用]` 获取默认值
@@ -15,10 +31,12 @@ Agent 侧根据几何参数计算后传入。
 |------|---------|---------|---------|
 | 头部（球头） | min(0.01×D, 0.25×R) | 目标×1/10 | 10° |
 | 头部（尖角） | 0.005×D | 目标×1/10 | 10° |
-| 尾部 | 0.05×D | 目标×1/10 | 10° |
-| 弹体 | 0.05×D | 目标×1/10 | 10° |
+| 尾部 | 0.05×**D_tail** | 目标×1/10 | 10° |
+| 弹体 | 0.05×**D_tail** | 目标×1/10 | 10° |
 | 翼 | 0.02×**该对** C_root（1/50），全局/前缘/后缘统一 | 目标×1/10 | 10° |
 | 外场 | 按场景计算 | 目标×1/10 | 10° |
+
+> 🔴 **弹体/尾部的口径（2026-10-22 与后端 `testSurf()` 对齐）**：后端对本行**恒用 `body_diameter_tail`**，不做 `D_surface` 失配判断（本文件早前写作 `0.05×D_surface`，与后端实际不符，已改正）。头部的球头/尖角公式**仍用原始 `body_diameter`**，与后端一致。
 
 > 部件行按**实际存在的分组**取用——`GetAllSpitAssemblyGroupProperty` 里有哪组就配哪组，无舵/舵轴即无对应行，不写死型号。
 > 弹体二面角加密见下节；翼前缘、梢部除前缘加密外，流向全局尺寸按当前翼，后续由各向异性加密。
@@ -27,7 +45,7 @@ Agent 侧根据几何参数计算后传入。
 > - **表面网格阶段：按对取用** —— 第 N 对翼的全部子面（`wingLeadingEdgeN` / `wingSideSurfaceN` / `wingTrailingEdgeN` / `wingTipN`）统一用 **`0.02 × C_root(N)`**，其中 `C_root(N)` 取 `wings[N−1].root_chord`（**接口值，现算**），不区分前缘/后缘/梢部/拐角——表面网格阶段不看"拐角"概念；
 > - 🔴 **不得用某一对的 C_root 代跑其他对**：各对弦长可差 5 倍以上，混用会让某一对翼面显著偏疏或偏密（**数值随型号变，一律现取接口值，本文件不记**）；
 > - 🔴 **前缘面 ≠ 拐角**：前缘面（wingLeadingEdgeN）是整个翼前缘的面，尺寸同该对翼一致（0.02×C_root(N)），只有前缘与弹体/后缘/翼梢交汇的局部小区域才是"拐角";
-> - **各向异性阶段**才用 `0.005 × 当地弦长`（**加密尺寸**，现算）做**全部位置**（窄面/侧面/结合处/弹尾）的首层加密；**窄面增长率 1、侧面·结合处·弹尾 1.2**，层数统一 50，中间值＝翼面尺寸；完整表见 `missile-anisotropic-mesh.md` §「各位置参数」；
+> - **各向异性阶段**才做首层加密：🔴 **首层高度/端间距一律 `0.1 × 该对翼厚度`**（`wings[N−1].thickness`，2026-10-22 起；**旧口径 `0.005×当地弦长` 已作废**），**窄面增长率 1、侧面·结合处 1.2**，层数统一 50，中间值＝`0.02×该对根弦长`；完整表见 `missile-anisotropic-mesh.md` §「各位置参数」；
 > - 判定单选题：**表面网格阶段一律 `0.02×C_root(N)`**，Agent 不得在两个系数间裁决。
 
 ## 符号说明
@@ -35,21 +53,21 @@ Agent 侧根据几何参数计算后传入。
 | 符号 | 参数名（后端字段） | 来源 |
 |------|--------|------|
 | D | `body_diameter` | 🔴 **取 `GetMissileDimensions` 接口值**（头锥/弹体交接处口径，事实中心 §2） |
-| **D_surface** | `body_diameter_surface` | 🔴 **表面网格非球头部分用的口径**——`\|D − D_tail\| > 0.7×D_tail` 时为弹尾口径，否则 = D（事实中心 §2.2.1） |
-| D_tail | `body_diameter_tail` | 弹尾口径，失配判据来源（事实中心 M4） |
+| **D_surface** | `body_diameter_surface` | 表面网格**参考**口径（`\|D − D_tail\| > 0.7×D_tail` 时为弹尾口径，否则 = D，事实中心 §2.2.1）。🔴 **`MissileSurfMeshGenerate` 与回退路径实际对弹体/尾部一律用 `D_tail`**，此字段仅供诊断/记录 |
+| D_tail | `body_diameter_tail` | 弹尾口径；🔴 **弹体/尾部表面网格尺寸的实际基准**（后端 `testSurf()` 恒用此值） |
 | R | `nose_radius` | `GetMissileDimensions` 返回（尖头时为 0）；单位 mm |
 | 头部类型 | 由 `nose_radius` 判定 | `> 0` 为球头(ball)，`== 0` 为尖头(sharp) |
-| 弹翼当地弦长（第 N 对） | 🔴 **`C_root(N)` = `wings[N−1].root_chord`**，取接口值（事实中心 §2）；🔴 C_tip **按翼型分叉**（M2）：三角翼（无 `wingTipN`）≈0 → **禁止 0 代入**，梢部端间距钳制到该对 C_root 计算值（= `0.005×C_root(N)` / `0.02×C_root(N)`，现算）；梯形翼（有 `wingTipN`）按接口值正常使用 | `GetMissileDimensions` 返回的 `wings` 数组 / 用户输入 |
-| 半翼展 b/2（第 N 对） | 🔴 **取接口值** `wings[N−1].half_span`（事实中心 §2） | 接口返回 / 用户输入 |
+| 弹翼弦长/厚度（第 N 对） | 🔴 **`C_root(N)` = `wings[N−1].root_chord`**、**`T(N)` = `wings[N−1].thickness`**，取接口值（事实中心 §2）；🔴 C_tip **按翼型分叉**（M2）：三角翼（无 `wingTipN`）≈0 → **禁止 0 代入**，梢部端中间值钳制到该对 C_root 计算值（= `0.02×C_root(N)`，现算）；梯形翼（有 `wingTipN`）按接口值正常使用 | `GetMissileDimensions` 返回的 `wings` 数组 / 用户输入 |
+| 半翼展 b/2（第 N 对） | **取接口值** `wings[N−1].half_span`（事实中心 §2） | 接口返回 / 用户输入 |
 
-> 🔴 **弹径选用（2026-10-14 用户裁定，事实中心 §2.2.1）**：表面网格的**非球头部分**用 `body_diameter_surface`（有效弹径）；🔴 **球头公式是例外**——仍用**原始 `body_diameter` + `nose_radius`**，即 `min(0.01×D, 0.25×R)`（尖头 `0.005×D`）。用户原话："除了球头公式，弹径 D 就用弹尾口径替代来生成更合理。球头的网格生成还是用原本的弹径和球头半径参数公式计算。"
+> 🔴 **弹径选用（2026-10-22 与后端 `testSurf()` 对齐）**：头部的**球头/尖角公式**用**原始 `body_diameter` + `nose_radius`**（`min(0.01×D, 0.25×R)` / `0.005×D`）；**弹体与尾部一律用 `body_diameter_tail`**。用户 2026-10-14 的原话（"除了球头公式，弹径 D 就用弹尾口径替代"）在此落地为"弹体/尾部直接用尾口径"，与后端实现一致。
 
-> 几何字段口径：弹翼**按对**取 `wings[N−1].root_chord` / `wings[N−1].tip_chord`——**接口返回哪些 `*_chord` 字段就用哪些**，不预设部件种类。上方标量键 `wing_root_chord` / `wing_tip_chord` / `wing_half_span` 即**第 1 对**（= `wings[0]`），只作单对翼时的便捷入口，多对翼一律走 `wings` 数组。
+> 几何字段口径：弹翼**按对**取 `wings[N−1].root_chord` / `wings[N−1].tip_chord`——**接口返回哪些 `*_chord` 字段就用哪些**，不预设部件种类。标量键仅有 `wing_root_chord` / **`wing_thickness`**（= `wings[0]`，🔴 旧标量键 `wing_tip_chord` / `wing_half_span` **已不再产出**），仅作单对翼时的便捷入口，多对翼一律走 `wings` 数组。
 
 > ⚠️ **上表参数只能来自 `GetMissileDimensions` 或用户直接输入**。**禁止由分组属性 `targetSize`/`minSize` 反推 D / R / 弦长**：分组属性只用于生成 `groupProperty` 传参，不作几何量来源（详见 `missile-geometry-parameters.md`）。取值分两类，不得混用：
 >
-> 1. **尺寸字段**（`body_diameter` / `body_diameter_tail` / `fuselage_length` / `nose_radius` / `wings[].root_chord` / `wings[].half_span`）→ 🔴 **一律以接口返回值为准**（事实中心 §2，2026-10-14 起**无固定值覆盖**）；不得替换、反推或自行估算；明显不符时原样使用并在 `note` 记录、报告后端。
-> 2. **C_tip** → 🔴 **按翼型分叉**（事实中心 M2）：三角翼（无 `wingTipN`）≈0 属正常，**禁止 0 代入**；梯形翼（有 `wingTipN`）按 `wings[N−1].tip_chord` 正常使用。梢部端间距规则见上表与 `missile-geometry-parameters.md`「当地弦长使用规则」。
+> 1. **尺寸字段**（`body_diameter` / `body_diameter_tail` / `fuselage_length` / `nose_radius` / `wings[].root_chord` / `wings[].thickness` / `wings[].half_span`）→ 🔴 **一律以接口返回值为准**（事实中心 §2，2026-10-14 起**无固定值覆盖**）；不得替换、反推或自行估算；明显不符时原样使用并在 `note` 记录、报告后端。
+> 2. **C_tip** → 🔴 **按翼型分叉**（事实中心 M2）：三角翼（无 `wingTipN`）≈0 属正常，**禁止 0 代入**；梯形翼（有 `wingTipN`）按 `wings[N−1].tip_chord` 正常使用。梢部端规则见上表与 `missile-geometry-parameters.md`「当地弦长使用规则」。
 >
 > 🔴 **单位**：接口返值**本就是 mm**（几何坐标系即为 mm，**后端不做任何换算**）——**直接传参，禁止 ×1000**。
 >
@@ -61,24 +79,20 @@ Agent 侧根据几何参数计算后传入。
 
 ```
 params = GetMissileDimensions()      # 🔴 返回值单位本就是 mm，直接使用（后端不做换算）
-D        = params["body_diameter"]        # 🔴 接口值（头锥/弹体交接处口径）
-D_surf   = params["body_diameter_surface"]  # 🔴 表面网格用口径（非球头部分）
-D_tail   = params["body_diameter_tail"]     # 弹尾口径
+D        = params["body_diameter"]        # 🔴 接口值（头锥/弹体交接处口径）——【仅头部公式用】
+D_tail   = params["body_diameter_tail"]   # 🔴 弹尾口径——【弹体/尾部尺寸用这个】
 R        = params["nose_radius"]          # 🔴 本就是 mm，禁止再 ×1000
 
 # 🔴 弹翼按对取（下标 0 = 第 1 对）：数组长度 = 后端已填的对数，
-#    模型实际对数由分组探测（见 missile-segmentation.md）；取不到的对回退第 1 对
-wings    = params["wings"]                # [{"root_chord":C_root1,"tip_chord":C_tip1,"half_span":b2_1}, ...]
+#    模型实际对数由分组探测（见 missile-segmentation.md）
+wings    = params["wings"]        # [{"root_chord":..,"tip_chord":..,"thickness":..,"half_span":..}, ...]
 for i, w in enumerate(wings):             # i = 0,1,2 → 第 1/2/3 对
-    C_root_N = w["root_chord"]            # 🔴 该对翼面尺寸基准（0.02×）
-    C_tip_N  = w["tip_chord"]             # 🔴 三角翼≈0 属正常（M2），禁止 0 代入、梢部端间距一律以 C_root_N 计
-    b_2_N    = w["half_span"]             # 展向分布跨度（仅此一对）
-# ⚠️ 单对翼时可直接用标量键 wing_root_chord / wing_tip_chord / wing_half_span（= wings[0]）
-
-# 🔴 表面网格有效弹径（后端已给，缺失时自判）：
-#     |D − D_tail| > 0.7 × D_tail  → 表面网格非球头部分用 D_tail
-D_surface = D_surf if D_surf > 0 else (
-    D_tail if (D_tail > 0 and abs(D - D_tail) > 0.7 * D_tail) else D)
+    C_root_N  = w["root_chord"]           # 🔴 该对翼面尺寸基准（0.02×）
+    T_N       = w["thickness"]            # 🔴 该对翼厚度（各向异性首层基准 0.1×）
+    C_tip_N   = w["tip_chord"]            # 🔴 三角翼≈0 属正常（M2），禁止 0 代入
+    b_2_N     = w["half_span"]            # 展向分布跨度（仅此一对）
+# ⚠️ 单对翼时可直接用标量键 wing_root_chord / wing_thickness（= wings[0]）；
+#    🔴 wing_tip_chord / wing_half_span 已不再产出，只能从 wings[] 取
 
 if R > 0:   # 球头(ball)
     noseTargetSize = min(0.01 * D, 0.25 * R)   # 🔴 例外：球头用【原始 D】+ R
@@ -88,17 +102,17 @@ else:       # 尖头(sharp)，R == 0
 noseMinSize = noseTargetSize * 0.1
 ```
 
-> 🔴 **弹翼尺寸一律用接口 C_root(N)，按对取**：不得把弹翼降级为"全局默认尺寸"，必须用 `0.02×C_root(N)` / `0.005×C_root(N)` 计算（**现算**，无固定常量）；🔴 **不得用某一对的 C_root 代跑其他对**。
+> 🔴 **弹翼尺寸一律用接口 C_root(N)，按对取**：不得把弹翼降级为"全局默认尺寸"，必须用 `0.02×C_root(N)` 计算（**现算**，无固定常量）；🔴 **不得用某一对的 C_root 代跑其他对**。
 
 **其他部件直接计算（不依赖头部类型）：**
 
 | 部件 | 目标尺寸 | 最小尺寸 |
 |------|---------|---------|
-| 尾部 | 0.05 × **D_surface** | 目标 × 0.1 |
-| 弹体 | 0.05 × **D_surface** | 目标 × 0.1 |
+| 尾部 | 0.05 × **D_tail** | 目标 × 0.1 |
+| 弹体 | 0.05 × **D_tail** | 目标 × 0.1 |
 | 弹翼（第 N 对） | 0.02 × **`wings[N−1].root_chord`** | 目标 × 0.1 |
 
-> 🔴 **头锥（球头/尖角）用原始 D，其余用 D_surface**：用户裁定球头公式例外（见上）。`D_surface` 在弹径与弹尾口径失配 >70% 时等于弹尾口径。
+> 🔴 **头锥（球头/尖角）用原始 D；弹体/尾部用 `D_tail`**：与后端 `testSurf()` 一致（后端对 fuselage/tail 恒用弹尾口径）。`body_diameter_surface` 字段仍由接口给出，供需要"失配时换口径"的场景参考，但**回退路径与 `MissileSurfMeshGenerate` 都必须按 `D_tail` 取弹体/尾部**，不得用 `D_surface` 造成与后端不一致。
 
 > 🔴 **本阶段的"当地弦长"取该对的 C_root（根部弦长）** —— "当地弦长"定义为**根部**前缘到尾缘的距离。此阶段**不分段**（分组是 `wingSideSurfaceN` 等整块子面，且表面网格阶段不看"拐角"概念），无法按展向分段设不同尺寸；若误取 C_tip，整个翼面会按最小弦长加密（同一对翼的 C_root/C_tip 可差 5 倍以上），网格显著偏密。
 
@@ -168,16 +182,16 @@ noseMinSize = noseTargetSize * 0.1
 
 ### 翼拐角加密
 
-拐角指翼面上曲率突变的结合部位，共 **4 处**：**① 翼前缘 ② 翼梢 ③ 翼后缘 ④ 弹体结合处**。加密尺寸 `0.005 × 当地弦长`，厚度方向网格点数 ≥ 7。
+拐角指翼面上曲率突变的结合部位，共 **4 处**：**① 翼前缘 ② 翼梢 ③ 翼后缘 ④ 弹体结合处**。🔴 **加密尺寸 = `0.1 × 该对翼厚度`**（`wings[N−1].thickness`，2026-10-22 起；**旧口径 `0.005×当地弦长` 已作废**），厚度方向网格点数 ≥ 7。
 
 | 翼型（按 M2 探测） | 翼梢（②）的表现形式 |
 |------|------|
 | 三角翼（无 `wingTipN`） | 翼梢 = 前缘与后缘汇聚的**尖点**（仍算一处拐角） |
 | 梯形翼（有 `wingTipN`） | 翼梢 = 真实**梢部端面**（`wingTipN` 面） |
 
-> 🔴 **拐角加密尺寸用「当地弦长」，不是笼统的整对 C_root**：C_root(N) 只在**整块子面无法按展向分段时**才作为"当地弦长"的代用值（见上方「本阶段的"当地弦长"取该对的 C_root」段，那条只约束**表面网格阶段**）。拐角加密属各向异性阶段，能分段就分段：梯形翼按该段弦长（含 C_tip(N)）；三角翼按 `C_local = C_root(N) × (1 − x/(b/2)(N))` 插值，尖点处按事实中心 §2.2.2 钳制、**不取 0**。🔴 **弦长一律取该对**（`wings[N−1]`），不得各对共用。
+> 🔴 **拐角加密尺寸用「翼厚度」，不再用「当地弦长」**（2026-10-22 变更）：`firstHigh` = `0.1 × wings[N−1].thickness`，**与翼型、弦长、展向位置都无关**——梯形翼与三角翼同值。旧文所述"C_local 插值 / 尖点钳制"随之作废（中间值仍按 `0.02×该对根弦长` 取，三角翼梢部端钳制到 `0.02×C_root(N)`，事实中心 §2.2.2）。🔴 **厚度一律取该对**（`wings[N−1]`），不得各对共用。
 >
-> 拐角加密在**各向异性阶段**实现，不在表面网格阶段单独设参数：**窄面（前缘 ① / 翼梢 ② / 后缘 ③）首层高度＝加密尺寸、增长率 1；侧面与翼身结合处（④）首层高度＝加密尺寸、增长率 1.2**；层数统一 50、中间值＝翼面尺寸。完整参数表见 `references/missile-anisotropic-mesh.md` §「各位置参数」。
+> 拐角加密在**各向异性阶段**实现，不在表面网格阶段单独设参数：**窄面（前缘 ① / 翼梢 ② / 后缘 ③）首层高度＝`0.1×厚度`、增长率 1；侧面与翼身结合处（④）首层高度＝`0.1×厚度`、增长率 1.2**；层数统一 50、中间值＝`0.02×根弦长`。完整参数表见 `references/missile-anisotropic-mesh.md` §「各位置参数」。
 
 **定位方法（找到 nose 与 fuselage 的共享边）：**
 
@@ -211,7 +225,7 @@ UGReDimensionConfigDistribution(
     headspace=原值,          # 不修改，先由 GetConnectorsStartAndEndUnitLenth 读原值
     tailspace=原值,          # 不修改
     params="1.2,50,1.2,50",  # 严格格式 "headRate,headLayer,tailRate,tailLayer"（增长率 1.2、层数 50）
-    mindValue=0.002 * D_surface   # 🔴 表面网格有效弹径（失配 >70% 时为弹尾口径）
+    mindValue=0.002 * D_tail   # 🔴 弹体二面角加密：用弹尾口径（与后端表面网格取口径一致）
 )
 ```
 
@@ -219,21 +233,22 @@ UGReDimensionConfigDistribution(
 
 ### 翼前缘和梢部
 
-- 🔴 **翼前缘厚度方向点数 ≥ 7**（需求硬指标）——由各向异性阶段的"加密尺寸首层 + 增长率 1 + 层数 50"保证，见 `missile-anisotropic-mesh.md` §「各位置参数」。
+- 🔴 **翼前缘厚度方向点数 ≥ 7**（需求硬指标）——由各向异性阶段的"首层 `0.1×厚度` + 增长率 1 + 层数 50"保证，见 `missile-anisotropic-mesh.md` §「各位置参数」。
 - 前缘 / 梢部**弧线**本身的表面网格分辨率同样 ≥ 7 点。
 
 ## 工具
 
 | 工具 | 用途 | 类型 |
 |------|------|------|
-| `UGSur` | 全局表面网格 | [复用] |
-| `GetGenerateSurMeshDefaultParam` | 获取默认参数 | [复用] |
-| `GenerateSurMeshBySpitAssemblyGroupProperty` | 按部件组生成表面网格 | [复用] |
+| 🔴 **`MissileSurfMeshGenerate`** | **导弹表面网格生成 + 碎线合并（首选，无参数）** | 导弹专用 |
+| `UGSur` | 全局表面网格 | [复用]（回退路径） |
+| `GetGenerateSurMeshDefaultParam` | 获取默认参数 | [复用]（回退路径） |
+| `GenerateSurMeshBySpitAssemblyGroupProperty` | 按部件组生成表面网格 | [复用]（回退路径） |
 
 ## 前置条件
 
 1. 水密性处理已完成（自由边检查通过）
 2. 导弹 AI 部件分割（`ClassifyMissile`）已完成
-3. 碎面合并（**条件触发**：用户提到碎面时执行；未提及时本项不阻塞表面网格生成）
-4. 导弹几何尺寸参数已获取（`GetMissileDimensions` 或用户直接提供）
+3. 🔴 **`GetMissileDimensions` 已调用**（尺寸写回 `SPIDER::Data`；走 `MissileSurfMeshGenerate` 时缺它则各组口径为 0，网格按各组原值生成）
+4. 碎面合并（**条件触发**：用户提到碎面时执行；未提及时本项不阻塞表面网格生成）
 5. 上述任一条件不满足时停止

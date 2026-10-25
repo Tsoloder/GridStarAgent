@@ -21,7 +21,7 @@
 
 ### §6.2 外场生成规则
 
-- **弓形外场**：外场大小 = **1.2 × 弹体长度**，头部距离 = **0.2 × 弹径 D**（事实中心 #4）。🔴 **不以 `GetCreateBlockDefaultParam()` 默认 `geoParam`（≈4×全弹长）为准**。
+- **弓形外场**：`geoParam` = **外场长度 `1.5 × 弹体长度`，另外 3 位 `1.2 × 弹体长度`**（2026-10-23 用户裁定）；头部距离 = **0.2 × 弹径 D**。🔴 **不以 `GetCreateBlockDefaultParam()` 默认 `geoParam`（≈4×全弹长）为准**，也不做任何按型号的调整——**固定套用这两个倍数**。
 - 非结构网格下，外场是体创建的产物（`UGBlockCreate` 的 `chooseParam` 第 3 位 = `3` 为弓形），不存在独立的外场创建步骤。
 - `fuselage_length` 与 `body_diameter`（弹径 D）来自 `GetMissileDimensions` 或用户输入；🔴 **一律取接口值**（**单位已是 mm，禁止 ×1000**）——旧"固定值覆盖接口"的做法**已作废**（事实中心 §2，2026-10-14 用户裁定）。
 
@@ -31,23 +31,21 @@
 
 1. 调用 `GetCreateBlockDefaultParam()`，取默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）、`meshSize`、`centerCoor`。⚠️ 其 `chooseParam` 默认 `"0,0,0"`、`geoParam` ≈ 4 × 全弹长——**仅作格式参考**，实际值按下方第 2 步覆盖；🔴 但 **`centerCoor` 直接沿用默认值**（已是模型包围盒中心）。
 2. 按 §6.2 外场规则确定实际参数：
-   - `geoParam` = **外场大小四位同值**（1.2 × 弹体长度的数，重复 4 次）。
+   - `geoParam` = **外场长度：`1.5 × 弹体长度`，另外 3 位：`1.2 × 弹体长度`**（固定套用，不做型号换算）
    - `chooseParam`：第 2 位恒 `0`（外场）、第 3 位恒 `3`（弓形）；**第 1 位 = 头部方向位，按弹头实际指向取**（后端 `CreatEllipse()` 的映射是确定的）：
-     - **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向取 0 / 负向取 1；X轴=0、Y轴=1、Z轴=2）。弓形锥顶放在 `centerCoor + 头部方向 × 外场大小/2`。
+     - **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向取 0 / 负向取 1；X轴=0、Y轴=1、Z轴=2）。弓形锥顶放在 `centerCoor + 头部方向 × 外场长度/2`（外场长度 = `geoParam` 第 1 位 = `1.5 × 弹体长度`）。
      - 弹头指向 = `nose` 分组包围盒中心 相对 弹体包围盒中心 的轴向与符号 → 取对应数字。
+     - 🔴 **`nose` / `fuselage` 的 ID 是「超面 ID」，不能直接拿去做端点查询**——端点查询（`GetStartAndEndPointByConnectors`）吃的是**网格面/网格线 ID**。必须先用 `GetAllSpitAssemblyGroupProperty` 取该组 `domain[].ids`，得到网格面 ID 再查（2026-10-23 实测：直接用分割返回的超面 ID 取端点，几何形态不像弹头，白跑一轮）。
    - `centerCoor`：🔴 **直接用 `GetCreateBlockDefaultParam()` 返回的 `centerCoor`**——后端已按**模型包围盒中心**算好，且算的时候已排除远场面（源码 `MergeDomainGrid` 跳过 `OUTFILED`）。**不需要补偿、不需要试探生成**：弓形严格以 `centerCoor` 居中摆放（X 跨 `centerCoor ± S/2`，Y/Z 关于 `centerCoor` 对称）。
      - 如需自算：用**物面**网格线端点包围盒中心（`GetAllObjectByType(5)` 取线 → `GetStartAndEndPointByConnectors` → 各轴 min/max 取中值）。
      - 🔴 **自算时必须排除已生成的外场面**（`GetDomainsByType(3)`）——外场线会把中心整个带偏，这正是旧文档被迫用补偿公式去凑的根因。
    - `meshSizeOrDimension`：**必须按外场大小等比缩放**，否则外场越小网格越粗——
-     - `meshSizeOrDimension = 默认 meshSize × (外场大小 / 默认 geoParam)`
-     - 本弹算例：默认 `geoParam`≈20320.4、`meshSize`≈2077.1，外场 6095.9 → `2077.1 × (6095.9 / 20320.4) ≈ 620`。
-     - 想更密就把结果继续调小（620 → 500 → 400…），每次重删重建看效果。
+     - `meshSizeOrDimension = 默认 meshSize × (外场长度 / 默认 geoParam)`
+     - **现算**：`外场长度` = `1.5 × 弹体长度`，`默认 geoParam` / `meshSize` 都取 `GetCreateBlockDefaultParam()` 的返回值。本文件不记数值。
+     - 想更密就把结果继续调小，每次重删重建看效果。
    - `meshType` = `0`（给定尺寸）。
-3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)`。
-   - 🔴 返回 `"true"` = 网格封闭，外场面已生成；返回 `"false"` 且报不封闭线 = 转 `missile-mesh-sealing-check.md` 排查。
-4. **不做建后校验**：🔴 `UGBlockCreate` 返回 `"true"`（= 网格封闭、外场面已生成）**即为本阶段结束**——**不调 `GetDomainsByType(3)` 复核外场面、不读外场包围盒、不做居中/锥顶核对、不要求用户界面目视复核**。这些检查在此处既不产生决策、又纯耗轮次，已全部删除；外场的居中与朝向由第 2 步的参数规则（`centerCoor` 直接沿用默认值 + 方向位按弹头指向取）保证。
-   - ⚠️ **本条只约束"建场之后"**：§6.1 第 1 步那个「外场是否已存在」的 `GetDomainsByType(3)` **属建场前的场景判定，照常执行、不受本条影响**。
-   - 清理注意：重删时 `DeleteBlock(blockIDs, isDeleteDomain=0, isDeleteConnector=0)` **只删体块**，外场面用 `DeleteDomain(domainIDs, isDeleteConnector=1)` 单独删——⚠️ 严禁 `DeleteBlock` 传 `isDeleteDomain=1`（会级联误删表面网格）。
+3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)`。🔴 **返回 `"true"` 即完成本阶段，直接进入 §6.4 空间网格**——**不做建后校验**（2026-10-23 用户裁定：为省时省略）。返回 `"false"` 且报不封闭线 = 转 `missile-mesh-sealing-check.md` 排查。
+   - ⚠️ 清理注意（重删重建时）：`DeleteBlock(blockIDs, isDeleteDomain=0, isDeleteConnector=0)` **只删体块**，外场面用 `DeleteDomain(domainIDs, isDeleteConnector=1)` 单独删——🔴 **严禁 `DeleteBlock` 传 `isDeleteDomain=1`**（会级联误删表面网格）。
 
 > 失败处理（返回 `"false"`，按序排查，不穷举参数组合）：
 > 1. 错误信息含「不封闭的网格线ID如下」→ 转排查（清单以后端报出为准）。

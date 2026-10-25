@@ -1,6 +1,6 @@
 ---
 name: missile-chordwise-direction
-description: 【回退专用】导弹翼窄面（前缘/后缘/翼梢）各向异性网格线分布处理。窄面首层高度用加密尺寸 0.005×当地弦长，增长率 1，层数 50。侧面增长率 1.2。适用于弹翼(wing)。🔴 仅在 `MissileAnisoProcessMissileAnisotropy` 一站式返回 `status="failed"` 时由 `missile-anisotropy-processing` 自动回退加载（映射见 `missile-anisotropic-mesh.md` §「分步回退」）；一站式正常时**不得**主动加载本 Skill。
+description: 【回退专用】导弹翼窄面（前缘/后缘/翼梢）各向异性网格线分布处理。窄面首层高度用 0.1×该对翼厚度，增长率 1，层数 50。侧面增长率 1.2。适用于弹翼(wing)。🔴 仅在 `MissileWingAnisoProcessWingAnisotropy` 一站式返回 `status="failed"` 时由 `missile-anisotropy-processing` 自动回退加载（映射见 `missile-anisotropic-mesh.md` §「分步回退」）；一站式正常时**不得**主动加载本 Skill。
 aliases: [翼窄面分布, 窄面加密, wing narrow-face, 前缘加密, 后缘加密, 翼梢加密]
 tags: [CFD, 网格, 各向异性, 弦向, 导弹, 翼]
 category: CFD
@@ -14,14 +14,14 @@ allowed-tools: []
 ## 适用位置
 
 - 导弹翼**窄面**：前缘（`wingLeadingEdgeN`）、后缘（`wingTrailingEdgeN`）、翼梢（`wingTipN`，**仅梯形翼存在，按 M2 探测**）
-- 增长率 1，层数 50，首层高度 = 加密尺寸 0.005×当地弦长
+- 增长率 1，层数 50，首层高度 = **`0.1 × 该对翼厚度`**（`wings[N−1].thickness`）
 - 部件：弹翼(`wing`)
 - 🔴 **侧面（`wingSideSurfaceN`）不在此 Skill 范围**——侧面增长率 1.2，见 `missile-anisotropic-mesh.md`
 
 ## 前置条件
 
-- 已通过 `GetMissileDimensions` 获取弦长参数（🔴 接口返回**毫米 mm**，直接用，禁止 ×1000）
-- 弹翼按对：🔴 **C_root(N) 取 `GetMissileDimensions` 接口值 `wings[N−1].root_chord`**（事实中心 §2，2026-10-14 起**无固定值**；N 由组名末位数字读出，**不得各对共用**）；🔴 C_tip(N) **按对取 `wings[N−1].tip_chord`，并按翼型分叉**（M2，先探 `wingTipN` 是否存在）：**三角翼**（无 `wingTipN`）≈0 正常，**禁止 0 代入，梢部端间距钳制到该对 C_root(N) 计算值（= `0.005×C_root(N)` / `0.02×C_root(N)`，现算，事实中心 §2.2.2）**；**梯形翼**（有 `wingTipN`）按接口 C_tip(N) 正常使用
+- 已通过 `GetMissileDimensions` 获取弦长与厚度参数（🔴 接口返回**毫米 mm**，直接用，禁止 ×1000）
+- 弹翼按对：🔴 **C_root(N) 取 `GetMissileDimensions` 接口值 `wings[N−1].root_chord`、厚度取 `wings[N−1].thickness`**（事实中心 §2，2026-10-14 起**无固定值**；N 由组名末位数字读出，**不得各对共用**）；🔴 C_tip(N) **按对取 `wings[N−1].tip_chord`，并按翼型分叉**（M2，先探 `wingTipN` 是否存在）：**三角翼**（无 `wingTipN`）≈0 正常，**禁止 0 代入，梢部端间距钳制到该对 C_root(N) 计算值（= `0.02×C_root(N)`，现算，事实中心 §2.2.2）**；**梯形翼**（有 `wingTipN`）按接口 C_tip(N) 正常使用
 - 已获取翼面尺寸（中间值用）
 - 表面网格已生成
 - **链路接口可用**：`GetConnectorsByDomains` 能返回真实网格线 ID（若返回兜底值，整个各向异性阶段按主 Skill「工具可用性判定」标记 `skipped`）
@@ -40,12 +40,14 @@ allowed-tools: []
 
 | 参数 | 值 |
 |---|---|
-| 前缘端间距（首层高度） | 0.005 × 当地弦长（加密尺寸） |
-| 后缘端间距（尾端高度） | 0.005 × 当地弦长（加密尺寸） |
+| 前缘端间距（首层高度） | **`0.1 × 该对翼厚度`**（`wings[N−1].thickness`） |
+| 后缘端间距（尾端高度） | **`0.1 × 该对翼厚度`**（同上） |
 | 增长率（headRate / tailRate） | 1（窄面专用） |
 | 层数（headLayer / tailLayer） | 50（默认） |
-| 中间值（mindValue） | 翼面尺寸一致（0.02 × 当地弦长） |
+| 中间值（mindValue） | **`0.02 × 该对根弦长`**（`wings[N−1].root_chord`） |
 
+> 🔴 **2026-10-22 口径变更**：旧口径 `0.005 × 当地弦长`「加密尺寸」**已作废**，弹翼一律改用**厚度**基准。
+>
 > ⚠️ 上表是**语义值**，不是参数名。调用时的真实形参只有 5 个：
 > `UGReDimensionConfigDistribution(ids, headspace, tailspace, params, mindValue)`——
 > 增长率与层数（headRate/headLayer/tailRate/tailLayer）**打包进 `params` 字符串**
@@ -77,10 +79,10 @@ for d in result["domains"]:                            # 解析时循环合并�
 | 参数 | 值 |
 |---|---|
 | `ids` | 弦向网格线 ID（逗号分隔） |
-| `headspace` | 0.005 × 当地弦长（加密尺寸） |
-| `tailspace` | 0.005 × 当地弦长（加密尺寸） |
+| `headspace` | **`0.1 × 该对翼厚度`**（`wings[N−1].thickness`） |
+| `tailspace` | **`0.1 × 该对翼厚度`**（同上） |
 | `params` | `"1,50,1,50"`（严格格式 `"headRate,headLayer,tailRate,tailLayer"`） |
-| `mindValue` | 翼面尺寸（0.02 × 当地弦长） |
+| `mindValue` | **`0.02 × 该对根弦长`**（`wings[N−1].root_chord`） |
 
 3. 如需对边匹配，调用 `UGReDimensionMatch(ids, targetId)`。
 4. 如需平滑过渡到相邻区域，调用 `UGReDimensionSmoothDistribution(ids, headspace, tailspace, params, mindValue)`（参数格式同 `UGReDimensionConfigDistribution`，同样只有 5 个形参）。
@@ -88,7 +90,7 @@ for d in result["domains"]:                            # 解析时循环合并�
 ### 注意事项
 
 - 弦向分布**只控制内部点分布**，不更改边界分布。
-- 若根部和梢部的当地弦长不同（`C_root(N)` ≠ `C_tip(N)`，**都按该对取**），需沿展向分段分别计算前缘/后缘间距。🔴 **三角翼**（无 `wingTipN`，M2）：C_tip(N)≈0 → **不分段**，前缘/后缘间距一律用该对 C_root(N) 计算值（`0.005×C_root(N)`，**现算**），尖点处钳制不取 0（事实中心 §2.2.2）。**梯形翼**（有 `wingTipN`）：按 C_tip(N) 实际值分段计算。🔴 **各对独立**：`wingLeadingEdge2` 用 `wings[1]`，不得沿用第 1 对的弦长。
+- 🔴 **首层/端间距一律 `0.1×该对厚度`，与弦长无关**——三角翼/梯形翼的首层高度完全相同。若根部和梢部的当地弦长不同（`C_root(N)` ≠ `C_tip(N)`，**都按该对取**），**只有中间值 `mindValue` 需沿展向分段**。🔴 **三角翼**（无 `wingTipN`，M2）：C_tip(N)≈0 → **不分段**，中间值一律用该对 C_root(N) 计算值（`0.02×C_root(N)`，**现算**）。**梯形翼**（有 `wingTipN`）：按 C_tip(N) 实际值分段计算。🔴 **各对独立**：`wingLeadingEdge2` 用 `wings[1]`，不得沿用第 1 对的弦长/厚度。
 - 前缘点数 ≥ 7，梢部点数 ≥ 7。
 
 ## 完成标准

@@ -1,24 +1,3 @@
-"""导弹弹翼各向异性网格处理工具。
-
-对生成好的导弹表面非结构网格的弹翼部分做各向异性处理，
-在 SuperFacePointCloudProcessorMissile 完成分部件处理之后调用。
-
-导弹弹翼分组命名规则（数字后缀表示第几对弹翼）：
-  wingLeadingEdge1, wingTrailingEdge1, wingSideSurface1, wingTip1
-  wingLeadingEdge2, wingTrailingEdge2, wingSideSurface2, wingTip2
-  wingLeadingEdge3, wingTrailingEdge3, wingSideSurface3, wingTip3
-
-处理流程（每对弹翼独立处理）：
-  1. 获取弹体尺寸（弹径、弹长）
-  2. 按对取该对弹翼的弦长，算 MAC（🔴 直读尺寸缓存 `wings` 数组，不经 SPIDER::Data）
-  3. 分类网格线（前缘、后缘长/短、翼身交线、翼梢交线）
-  4. 分布设置
-  5. 创建各向异性线组
-  6. 应用各向异性域（含翼后缘面，三角翼/梯形翼一视同仁）
-  7. 弹尾加密
-"""
-
-from client import send_post_request
 """GridStar 导弹业务域工具。
 
 导弹模块专用工具函数集合。
@@ -73,7 +52,7 @@ def ClassifyMissile(serverHost: str, serverPort: int, outputDir: str):
         faces 为整数 face_id 列表，对应数模原始面。该结果直接用于后续 UGSpitAssembly 分组操作。
 
         🔴 **本工具同时产出尺寸**：流水线第 10 步会实算全弹长/弹径/弹尾口径/球头半径/
-        各对翼弦长与半翼展，缓存供 `GetMissileDimensions()` 读取。因此
+        各对翼弦长与翼厚度，缓存供 `GetMissileDimensions()` 读取。因此
         **必须先跑本工具，`GetMissileDimensions()` 才有值**（否则返回 `{}`）。
 
         失败时返回 status="error"。
@@ -83,6 +62,43 @@ def ClassifyMissile(serverHost: str, serverPort: int, outputDir: str):
         "serverPort": serverPort,
         "outputDir": outputDir
     }, timeout=360)
+
+
+def MissileSurfMeshGenerate():
+    """导弹表面网格生成 + 网格线合并（碎线合并），按导弹口径逐组自动设置尺寸。
+
+    后端接口名 `MissileSurfMeshGenerate`，无入参。内部两步：
+      1. `[UGSur]` 表面网格生成
+      2. `DomainAPI::MergeEdges` 网格线合并（碎线合并，remshType=false 走标准 Remesh）
+
+    🔴 **尺寸口径全部由后端从 `SPIDER::Data` 取**（先跑 `ClassifyMissile` 或
+    `GetMissileDimensions` 写回），组名决定取哪一口径 —— **Agent 侧不传任何尺寸**：
+
+    | 分组名 | 目标尺寸 | 说明 |
+    |---|---|---|
+    | `nose`（球头，R>0） | `min(0.01×D, 0.25×R)` | 球头公式**用原始弹径 D**，不用 surface 口径 |
+    | `nose`（尖头，R=0） | `0.005×D` | |
+    | `fuselage` / `tail` | `0.05×D_tail` | 弹尾口径 |
+    | `wing*N` | `0.02×C_root(N)` | 第 N 对翼，N = 组名末尾数字；`C_root(N)` = `wings[N−1].root_chord` |
+
+    所有分组：最小尺寸 = 目标 × 1/10，曲率自适应角度 = 10。
+
+    ⚠️ 口径缺失的组**保持原值**（不报错、不中断）——`wing*N` 取不到该对弦长时跳过该组。
+
+    🔴 **前置条件（顺序不可颠倒）**：
+      1. 数模已导入（`ImportCADFile`）
+      2. `ClassifyMissile` 已完成（分组已建 + 尺寸已实算缓存）
+      3. `GetMissileDimensions` 已调用（尺寸写回 `SPIDER::Data`）
+
+    推荐的完整导弹流程顺序：`ClassifyMissile` → `GetMissileDimensions`
+    → **`MissileSurfMeshGenerate`** → `MissileWingAnisoProcessWingAnisotropy`。
+
+    Returns:
+        成功时返回 `"true"`（后端 `testSurf()` 为 void，无结构化返回值）。
+        🔴 本工具**不做返回后核验**：返回 `"true"` 即视为该阶段结束，
+        不查询网格统计、不比对尺寸数值。副作用：模型树已刷新、全部外部可见对象已选中。
+    """
+    return send_post_request("MissileSurfMeshGenerate", {})
 
 
 def DetermineWingTEDirection(wingTeDomainId: int, wingTipDomainId: int, longIds: str):
@@ -248,7 +264,7 @@ def GetMissileDimensions():
     🔴 **本接口返回值是尺寸的唯一权威来源**（2026-10-14 用户裁定）——旧固定值
     D=1196.076 / C_root=3225 / 半翼展=1655.038 **已作废**，一律用接口值。
 
-    返回参数（11 项，后端 snake_case 字段；参数能拿到就全部保留，不删除）：
+    返回参数（后端 snake_case 字段；参数能拿到就全部保留，不删除）：
     - fuselage_length: 全弹长（外场基准，弓形外场 = 1.2× 全弹长）
     - body_diameter: 弹径 D（头锥/弹体交接处口径；🔴 球头公式与各向异性用此值）
     - body_diameter_tail: 弹尾口径
@@ -256,34 +272,35 @@ def GetMissileDimensions():
       `|D − D_tail| > 0.7 × D_tail` 时为尾口径，否则 = D。🔴 **表面网格非球头部分用此值；
       球头公式例外**，仍用原始 `body_diameter` + `nose_radius`
     - nose_radius: 球头半径（球头网格尺寸基准 R；尖头时为 0）
-    - wing_root_chord: 翼根弦长（弹翼网格尺寸基准）
-    - wing_tip_chord: 翼梢弦长（弹翼梢部网格尺寸；三角翼按 §M2 钳制）
-    - wing_half_span: 半翼展（展向分布用）
+    - wing_root_chord: 翼根弦长（= `wings[0].root_chord`，第 1 对便捷入口）
+    - wing_thickness: 🔴 **翼厚度（翼后缘处）**（= `wings[0].thickness`，第 1 对便捷入口）
     - fin_root_chord: 舵根弦长（🔴 当前型号无舵，但接口如有返回则保留该参数）
     - fin_tip_chord: 舵梢弦长（同上）
     - fin_clearance_height: 舵底间隙高度（舵底到弹体距离 H；同上）
 
-    ★ 多对弹翼（`wings` 数组，2026-10-16 新增）：
-    上面三个 `wing_*` 标量键描述的是**第 1 对**弹翼。多对翼时改用 `wings`
-    数组按对取值 —— 下标 0 即第 1 对（与上面三个标量键同源，两处数值必须一致）：
+    🔴 **已移除的散标量键**：`wing_tip_chord` / `wing_half_span` —— 2026-10-21 起
+    不再是尺寸键（值都在 `wings[]` 里），不再写回后端 `Data`。
+
+    ★ 多对弹翼（`wings` 数组，2026-10-16 新增，2026-10-21 加 `thickness`）：
+    `wing_root_chord` / `wing_thickness` 两个标量键描述的是**第 1 对**弹翼。
+    多对翼时改用 `wings` 数组按对取值 —— 下标 0 即第 1 对（与标量键同源，两处数值必须一致）：
 
     - wings[i].root_chord: 第 i+1 对弹翼的翼根弦长 C_root（单位 mm）
     - wings[i].tip_chord:  第 i+1 对弹翼的翼梢弦长 C_tip
     - wings[i].half_span:  第 i+1 对弹翼的半翼展 b/2（🔴 仅报告字段，不参与任何计算）
+    - wings[i].thickness:  🔴 第 i+1 对弹翼的**翼厚度（翼后缘处）**（单位 mm）——
+      根部区尾缘带先按径向方向拆成单片翼，逐片沿翼面法向（径向切向）取
+      2%~98% 分位跨度，多片取中位。**弹翼各向异性的首层高度/端间距基准**
 
     数组长度 = 分割实算出的翼对数（按组名 `wing*N` 的 N 推出），与模型实际对数一致。
-    每对翼只需 root_chord + tip_chord 即可确定全部网格尺寸：
-    各向异性加密尺寸 = 0.005 × MAC、翼面尺寸 = 0.02 × MAC，
-    其中 MAC = (2/3)·C_root·(1+λ+λ²)/(1+λ)，λ = C_tip/C_root。
 
     分部件命名（多对翼）：`wingLeadingEdgeN` / `wingTrailingEdgeN` /
     `wingSideSurfaceN` / `wingTipN`，N 从 1 开始（第 N 对翼，`wingTipN` 仅梯形翼存在）。
 
-    > 🔴 **本接口还有副作用**：返回值会写回后端 `SPIDER::Data`，供各向异性一站式工具
-    > `MissileAnisoProcessMissileAnisotropy()` 读取。🔴 **各向异性阶段之前必须先调用本接口**。
-    > 🔴 2026-10-16 起各向异性侧的弹翼尺寸**不再经 `SPIDER::Data` 中转**，改为按对
-    > 直读尺寸缓存的 `wings` 数组（`GetWingPairDims`）——该缓存与 `GetMissileDimensions`
-    > 同源（都由分割流水线第 10 步写入），`wings` 缺失的对会回退到第 1 对。
+    > 🔴 **本接口还有副作用**：返回值会写回后端 `SPIDER::Data`，供
+    > `MissileSurfMeshGenerate`（表面网格逐组尺寸）与
+    > `MissileWingAnisoProcessWingAnisotropy`（弹翼各向异性）读取。
+    > 🔴 **两者之前都必须先调用本接口**，否则弹翼按对数组为空、各向异性工具守卫 `failed`。
 
     > 命名提示：本模块函数名与参数名统一使用现行命名 —— `wing` = 弹翼、`fuselage` = 弹体；当前型号无舵(`fin`)、无舵轴(`finshaft`)，相关分组不再出现。几何尺寸参数 `fin_*_chord` / `fin_clearance_height` **按后端实际返回值处理**：有值则保留使用，未返回则忽略。
 
@@ -296,14 +313,13 @@ def GetMissileDimensions():
           "body_diameter_surface": 800.0,
           "nose_radius": 50.0,
           "wing_root_chord": 1200.0,
-          "wing_tip_chord": 800.0,
-          "wing_half_span": 2500.0,
+          "wing_thickness": 40.0,
           "fin_root_chord": 600.0,
           "fin_tip_chord": 400.0,
           "fin_clearance_height": 50.0,
           "wings": [
-            {"root_chord": 1200.0, "tip_chord": 800.0, "half_span": 2500.0},
-            {"root_chord": 1100.0, "tip_chord": 700.0, "half_span": 2100.0}
+            {"root_chord": 1200.0, "tip_chord": 800.0, "half_span": 2500.0, "thickness": 40.0},
+            {"root_chord": 1100.0, "tip_chord": 700.0, "half_span": 2100.0, "thickness": 36.0}
           ],
           "unit": "mm"
         }
@@ -340,46 +356,49 @@ def GetMissilePartGroups():
     return raw
 
 
-def MissileAnisoProcessMissileAnisotropy():
-    """导弹弹翼各向异性处理主入口 — 依次执行全部子步骤并汇总结果。
+def MissileWingAnisoProcessWingAnisotropy():
+    """导弹弹翼各向异性处理主入口 — 每对弹翼独立处理，依次执行全部子步骤并汇总。
 
-    包含：尺寸数据获取 → 弹翼线分类 → 分布设置 →
-          各向异性线组创建 → 各向异性域生成（含翼后缘面）→ 弹尾加密。
+    后端接口名 `MissileWingAnisoProcessWingAnisotropy`（`MissileWingAnisotropicProcessor`），
+    替换旧一站式 `MissileAnisoProcessMissileAnisotropy`。内部 5 步：
 
-    参数基准（需求，见 missile-anisotropic-mesh.md §「各位置参数」）：
-      - 加密尺寸 = 0.005 × 当地弦长（首层高度，窄面/侧面/结合处/弹尾一律）
-      - 翼面尺寸 = 0.02  × 当地弦长（分布中间值）
-      - 增长率：窄面（前缘/后缘/翼梢）＝ 1；侧面/结合处/弹尾 ＝ 1.2
-      - 层数统一 50
-      - 多对翼 N=1/2/3 逐对各按自身弦长处理；弹尾取弦长最大的那一对翼的参数
-      - 🔴 当地弦长源自 GetMissileDimensions 接口值（单位 mm），**无固定值**
+    | 步骤 | 功能 |
+    |---|---|
+    | 1 | 尺寸与对数（按对取根弦长 + 厚度） |
+    | 2 | 短边/长边分类（每对 4 类短边 / 7 类长边） |
+    | 3 | 分布设置（短边双曲正切；长边增长分布） |
+    | 4 | 各向异性线组创建（每对两组 A/B，type=1） |
+    | 5 | 各向异性域生成（组A 增长率 1 / 组B 增长率 1.2，type=0 generateType=2） |
 
-    🔴 **尺寸来源（2026-10-16 按对 / 2026-10-17 实算）**：弹体尺寸（D / 弹尾口径 / 球头半径）由后端读
-      `GetMissileDimensions` 写回 `SPIDER::Data` 的值；🔴 **弹翼尺寸按对直读尺寸缓存**
-      `wings` 数组（`GetWingPairDims`，下标 = 对数−1），**已不经 `SPIDER::Data` 中转**。
-      该缓存由 `ClassifyMissile` 第 10 步 `CalculateDimensions()` 实算写入（2026-10-17 起，
-      不再有手写固定表），`wings` 缺失的对自动回退到第 1 对。
-      🔴 **因此必须先跑 `ClassifyMissile`**，否则缓存为空、本工具因弹体尺寸守卫 `failed`。
+    分组命名（数字后缀 = 第几对弹翼 N = 1,2,...）：
+      `wingLeadingEdgeN` / `wingTrailingEdgeN` / `wingSideSurfaceN` / `wingTipN`
+      （`wingTipN` 仅梯形翼存在；三角翼缺失属正常，不影响其余位置）
 
-    翼后缘面：🔴 不单独处理、不按翼型分支 —— 后缘面已在各向异性域生成步骤内
-      一并做各向异性（generateType=2，增长率取窄面 1），**三角翼 / 梯形翼同款，
-      只要是翼后缘就做各向异性**。无独立「后缘处理」阶段，也不做狭长面。
+    尺寸口径（全部取自后端 `SPIDER::Data`，**Agent 侧不传参**）：
+      - 首尾端间距 / 各向异性首层高度 = `0.1 × 该对弹翼厚度`（`thickness`，翼后缘处厚度）
+      - 长边分布中间值 = `0.02 × 该对翼根弦长`
+      - 增长率：组A（窄面）＝ 1；组B（侧面/结合处）＝ 1.2；层数统一 50
 
-    弹尾：🔴 **与翼侧面同套参数**（首层＝加密尺寸、增长率 1.2、层数 50）——
-      后端会先建 `tailJunction` 各向异性线组再生成域，使弹尾与弹体结合那一圈
-      的密度与翼身结合处一致（2026-10-14 修）。
+    🔴 **尺寸来源（2026-10-22 起）**：弹翼尺寸按对读 `SPIDER::Data` 的数组
+      `m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`。这两个数组由
+      `CalculateDimensions()` 实算、经 `GetMissileDimensions` 接口写回。
+      🔴 **因此 `GetMissileDimensions` 必须先调用**，否则数组为空、本工具守卫 `failed`。
+      （旧文档所述「直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转」**已作废**。）
+
+    ⚠️ **不含弹尾加密**（旧一站式 step6 已随旧工具弃用）。弹尾各向异性由后续
+      独立工具处理，本工具不做、也不应期待返回里有 `step6_tail`。
 
     前置条件：
-      - 🔴 **`GetMissileDimensions` 已调用**（尺寸写回后端；未调用 → 本工具 `failed`）
-      - 导弹表面非结构网格已生成
-      - 导弹子部件分割已完成
-      （fuselage, nose, tail, wingLeadingEdgeN, wingTrailingEdgeN,
-       wingSideSurfaceN, wingTipN 等分组已存在）
+      - 🔴 `ClassifyMissile` 与 `GetMissileDimensions` 均已调用（尺寸已写回后端）
+      - 导弹表面网格已生成（`MissileSurfMeshGenerate`）
+      - 上述带序号弹翼子面分组（`wingSideSurfaceN` 等）已存在
 
     Returns:
         JSON 字符串，格式：
-        {"status":"success|failed","steps":{
+        {"status":"success|failed","message":"...","steps":{
             "step1_dimensions":..., "step2_classify":..., "step3_distribution":...,
-            "step4_aniso_line_groups":..., "step5_aniso_domains":..., "step6_tail":...}}
+            "step4_aniso_line_groups":..., "step5_aniso_domains":...}}
+        🔴 **只看顶层 `status` 判定成败**；`steps.*` 是执行信息，其中出现 `failed`
+        不代表整体失败，不得据此判定失败或重复执行。
     """
-    return send_post_request("MissileAnisoProcessMissileAnisotropy", {})
+    return send_post_request("MissileWingAnisoProcessWingAnisotropy", {})

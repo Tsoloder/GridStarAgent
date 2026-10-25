@@ -145,11 +145,12 @@ GetRecentMessages = query.GetRecentMessages
 ClassifyMissile = missile.ClassifyMissile
 GetMissileDimensions = missile.GetMissileDimensions
 GetMissilePartGroups = missile.GetMissilePartGroups
+MissileSurfMeshGenerate = missile.MissileSurfMeshGenerate
 DetermineWingTEDirection = missile.DetermineWingTEDirection
 IdentifyWingLeadingEdge = missile.IdentifyWingLeadingEdge
 CreateMissileFarField = missile.CreateMissileFarField
 CheckMissileMeshQuality = missile.CheckMissileMeshQuality
-MissileAnisoProcessMissileAnisotropy = missile.MissileAnisoProcessMissileAnisotropy
+MissileWingAnisoProcessWingAnisotropy = missile.MissileWingAnisoProcessWingAnisotropy
 
 if screen_automation is not None:
     FindGridStarWindow = screen_automation.FindGridStarWindow

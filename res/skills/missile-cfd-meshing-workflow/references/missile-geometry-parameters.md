@@ -6,8 +6,7 @@
 
 - 🔴 **MCP 工具（首选来源）**：`GetMissileDimensions()` — 无参数，注册在 `missile` 工具分组内。
   调用前需先 `enable_tool_group("missile")`（`query` / `project` 为默认已启用，`missile` 不是）。
-- **推理计算**：`MissileAnisotropicProcessor::GetBodyDimensions()` — 从 fuselage 面网格坐标推算弹径
-- **内部接口（非 MCP，C++ 层）**：`SPIDER::Data::GetFuselageLength()` — 取全弹长
+- **内部接口（非 MCP，C++ 层）**：`SPIDER::Data::GetFuselageLength()` — 取全弹长；`GetWingRootChords()` / `GetWingThicknesses()` — 各向异性处理器按对读的尺寸数组（由 `GetMissileDimensions` 写回）
 
 > ⚠️ `GetMissileDimensions` **是** MCP 工具。历史文档曾写作"不是 MCP 工具、不可调用"，该说法**已作废**——照此执行会放弃唯一的尺寸来源。取尺寸时**先调它**，失败或返回兜底值才回退用户输入。
 
@@ -21,7 +20,7 @@
 > 🔴 **调用顺序被约束**：必须先 `ClassifyMissile`（产出 `wing*N` 分组 + 实算尺寸），
 >    再 `GetMissileDimensions()`（读缓存）。顺序颠倒会拿到 `{}`。
 >
-> 🔴 **2026-10-16 起弹翼按对**：弹翼尺寸是**数组** `wings[]`（下标 = 对数−1，每项 `root_chord` / `tip_chord` / `half_span`），第 N 对翼取 `wings[N−1]`；标量键 `wing_root_chord` 等 = `wings[0]`，仅作单对翼便捷入口。
+> 🔴 **2026-10-16 起弹翼按对**：弹翼尺寸是**数组** `wings[]`（下标 = 对数−1，每项 `root_chord` / `tip_chord` / `thickness` / `half_span`），第 N 对翼取 `wings[N−1]`；标量键只有 `wing_root_chord` / **`wing_thickness`**（= `wings[0]`，单对翼便捷入口）；🔴 旧标量键 `wing_tip_chord` / `wing_half_span` **已不再产出**。
 > 🔴 **接口返值单位就是毫米（mm）**，**直接传参，禁止再 ×1000**。
 > 🔴 **弹翼尺寸按对取**（`wings` 数组，2026-10-16 新增）。
 
@@ -31,8 +30,9 @@
 | 弹径 D (body_diameter) | `GetMissileDimensions()` | 头锥/弹体交接处口径；球头公式与各向异性用它 |
 | **表面网格有效弹径** body_diameter_surface | `GetMissileDimensions()` 返回的同名字段 | 🔴 **表面网格非球头部分用此值**；失配 >70% 时为弹尾口径（见下） |
 | 弹尾口径 body_diameter_tail | `GetMissileDimensions()` | 失配判据来源；弹尾尺寸 |
-| 翼根弦长 C_root(N) | `GetMissileDimensions()` → `wings[N−1].root_chord` | 第 N 对弹翼尺寸 / 各向异性当地弦长（🔴 **按对取**，不得各对共用） |
-| 翼梢弦长 C_tip(N) | `GetMissileDimensions()` → `wings[N−1].tip_chord` | 🔴 **按翼型分叉**（事实中心 M2）：三角翼（无 `wingTipN`）≈0，禁止 0 代入、梢部端间距钳制到该对 C_root(N) 计算值；梯形翼（有 `wingTipN`）正常使用 |
+| 翼根弦长 C_root(N) | `GetMissileDimensions()` → `wings[N−1].root_chord` | 第 N 对弹翼表面网格尺寸（0.02×）/ 各向异性**中间值**（🔴 **按对取**，不得各对共用） |
+| 🔴 **翼厚度 T(N)** | `GetMissileDimensions()` → `wings[N−1].thickness` | **各向异性首层高度/端间距基准**（`0.1×`，2026-10-22 起）；= 该对翼根部尾缘带沿厚度方向的跨度 |
+| 翼梢弦长 C_tip(N) | `GetMissileDimensions()` → `wings[N−1].tip_chord` | 🔴 **按翼型分叉**（事实中心 M2）：三角翼（无 `wingTipN`）≈0，禁止 0 代入、梢部端中间值钳制到该对 C_root(N) 计算值；梯形翼（有 `wingTipN`）正常使用 |
 | 半翼展 b/2(N) | `GetMissileDimensions()` → `wings[N−1].half_span` | 第 N 对展向分布跨度（🔴 仅 Agent 侧报告；后端不参与尺寸计算） |
 | 球头半径 R (nose_radius) | `GetMissileDimensions()` / 用户输入 | 🔴 接口返 **mm**，直接用；`>0` 球头 / `==0` 尖头（M3） |
 
@@ -56,15 +56,16 @@
    - 分组缺失（分割跑过但没产出可用分组）→ 排查分割
    返回恒定 `"true"` 同样为兜底值，不得当作成功
 3. 🔴 **单位**：接口返回**毫米（mm）**——**直接传参，禁止 ×1000**
-4. **各向异性处理器内部自动计算** MAC — 调用 `MissileAnisoProcessMissileAnisotropy()` 后，返回结果中包含步骤 2 的每对弹翼 MAC 值
-5. 🔴 **各向异性处理器依赖接口**：一站式工具后端的**弹体尺寸**守卫读的是 `GetMissileDimensions` 写回的 `SPIDER::Data`（🔴 **弹翼尺寸按对直读尺寸缓存 `wings`，2026-10-16 起不经它中转**），**未调接口就调它会 `failed`** → 各向异性前必须先取尺寸
-6. 🔴 **顺序约束（2026-10-17）**：`ClassifyMissile` → `GetMissileDimensions` → `MissileAnisoProcessMissileAnisotropy`。尺寸由分割流水线实算并缓存，跳过分割会拿到空表
+4. **各向异性处理器内部自动计算** MAC — 调用 `MissileWingAnisoProcessWingAnisotropy()` 后，返回结果中包含步骤 2 的每对弹翼 MAC 值
+5. 🔴 **各向异性处理器依赖接口**：一站式工具后端按对读 `SPIDER::Data` 的 `m_wingRootChords` / `m_wingThicknesses`（由 `GetMissileDimensions` 写回），**未调接口就调它会 `failed`** → 各向异性前必须先取尺寸
+6. 🔴 **顺序约束（2026-10-17 起，2026-10-22 沿用）**：`ClassifyMissile` → `GetMissileDimensions` → `MissileSurfMeshGenerate` → `MissileWingAnisoProcessWingAnisotropy`。尺寸由分割流水线实算并缓存，跳过分割会拿到空表
 
 ### 接口未覆盖的量
 
 | 量 | 来源 | 当前状态 |
 |---|------|---------|
-| **平均气动弦长 MAC** | **各向异性处理器自动计算** | `MissileAnisoProcessMissileAnisotropy()` 返回结果中步骤 2 每对弹翼包含 MAC 值 |
+| **平均气动弦长 MAC** | **各向异性处理器自动计算** | `MissileWingAnisoProcessWingAnisotropy()` 返回结果中步骤 2 每对弹翼包含 MAC 值 |
+| 🔴 **翼厚度 T(N)** | `GetMissileDimensions()` → `wings[N−1].thickness` | 2026-10-22 新增；各向异性首层/端间距基准（`0.1×`） |
 | 特征长度 | 需求文件 2.1："特征长度：软件自行计算" | 软件内部计算，**agent 不传入** |
 
 ## 参数依赖关系
@@ -81,14 +82,15 @@ body_diameter_surface ──── 表面网格（非球头部分）用的口径
 
 nose_radius (R) ───────── 球头网格参数（min(0.01×D, 0.25×R)）
 
-wings[N−1].root_chord / wings[N−1].tip_chord ──┬── 弹翼网格参数（0.02×该对当地弦长）
-                                               └── 弹翼前缘/梢部（0.005×该对当地弦长）
-                                               （🔴 **按对取**：`wingSideSurface2` → `wings[1]`，不得各对共用）
-                                               （🔴 C_tip **按翼型分叉**（M2）：三角翼≈0 → 梢部端间距钳制到该对 C_root 计算值、不代入 0；梯形翼正常使用）
+wings[N−1].root_chord ──────── 弹翼表面网格参数（0.02×该对根弦长）
+wings[N−1].thickness  ──────── 🔴 弹翼各向异性首层高度/端间距（0.1×该对厚度，2026-10-22 起）
+wings[N−1].root_chord ──────── 弹翼各向异性中间值（0.02×该对根弦长）
+                              （🔴 **按对取**：`wingSideSurface2` → `wings[1]`，不得各对共用）
+                              （🔴 C_tip **按翼型分叉**（M2）：三角翼≈0 → 梢部端中间值钳制到该对 C_root 计算值、不代入 0；梯形翼正常使用）
 
 wings[N−1].half_span (b/2) ── 弹翼展向分布（线性插值 C_local 的跨度，按对取）
 
-fuselage_length ─────────────── 弓形外场（外场大小 = 1.2×全弹长）
+fuselage_length ─────────────── 弓形外场（外场长度 = 1.5×弹体长度，另外 3 位 = 1.2×弹体长度）
 
 body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 ```
@@ -97,9 +99,9 @@ body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 
 尺寸获取路径（按优先级）：
 
-1. **`GetMissileDimensions()`（MCP，🔴 唯一权威来源）** — 需先 `enable_tool_group("missile")`，且**必须先跑过 `ClassifyMissile`**（尺寸由分割流水线实算缓存）。一次拿全 `fuselage_length` / `nose_radius` / `body_diameter` / `body_diameter_tail` / `body_diameter_surface` / 🔴 **弹翼 `wings` 数组**（每项 `root_chord` / `tip_chord` / `half_span`，下标 = 对数−1），单位 mm
-2. **各向异性处理器** — `MissileAnisoProcessMissileAnisotropy()` 无参数，内部**自行**取尺寸：弹体尺寸从 `SPIDER::Data` 读（第 1 步写回），🔴 **弹翼尺寸按对直读尺寸缓存 `wings`**（`GetWingPairDims`，不经 `SPIDER::Data` 中转）；算完 MAC 返回 JSON 中 `pairs[].mac` 等字段。🔴 **弹体尺寸依赖第 1 步，未调接口会 `failed`**（弹翼尺寸不依赖）
-3. **内部接口（非 MCP）** — `SPIDER::Data::GetFuselageLength()` 可取全弹长（C++ 层）
+1. **`GetMissileDimensions()`（MCP，🔴 唯一权威来源）** — 需先 `enable_tool_group("missile")`，且**必须先跑过 `ClassifyMissile`**（尺寸由分割流水线实算缓存）。一次拿全 `fuselage_length` / `nose_radius` / `body_diameter` / `body_diameter_tail` / `body_diameter_surface` / 🔴 **弹翼 `wings` 数组**（每项 `root_chord` / `tip_chord` / **`thickness`** / `half_span`，下标 = 对数−1），单位 mm
+2. **各向异性处理器** — `MissileWingAnisoProcessWingAnisotropy()` 无参数，内部**自行**取尺寸：全部从 `SPIDER::Data` 读（由第 1 步写回），🔴 **弹翼按对读 `m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`**（旧文所述"直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转"**已作废**）；算完 MAC 返回 JSON 中 `pairs[].mac` 等字段。🔴 **未调接口 → 按对数组为空 → 直接 `failed`**
+3. **内部接口（非 MCP）** — `SPIDER::Data::GetFuselageLength()` / `GetWingRootChords()` / `GetWingThicknesses()`（C++ 层）
 4. ~~历史标定值~~ — 🔴 **已作废**（2026-10-14），禁止引用
 5. **用户输入** — 球头半径 R、其他接口缺失尺寸
 
@@ -107,7 +109,8 @@ body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 
 - D（弹径）：取接口值，**禁止由分组属性 `targetSize` 反推**
 - C_root(N)（第 N 对翼根弦长）：🔴 **按对取接口值** `wings[N−1].root_chord`（N 从组名末位数字读出）——不得用某一对的 C_root 代跑其他对
-- C_tip(N)（第 N 对翼梢弦长）：🔴 **按对取** `wings[N−1].tip_chord`，并**按翼型分叉**（事实中心 M2）——三角翼≈0，**禁止 0 代入**，梢部端间距钳制到**该对** C_root 计算值；梯形翼按接口值正常使用
+- 🔴 **T(N)（第 N 对翼厚度）**：**按对取接口值** `wings[N−1].thickness`——**各向异性首层/端间距的唯一基准**（`0.1×`），2026-10-22 起取代"当地弦长加密尺寸"
+- C_tip(N)（第 N 对翼梢弦长）：🔴 **按对取** `wings[N−1].tip_chord`，并**按翼型分叉**（事实中心 M2）——三角翼≈0，**禁止 0 代入**，梢部端中间值钳制到**该对** C_root 计算值；梯形翼按接口值正常使用
 - 半翼展 b/2(N)：🔴 **按对取接口值** `wings[N−1].half_span`（仅报告字段，后端不参与尺寸计算）
 - 🔴 **单位**：`GetMissileDimensions()` 返回**毫米（mm）**（几何坐标系本就是 mm，后端不做换算）；**直接传参，禁止 ×1000**
 
@@ -120,8 +123,9 @@ body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 | R（球头半径） | `GetMissileDimensions()` / 用户输入 | 反推 |
 | 全弹长 | `GetMissileDimensions()` / 内部接口 / 用户输入 | 任何非导弹几何查询工具 |
 | 各对当地弦长 C_root(N) / C_tip(N) | `GetMissileDimensions()` 的 **`wings[N−1]`**（按对） | 由分组属性 `targetSize`×10 或 `0.02×弹径` 反推 |
+| 🔴 **各对翼厚度 T(N)** | `GetMissileDimensions()` 的 **`wings[N−1].thickness`**（按对） | 反推 / 用弦长比例代替 |
 | 各对半翼展 b/2(N) | `GetMissileDimensions()` 的 **`wings[N−1].half_span`**（按对） | 由分组属性反推 |
-| MAC | 各向异性处理器自动计算（`MissileAnisoProcessMissileAnisotropy` 返回） | 用全弹长/弦长充当真值 |
+| MAC | 各向异性处理器自动计算（`MissileWingAnisoProcessWingAnisotropy` 返回） | 用全弹长/弦长充当真值 |
 
 > ⚠️ **为什么禁止反推**：分组属性 `targetSize` / `minSize` 的比值并不一致；按 `0.05×D` 或 `0.1×D` 反推会得到**相差 2 倍**的 D，直接带偏 `bodySpacing`/`rootSpacing`/各向异性尺寸。**分组属性只用于表面网格的 `groupProperty` 传参。**
 
@@ -139,20 +143,18 @@ body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 | 出现位置 | 使用 C_root(N)（根部弦长） | 使用 C_tip(N)（梢部弦长） | 🔴 三角翼（无 `wingTipN`，C_tip≈0） |
 |---------|----------------------|----------------------|----------------------|
 | **表面网格（模块 3.2）弹翼 0.02×** | **该对整组取 C_root(N)** | 不适用（分组为整组，无法按展向分段） | 该对整组取 C_root(N) |
-| 弦向分布（前缘端 0.005×） | 靠近根部段使用 | 靠近梢部段使用 | **不区分段，一律 C_root(N)**（无分段必要，梢部端钳制到 0.005×C_root(N)） |
-| 弦向分布（后缘端 0.005×） | 靠近根部段使用 | 靠近梢部段使用 | 同上，一律 C_root(N)（0.005×C_root(N)） |
-| 弦向分布（中间值 0.02×） | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
-| 展向分布（梢部端 edgeSpacing） | — | 用 C_tip(N) | **用 C_root(N) 计算值（0.005×C_root(N)）**——尖点处无弦长，钳制到根部比例 |
-| 展向分布（根部端 edgeSpacing） | 用 C_root(N) | — | 用 C_root(N)（0.005×C_root(N)） |
-| 各向异性 mindValue（0.02×） | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
-| 后缘面 bodySpacing（靠近梢部端） | — | 用 C_tip(N) | **用 C_root(N) 计算值（0.005×C_root(N)）**（三角翼后缘梢端为自由梢边） |
-| 后缘面 rootSpacing（靠近根部端） | 用 C_root(N) | — | 用 C_root(N)（0.02×C_root(N)） |
-| 中间区域 | 线性插值：C_local = C_root(N) + (C_tip(N) − C_root(N)) × (x/L_span) | | 🔴 此处 L_span = **该对**半翼展 `wings[N−1].half_span`（接口值）；三角翼 C_local 退化：C_local = C_root(N) × (1 − x/(b/2)(N))（尖点处→0，间距钳制见上） |
+| 🔴 **各向异性首层高度 / 端间距（0.1×）** | **不适用——一律用 `wings[N−1].thickness`（该对翼厚度）** | 同左（**厚度基准无翼型分支**） | 同左 |
+| 🔴 **各向异性 mindValue（0.02×）** | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
+| 弦向分布中间值（0.02×） | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
+| 后缘面 rootSpacing（0.02×，靠近根部端） | 用 C_root(N) | — | 用 C_root(N)（0.02×C_root(N)） |
+| 中间区域 | 线性插值：C_local = C_root(N) + (C_tip(N) − C_root(N)) × (x/L_span) | | 🔴 此处 L_span = **该对**半翼展 `wings[N−1].half_span`（接口值）；三角翼 C_local 退化：C_local = C_root(N) × (1 − x/(b/2)(N))（尖点处→0，中间值钳制见上） |
 
+> 🔴 **2026-10-22 口径变更**：旧表中所有 `0.005×当地弦长` 的**首层/端间距**行（弦向前缘端/后缘端、展向梢部端/根部端 edgeSpacing、后缘面 bodySpacing）**已全部作废**——各向异性首层与端间距一律 = **`0.1 × wings[N−1].thickness`**，**与弦长及翼型均无关**。仅"中间值 `0.02×弦长`"类仍按本表取弦长。
+>
 > **最后一列只在三角翼生效**。梯形翼（有 `wingTipN`）一律按前两列的常规规则计算——C_tip(N) 取接口值，"梢部端"就是真实梢部弦长，**不做钳制**。翼型判定见事实中心 M2。
 >
-> **弹尾加密是唯一例外**：弹尾不属于任何一对翼，取**弦长最大的那一对**的参数（见 `missile-anisotropic-mesh.md` §「弹尾加密」）——由一站式返回的 `pairs[].mac` / 各对 `wings[N−1].root_chord` 比较得出。
+> 🔴 **弹尾加密不在本流程**（2026-10-22）：旧一站式的 step6 弹尾加密已随 `MissileAnisoProcessMissileAnisotropy` 弃用，**本流程不处理弹尾各向异性**，弹尾由后续独立工具负责。
 >
-> 三角翼的"当地弦长"定义：从根部 C_root(N) **线性减小至翼尖尖点处为 0**。公式可算但**尖点附近间距不得取 0**——所有「0.005× / 0.02×当地弦长」的梢部端一律钳制到**该对** C_root(N) 的比例值（`0.005×C_root(N)` / `0.02×C_root(N)`，**按接口现算**）。`x/(b/2)(N)` 跨度用**该对**接口半翼展值。
+> 三角翼的"当地弦长"定义：从根部 C_root(N) **线性减小至翼尖尖点处为 0**。公式可算但**尖点附近中间值不得取 0**——所有「`0.02×当地弦长`」的梢部端一律钳制到**该对** C_root(N) 的比例值（`0.02×C_root(N)`，**按接口现算**）。`x/(b/2)(N)` 跨度用**该对**接口半翼展值。
 
-- **弹翼（`wing*` 分组）**：🔴 **C_root(N) 按对取接口值**（`wings[N−1].root_chord`，事实中心 §2）；🔴 **C_tip(N) 按对取并按翼型分叉**（M2 / §2.2.2）——三角翼（无 `wingTipN`）≈0 正常，禁止 0 代入、梢部端间距钳制到**该对** C_root(N) 计算值；梯形翼（有 `wingTipN`）按接口值正常使用
+- **弹翼（`wing*` 分组）**：🔴 **C_root(N) / T(N) 按对取接口值**（`wings[N−1].root_chord` / `wings[N−1].thickness`，事实中心 §2）；🔴 **C_tip(N) 按对取并按翼型分叉**（M2 / §2.2.2）——三角翼（无 `wingTipN`）≈0 正常，禁止 0 代入、梢部端中间值钳制到**该对** C_root(N) 计算值；梯形翼（有 `wingTipN`）按接口值正常使用

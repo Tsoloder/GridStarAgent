@@ -1,6 +1,6 @@
 ---
 name: missile-root-junction
-description: 【回退专用】弹翼与弹体结合处各向异性网格线分布处理。该位置不修改两端分布，使用增长分布（增长率 1.2，层数 50），中间值与翼面尺寸一致。适用于弹翼(wing)连弹体(fuselage)的结合场景。🔴 仅在 `MissileAnisoProcessMissileAnisotropy` 一站式返回 `status="failed"` 时由 `missile-anisotropy-processing` 自动回退加载；一站式正常时**不得**主动加载本 Skill。
+description: 【回退专用】弹翼与弹体结合处各向异性网格线分布处理。该位置不修改两端分布，使用增长分布（增长率 1.2，层数 50），中间值与翼面尺寸一致。适用于弹翼(wing)连弹体(fuselage)的结合场景。🔴 仅在 `MissileWingAnisoProcessWingAnisotropy` 一站式返回 `status="failed"` 时由 `missile-anisotropy-processing` 自动回退加载；一站式正常时**不得**主动加载本 Skill。
 aliases: [翼身结合, 翼体结合, wing-fuselage, wing-junction]
 tags: [CFD, 网格, 各向异性, 结合处, 导弹, 翼]
 category: CFD
@@ -27,8 +27,8 @@ allowed-tools: []
 
 ## 前置条件
 
-- 已获取**当地弦长**（🔴 **C_root(N) 按对取 `GetMissileDimensions` 接口值 `wings[N−1].root_chord`**，事实中心 §2，**不得各对共用**；🔴 C_tip(N) **按对取并按翼型分叉**（M2）：三角翼（无 `wingTipN`）≈0 正常，禁止 0 代入；梯形翼（有 `wingTipN`）按接口值。**结合处全在根部，一律用该对 C_root(N)**）
-- 已获取翼面尺寸（中间值用，0.02 × 当地弦长）
+- 已获取**当地弦长与厚度**（🔴 **根弦长 `wings[N−1].root_chord`、厚度 `wings[N−1].thickness` 均按对取 `GetMissileDimensions` 接口值**，事实中心 §2，**不得各对共用**；🔴 C_tip(N) **按对取并按翼型分叉**（M2）：三角翼（无 `wingTipN`）≈0 正常，禁止 0 代入；梯形翼（有 `wingTipN`）按接口值。**结合处全在根部，一律用该对 C_root(N)**）
+- 已获取翼面尺寸（中间值用，**`0.02 × 该对根弦长`**）
 - 表面网格已完成
 - `UGReDimensionConfigDistribution` 系列工具参数已就绪
 - **链路接口可用**：`GetConnectorsByDomains` 能返回真实网格线 ID（若返回兜底值，整个各向异性阶段按主 Skill「工具可用性判定」标记 `skipped`）
@@ -38,14 +38,16 @@ allowed-tools: []
 
 | 参数 | 值 |
 |---|---|
-| 首层高度（各向异性域 `firstHigh`） | **加密尺寸 0.005 × 当地弦长**（与翼侧面一致） |
+| 首层高度（各向异性域 `firstHigh`） | **`0.1 × 该对翼厚度`**（`wings[N−1].thickness`，与翼侧面一致） |
 | 增长率（headRate / tailRate） | 1.2（默认） |
 | 层数（headLayer / tailLayer） | 50（默认） |
-| 中间值（mindValue） | 翼面尺寸一致（0.02 × 当地弦长） |
+| 中间值（mindValue） | **`0.02 × 该对根弦长`**（`wings[N−1].root_chord`） |
 | 根部段 | 保证平滑分布 |
 
-> 🔴 **翼身结合处参数 = 翼侧面参数**（需求）：首层高度＝加密尺寸 `0.005×当地弦长`、增长率 1.2、层数 50、中间值＝翼面尺寸——四项全同。结合处就是"翼根那一圈的侧面"，不是另一套参数。基准表见 `missile-anisotropic-mesh.md` §「各位置参数」。
-> 🔴 **多对翼（N=1/2/3）逐对处理**，每对按该对当地弦长算加密尺寸与中间值。
+> 🔴 **2026-10-22 口径变更**：旧口径「加密尺寸 `0.005×当地弦长`」**已作废**——结合处首层高度改用**翼厚度**基准。
+> 🔴 **翼身结合处参数 = 翼侧面参数**（需求）：首层高度＝`0.1×该对翼厚度`、增长率 1.2、层数 50、中间值＝`0.02×该对根弦长`——四项全同。结合处就是"翼根那一圈的侧面"，不是另一套参数。基准表见 `missile-anisotropic-mesh.md` §「各位置参数」。
+> 🔴 **多对翼（N=1/2/3）逐对处理**，每对按该对厚度与根弦长算首层高度与中间值。
+>
 > ⚠️ 本节首层高度用于**各向异性域生成**（`GenerateANisoDomainGrid` 的 `firstHigh`）；而下方「网格线分布设置」里 `UGReDimensionConfigDistribution` 的 `headspace`/`tailspace` 指的是**该网格线原有的两端间距**，两者不是同一个量——原有两端间距仍按「严禁修改两端分布」处理。
 
 > ⚠️ 上表是**语义值**，不是参数名。真实形参只有 5 个：`UGReDimensionConfigDistribution(ids, headspace, tailspace, params, mindValue)`——增长率与层数打包进 `params` 字符串（`"1.2,50,1.2,50"`）；**没有** `headRate` / `headLayer` / `disFunc` 等独立形参，分布类型由所选工具（Config / Smooth）决定。
@@ -118,7 +120,7 @@ for cid in junctionConnectors:
 | `headspace` | **不修改**（传原分布值） |
 | `tailspace` | **不修改**（传原分布值） |
 | `params` | `"1.2,50,1.2,50"`（严格格式 `"headRate,headLayer,tailRate,tailLayer"`） |
-| `mindValue` | 翼面尺寸（0.02 × 当地弦长） |
+| `mindValue` | **`0.02 × 该对根弦长`**（`wings[N−1].root_chord`） |
 
 > ⚠️ 该工具只有上述 5 个形参；没有 `disFunc`、`headRate` 等独立参数（增长率/层数打包进 `params`）。
 
@@ -133,8 +135,8 @@ for cid in junctionConnectors:
 | 1 | `GetAllSpitAssemblyGroupProperty` | 无（解析 `["wingSideSurfaceN"]` 及 `["fuselage"]` 的 `domain[].ids`） | 获取结合处涉及的分组网格面 ID |
 | 2 | `GetConnectorsByDomains` | `domain_ids`: **一次传全部面 ID（批量，禁止逐条循环）** | 获取面的网格线集合 |
 | 3 | `GetConnectorsStartAndEndUnitLenth` | `connector_ids`: 每条共享边 ID | 获取原有两端间距（保留不修改） |
-| 4 | `UGReDimensionConfigDistribution` | `ids`: 结合边 ID; `headspace`: 原值; `tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: 0.02 × 当地弦长 | 设置增长分布（不修改两端） |
-| 5 | `UGReDimensionSmoothDistribution` | `ids`: 结合边 ID; `headspace`/`tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: 0.02 × 当地弦长 | 平滑过渡到相邻区域 |
+| 4 | `UGReDimensionConfigDistribution` | `ids`: 结合边 ID; `headspace`: 原值; `tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: `0.02 × 该对根弦长` | 设置增长分布（不修改两端） |
+| 5 | `UGReDimensionSmoothDistribution` | `ids`: 结合边 ID; `headspace`/`tailspace`: 原值; `params`: `"1.2,50,1.2,50"`; `mindValue`: `0.02 × 该对根弦长` | 平滑过渡到相邻区域 |
 
 ### 注意事项
 

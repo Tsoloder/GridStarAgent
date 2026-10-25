@@ -20,7 +20,7 @@
 
 > `ClassifyMissile` **会同时输出弹翼的带序号子面分组**（`wingLeadingEdgeN` / `wingTrailingEdgeN` / `wingSideSurfaceN`（+`wingTipN`），N = 第几对弹翼），**无需额外调用拆分接口**。分割完成后用 `GetMissilePartGroups` 或 `GetAllSpitAssemblyGroupProperty` 查分组。
 >
-> 🔴 **本工具同时产出几何尺寸（2026-10-17）**：流水线第 10 步 `CalculateDimensions()` 会从点云与分割结果**实算**全弹长 / 弹径 / 弹尾口径 / 球头半径 / 各对翼 `wings[]`（弦长与半翼展），并缓存供 `GetMissileDimensions()` 读取。因此**必须先跑本工具，`GetMissileDimensions()` 才有值**（未跑 → 返回 `{}`）。分组已存在而跳过 `ClassifyMissile` 时，若尺寸缓存同样为空，则需补跑一次分割才能取到尺寸。
+> 🔴 **本工具同时产出几何尺寸（2026-10-17）**：流水线第 10 步 `CalculateDimensions()` 会从点云与分割结果**实算**全弹长 / 弹径 / 弹尾口径 / 球头半径 / 各对翼 `wings[]`（弦长、**厚度**与半翼展），并缓存供 `GetMissileDimensions()` 读取。因此**必须先跑本工具，`GetMissileDimensions()` 才有值**（未跑 → 返回 `{}`）。分组已存在而跳过 `ClassifyMissile` 时，若尺寸缓存同样为空，则需补跑一次分割才能取到尺寸。
 >
 > ⚠️ **兜底返回值陷阱**：`ClassifyMissile` 与 `GetMissilePartGroups` 可能返回恒定 `"true"`（无数据）——**这是接口兜底值，绝不能当作"分割成功"**，据此判定会形成**误报**。
 >
