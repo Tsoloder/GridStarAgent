@@ -12,19 +12,19 @@
 
 #### 🔴 检查方法（默认路径：建场即试金石，不做逐面全量统计）
 
-> **为什么"用建场当试金石"而不预先统计（2026-09-29 实机教训）**：预先全量统计（`GetAllObjectByType(6)` + `GetConnectorsByDomains` 全列表 + 引用计数）在网格规模大时逐面轮询非常慢（实测 341 线规模耗 5 分钟以上）；且 `GetAllObjectByType` 返回的 ID 列表**可能含已删除/未回收的"幽灵 ID"**（查不到坐标/下辖线 → 误判成"不封闭线"而卡住自己）。**后端闭包判定才是唯一权威**：`UGBlockCreate` 返回 `"true"` = 网格封闭；返回 `"false"` 时后端错误信息会**直接列出全部不封闭线 ID**，无需自统计。
+> **为什么"用建场当试金石"而不预先统计**：预先全量统计（`GetAllObjectByType(6)` + `GetConnectorsByDomains` 全列表 + 引用计数）在网格规模大时逐面轮询很慢；且 `GetAllObjectByType` 返回的 ID 列表**可能含已删除/未回收的"幽灵 ID"**（查不到坐标/下辖线 → 误判成"不封闭线"卡住自己）。**后端闭包判定才是唯一权威**：`UGBlockCreate` 返回 `"true"` = 网格封闭；返回 `"false"` 时后端错误信息会**直接列出全部不封闭线 ID**，无需自统计。
 
 **标准流程（2–3 轮调用，替代十几轮统计）**：
 
 1. 直接调用 `UGBlockCreate`（按 `missile-farfield-and-volume.md` §6.2/§6.3 参数）；
-2. 返回 `"true"` → **网格封闭**，继续：`GetDomainsByType(3)` 确认外场面已生成 → 进入 §7（质量检查）→ 后续流程；
+2. 返回 `"true"` → **网格封闭**，本步结束（🔴 **不做建后校验**：不调 `GetDomainsByType(3)` 复核外场面、不核对居中/锥顶，见 `missile-farfield-and-volume.md` §6.3 第 4 条）→ 进入 §7（质量检查）→ 后续流程；
 3. 返回 `"false"` → 看后端错误信息：
    - 含「存在不封闭的网格线ID如下：…」→ 网格**不封闭**，按下方「排查顺序」处理，**不封闭线清单以后端报出的为准**；
    - 不含该字样 → **不是封闭性问题**，回 `missile-farfield-and-volume.md` §6.3「创建失败时的处理」逐项排查。
 
 #### 兜底路径（手动统计，仅在上述路径需要"不封闭线清单"时才用）
 
-> 🔴 **必须过滤幽灵 ID（2026-09-29 实机教训）**：`GetAllObjectByType(6)` 的返回列表里可能有已删除对象的残留 ID——拿它去 `GetConnectorsByDomains` / `GetStartAndEndPointByConnectors` 查询返回 **not found / 空**。**统计引用次数前先剔除这些查不到的 ID**，否则会把幽灵 ID 误判成"0 引用不封闭线"。
+> 🔴 **必须过滤幽灵 ID**：`GetAllObjectByType(6)` 的返回列表里可能有已删除对象的残留 ID——拿它去 `GetConnectorsByDomains` / `GetStartAndEndPointByConnectors` 查询返回 **not found / 空**。**统计引用次数前先剔除这些查不到的 ID**，否则会把幽灵 ID 误判成"0 引用不封闭线"。
 
 ```python
 from collections import defaultdict

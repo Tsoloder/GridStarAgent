@@ -21,33 +21,33 @@
 
 ### §6.2 外场生成规则
 
-- **弓形外场**：外场大小 = **1 倍弹体长度**，头部距离 = **1.5 倍球头半径**（需求文档 6.2；🔴 用户确认 2026-10-08，事实中心 #4；**不以 `GetCreateBlockDefaultParam()` 默认 `geoParam`（≈4×全弹长）为准**）。
+- **弓形外场**：外场大小 = **1.2 × 弹体长度**，头部距离 = **0.2 × 弹径 D**（事实中心 #4）。🔴 **不以 `GetCreateBlockDefaultParam()` 默认 `geoParam`（≈4×全弹长）为准**。
 - 非结构网格下，外场是体创建的产物（`UGBlockCreate` 的 `chooseParam` 第 3 位 = `3` 为弓形），不存在独立的外场创建步骤。
-- `fuselage_length` 与 `nose_radius` 来自 `GetMissileDimensions` 或用户输入。
+- `fuselage_length` 与 `body_diameter`（弹径 D）来自 `GetMissileDimensions` 或用户输入；🔴 **一律取接口值**（**单位已是 mm，禁止 ×1000**）——旧"固定值覆盖接口"的做法**已作废**（事实中心 §2，2026-10-14 用户裁定）。
 
 ### §6.3 体创建
 
-🔴 **外场创建工具选择（2026-10-09 实测定稿，事实中心 #3）**：**不用 `CreateMissileFarField`** —— 两轮实测均返回恒定 `"true"`，但随后 `GetDomainsByType(3)`（外场面）仍为空，即"返回成功但外场未实建"。**统一以 `UGBlockCreate` 为唯一建场路径**，不调用 `CreateMissileFarField`。后端补实现并验证后，可恢复"先尝试 → 校验外场非空 → 空则回退"。
+🔴 **外场创建工具（事实中心 #3）**：**统一用 `UGBlockCreate` 建场**（`chooseParam` 第 3 位 = `3` 弓形即产出外场面），**不调用 `CreateMissileFarField`**（恒返回 `true` 但外场未实建）。
 
-1. 调用 `GetCreateBlockDefaultParam()`，取默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）、`meshSize`、`centerCoor`。⚠️ 其 `chooseParam` 默认 `"0,0,0"`、`geoParam` ≈ 4 × 全弹长——均**仅作格式参考**，实际值按下方第 2 步覆盖。
+1. 调用 `GetCreateBlockDefaultParam()`，取默认 `geoParam`（4 个浮点，长度/半径/短轴/长轴）、`meshSize`、`centerCoor`。⚠️ 其 `chooseParam` 默认 `"0,0,0"`、`geoParam` ≈ 4 × 全弹长——**仅作格式参考**，实际值按下方第 2 步覆盖；🔴 但 **`centerCoor` 直接沿用默认值**（已是模型包围盒中心）。
 2. 按 §6.2 外场规则确定实际参数：
-   - `geoParam` = 按 **"1 倍弹体长度"** 设置（第 1 位 = `fuselage_length`；🔴 不用默认值 ≈4×全弹长，事实中心 #4）。
-   - `chooseParam` = `"-1,0,3"`（第 1 位=头部方向、第 2 位=体类型 `0`=外场、第 3 位=外场形状 `3`=弓形）。🔴 **方向编码以实机实测为准（2026-10-05，事实中心 #5）**：`-1` = 弓形头部朝 **-X（弹头方向，正确）**；`0`/`1` 实测都反到 +X 且歪（Schema 注释"0=+X、1=-X"与实机不符）。**唯一合法值 = `"-1,0,3"`，严禁传 `"0,0,3"`/`"1,0,3"`**。
-   - `centerCoor` = 弹体包围盒中心 + **弓形固有偏移补偿（公式化，事实中心 #6）**：补偿量 = **(外场大小/6, −外场大小/3, 0)**；`centerCoor = 弹体中心 + 补偿量`。
-     - 本弹（1×弹长 ≈ 5079.986）基准：centerCoor = (3308.44, −1693.5, 0)，2026-10-09 实测三校通过。
-     - 公式来源：弓形放置自带固定偏移随 `geoParam` 等比缩放（两实测点拟合；推导见事实中心 #6）。
-     - ⚠️ **换弹体（几何尺寸显著变化）时禁止直接套用本弹绝对值**：用公式重算初值，再走第 4 步建后校验；偏差超标按实测偏差迭代微调（最多 2–3 轮）。
-     - 弹体包围盒中心取法：`GetAllObjectByType(5)` 取网格线 → `GetStartAndEndPointByConnectors` → 各轴 min/max 取中值；循环绕一圈微调补偿值使锥顶 Y≈0、X 中心=弹体中心。
-   - `meshSizeOrDimension` = 默认 `meshSize` 转 float（字段名改名映射；`meshType` 转 int，`0`=给定尺寸）。
+   - `geoParam` = **外场大小四位同值**（1.2 × 弹体长度的数，重复 4 次）。
+   - `chooseParam`：第 2 位恒 `0`（外场）、第 3 位恒 `3`（弓形）；**第 1 位 = 头部方向位，按弹头实际指向取**（后端 `CreatEllipse()` 的映射是确定的）：
+     - **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向取 0 / 负向取 1；X轴=0、Y轴=1、Z轴=2）。弓形锥顶放在 `centerCoor + 头部方向 × 外场大小/2`。
+     - 弹头指向 = `nose` 分组包围盒中心 相对 弹体包围盒中心 的轴向与符号 → 取对应数字。
+   - `centerCoor`：🔴 **直接用 `GetCreateBlockDefaultParam()` 返回的 `centerCoor`**——后端已按**模型包围盒中心**算好，且算的时候已排除远场面（源码 `MergeDomainGrid` 跳过 `OUTFILED`）。**不需要补偿、不需要试探生成**：弓形严格以 `centerCoor` 居中摆放（X 跨 `centerCoor ± S/2`，Y/Z 关于 `centerCoor` 对称）。
+     - 如需自算：用**物面**网格线端点包围盒中心（`GetAllObjectByType(5)` 取线 → `GetStartAndEndPointByConnectors` → 各轴 min/max 取中值）。
+     - 🔴 **自算时必须排除已生成的外场面**（`GetDomainsByType(3)`）——外场线会把中心整个带偏，这正是旧文档被迫用补偿公式去凑的根因。
+   - `meshSizeOrDimension`：**必须按外场大小等比缩放**，否则外场越小网格越粗——
+     - `meshSizeOrDimension = 默认 meshSize × (外场大小 / 默认 geoParam)`
+     - 本弹算例：默认 `geoParam`≈20320.4、`meshSize`≈2077.1，外场 6095.9 → `2077.1 × (6095.9 / 20320.4) ≈ 620`。
+     - 想更密就把结果继续调小（620 → 500 → 400…），每次重删重建看效果。
+   - `meshType` = `0`（给定尺寸）。
 3. 调用 `UGBlockCreate(geoParam, chooseParam, centerCoor, meshType, meshSizeOrDimension)`。
    - 🔴 返回 `"true"` = 网格封闭，外场面已生成；返回 `"false"` 且报不封闭线 = 转 `missile-mesh-sealing-check.md` 排查。
-4. **建后立即校验（不省略）**：
-   - `GetDomainsByType(3)` 确认外场面已生成（弓形通常 5 个面）。
-   - 用 `GetConnectorsByDomains` + `GetStartAndEndPointByConnectors` 读外场几何，核对：
-     - **弓形头部（被最多线共享的点）是否朝 -X**（锥顶 x ≈ 弹体中心 x − 半长，如 [-7700, -7698]）；
-     - **Y 是否对称 ±半长**（外场大小 = 1 倍弹体长度时，对称范围 ≈ ±0.5 × 弹体长度，中心≈0）；X 中心是否≈弹体中心 x。
-   - 三项全过 → 请用户界面目视复核方向；**中心/对称性不对 → 按偏差微调 centerCoor 反向补偿后重删重建**（最多 2–3 轮，不穷举）。
-   - 清理注意：重删时 `DeleteBlock(blockIDs, isDeleteDomain=0, isDeleteConnector=0)` **只删体块**，外场面用 `DeleteDomain(domainIDs, isDeleteConnector=1)` 单独删——⚠️ 严禁 `DeleteBlock` 传 `isDeleteDomain=1`（会级联误删表面网格，2026-10-05 教训）。
+4. **不做建后校验**：🔴 `UGBlockCreate` 返回 `"true"`（= 网格封闭、外场面已生成）**即为本阶段结束**——**不调 `GetDomainsByType(3)` 复核外场面、不读外场包围盒、不做居中/锥顶核对、不要求用户界面目视复核**。这些检查在此处既不产生决策、又纯耗轮次，已全部删除；外场的居中与朝向由第 2 步的参数规则（`centerCoor` 直接沿用默认值 + 方向位按弹头指向取）保证。
+   - ⚠️ **本条只约束"建场之后"**：§6.1 第 1 步那个「外场是否已存在」的 `GetDomainsByType(3)` **属建场前的场景判定，照常执行、不受本条影响**。
+   - 清理注意：重删时 `DeleteBlock(blockIDs, isDeleteDomain=0, isDeleteConnector=0)` **只删体块**，外场面用 `DeleteDomain(domainIDs, isDeleteConnector=1)` 单独删——⚠️ 严禁 `DeleteBlock` 传 `isDeleteDomain=1`（会级联误删表面网格）。
 
 > 失败处理（返回 `"false"`，按序排查，不穷举参数组合）：
 > 1. 错误信息含「不封闭的网格线ID如下」→ 转排查（清单以后端报出为准）。
@@ -56,51 +56,49 @@
 
 ### §6.4 空间网格生成
 
-1. 确定附面层参数：
+1. 确定附面层参数（默认值）：y+=1、Re=1.5×10⁷、参考长度取 MAC、增长率 1.15、层数 40、扩散因子 0.5、单元类型四面体。
 
-| 参数 | 默认值 |
-|------|--------|
-| y+ | 1 |
-| 雷诺数 Re | 1.5×10⁷（范围 1×10⁷~3×10⁷） |
-| 参考长度 | 平均气动弦长（MAC） |
-| 增长率 | 1.15 |
-| 层数 | 40 |
-| 扩散因子 | 粗网格 0.5 / 中等 0.8 / 细网格 0.98 |
-| 单元类型 | 四面体 |
+**`caliperFirst`（第一层厚度）直接套公式，不现场推导**：
 
-> MAC 由后端接口返回；当前 `GetMissileDimensions` 未含 MAC，缺失时用全弹长或当地弦长近似，并在 `note` 记录。
+```plaintext
+Re_x = ρ·U∞·L/μ ;  Cf = 0.0576/Re_x^0.2 ;  caliperFirst_mm = y+·μ/(ρ·U∞·√(Cf/2)) × 1000
+```
 
-2. 调用 `UGUGSp(generateWay, ids, layer=40, growRate=1.15, caliperFirst=计算值, diffusionFactor=0.5/0.8/0.98)` 生成空间网格。
-   - 🔴 **`ids` 必须先剔除幽灵体块 ID（2026-10-09 实机教训，见 `references/missile-calibration-constants.md` #6）**：`GetAllObjectByType(7)` 返回的体块 ID **可能残留已删除的块**（实测 `DeleteBlock(1)` 后返回 `[1,2]`，块 1 为幽灵）。未过滤时 `UGUGSp` 连续两次返回 `false`。
-     - **过滤方法（按优先级）**：
-       1. **块 ID 存活台账（首选，零额外调用）**：体创建成功时记录 `UGBlockCreate` 返回的块 ID 为"存活"，`DeleteBlock` 删除过的 ID 记为"已删"；拼接 `ids` 时**只取存活台账中的块**。
-       2. **实测验证（台账缺失时）**：用 `ExamineBlock`（接受块 ID 的复用工具，见 §7.2）逐个试探候选块，返回 `"false"` / not found 的剔除。
-     - ⚠️ **严禁用 `GetConnectorsByDomains` 验证块 ID** —— 它是"面→网格线"查询，**不接受体块 ID**，照做会把**所有合法块都剔除**、`ids` 传空（2026-10-09 审查纠正）。
+- 全 SI 代入（`L` 用**米**）：`μ`≈1.789×10⁻⁵、`ρ`≈1.225、`U∞` 由马赫数换算、`L`=MAC（缺失用全弹长近似）。
+- ⚠️ **单位陷阱**：`L` 误按 mm 代入 → Re 差 1000 倍 → caliperFirst 差 1000 倍。**算完 ×1000 转 mm 再传参**，note 记录 Re/L/马赫数。
+- 量级参考：**0.001 ~ 0.01 mm**（超声速更低）；**> 0.1 mm 必错**。
+
+2. 调用 `UGUGSp(generateWay, ids, layer=40, growRate=1.15, caliperFirst=计算值, diffusionFactor=0.5)` 生成空间网格。
+   - 🔴 `ids` 先剔幽灵块——**只取存活台账中的块**（事实中心 §4），否则 `UGUGSp` 连续返回 `false`。
    - 更换 ids 后若仍 `false` → 转 §6.3 失败排查（可能是敞口拒绝体填充），**不得连续换参重试**。
 
 ## §7 质量检查与输出
 
-### §7.1 面网格质量
+### §7.1 网格质量
 
-- **工具**：`ExamineDomain(examType, ids)` `[复用]`
-- **examType**：`"MinmumAngle"`（最小角检查）
-- **`ids`**：⚠️ **必须传实际网格面 ID**（由 `GetAllObjectByType(6)` 取到的 `info` 列表拼成，如 `"1,2,3,...,91"`）；**传空串会返回 `"false"`**。
-- **标准**：除去各向异性单元，最小角 > 10°
-- **若 < 10°（需求文件 7.1 强制）**：**必须给出该处的最小角数值与出现位置（网格面 ID）**，才能判定"模型特征导致、可不处理"。仅写"模型特征处可接受"**不成立** —— 未给出位置与数值的判定属**不合格报告**。
+> 🔴 **本流程只查面网格，不查体网格**（2026-10-15 用户裁定）。理由见 §7.1.2。
 
-### §7.2 体网格质量
+#### 7.1.1 面网格质量检查（本流程唯一的质量检查）
 
-- **工具**：`ExamineBlock(examType, ids)` `[复用]` — `ids` 同样必须传实际**网格块** ID（`GetAllObjectByType(7)`）；无体网格块时本步无法执行，标记 `blocked` + note（不是"跳过"）。
-- **examType**：`"ExamineMaximumIncludeAngle"`（最大角检查）
-- **标准**：最大角 ≤ 178°；> 178° 需输出数量；**禁止 179.9° 单元**
+| 指标 | 工具参数 | 合格标准 | 处理规则 |
+|---|---|---|---|
+| 最小角 | `ExamineDomain(examType="MinmumAngle")` | > 10° | 若小于 10°，需查看最小角出现位置（给出数值 + 网格面 ID）。模型特征导致的最小角可不处理；各向异性单元处的最小角不纳入判断。 |
 
-### §7.3 综合质量检查（可选）
+- `ids` **必须传实际网格面 ID**（`GetAllObjectByType(6)` 的 `info` 拼接，如 `"1,2,3,...,91"`）；传空串返回 `"false"`。
+- 🔴 **不要先试 `CheckMissileMeshQuality`**：该工具后端返回恒定 `"true"`（兜底值，无数据），**属于主 Skill「工具可用性判定」表的"返回恒定值 → 不可用"类**，直接跳过、不调用。质量检查走上面这行的 `ExamineDomain` 单一路径。
 
-- **工具**：`CheckMissileMeshQuality(domainIds, blockIds)` — ⚠️ **返回兜底值**（恒定 `"true"`）时视为不可用
-- 计划返回：`{"surfaceMinAngle": float, "volumeMaxAngle": float, "badCellCount": int, "passed": bool}`
-- **质量检查一律以通用工具 `ExamineDomain` + `ExamineBlock` 为准**（§7.1/§7.2），这是唯一真实依据。
+#### 7.1.2 🔴 体网格质量检查 —— 本流程不执行
 
-### §7.4 边界条件设置
+| 指标 | 工具参数 | 说明 |
+|---|---|---|
+| ~~最大角~~ | ~~`ExamineBlock(examType="ExamineMaximumIncludeAngle")`~~ | 🔴 **不再调用**。指标（≤178°、禁止 179.9°）本流程不检查 |
+
+> 🔴 **为什么删除（2026-10-15 用户裁定）**：`ExamineBlock(ExamineMaximumIncludeAngle)` 对整套体网格（几十万四面体）执行时**后端无响应、调用永久挂死**——既不会返回 `"false"`，也不会报错，只能由用户手动停止本轮对话。
+> 实跑证据：该工具共被调用 4 次（2026-10-10 / 10-12 / 10-13 ×2），**4 次全部卡住**，其中 3 次为用户手动停止、1 次为后端断连（`RemoteDisconnected`）。**没有一次拿到结果。**
+> 原先本文写的"后端崩溃 / `ConnectionResetError` / 重试同错"防御**与实机表现不符**——实际是不报错地挂死，故该防御从未被触发。工具层 `send_post_request` 默认不限时（见 `agent/client.py`），后端算不出来就无限等待。
+> 🔴 **纪律**：**不得调用该工具**（包括"试一次看看"）。若用户明确要求体网格质量，先说明该工具会挂死后端、当前无法测得，由用户决定是否另想办法；**不得静默重试、不得换参重试**。
+
+### §7.2 边界条件设置
 
 - **工具**：`BorderConditionAddGroup(name, groupID, colorNumber)` `[复用]`
 - **工具**：`BorderConditionSaveDataToDomain(domainIDs, name, groupID, property)` `[复用]`
@@ -108,17 +106,19 @@
 
 | 参数 | 说明 |
 |------|------|
-| `name` | 边界条件组名，使用**实际存在的分组名**（如 `"nose"`/`"fuselage"`/`"tail"`，或弹翼子面名 `wingLeadingEdge`…）。⚠️ 归并后弹翼主组为 `"wing"`；🔴 当前型号无舵，无 `"fin"` 组 |
+| `name` | 边界条件组名，使用**实际存在的分组名**（如 `"nose"`/`"fuselage"`/`"tail"`，或弹翼带序号子面名 `wingLeadingEdgeN`…）。🔴 **后端不产出 `wing` 主组**，弹翼直接用子组名 |
 | `groupID` | 从 100 开始递增，每个分组 +1（100, 101, 102, ...） |
 | `colorNumber` | 按分组顺序循环取 0–5 |
-| `domainIDs` | 逗号分隔的网格面 ID 字符串，如 `"4,31,55"`。通过 `GetAllSpitAssemblyGroupProperty()` 按组名取 `domain[].ids` 后拼接（`GetSpliteAssemlyDomainsBatch` 返回兜底值时改用本方式） |
-| `property` | 首次铺底**必须为 `-10`**（无边界条件）；实际属性（物面→粘性固壁、外场→远场、对称→对称）在铺底完成后逐组设置 |
+| `domainIDs` | 逗号分隔的网格面 ID 字符串，如 `"4,31,55"`。通过 `GetAllSpitAssemblyGroupProperty()` 按组名取 `domain[].ids` 后拼接（`GetSpliteAssemlyDomainsBatch` 返回兜底值时改用本方式）。🔴 **一次查询拿全全部分组 ID 并缓存到事实卡**（主 Skill 纪律第 3 条）：后续逐组设置 BC 时**直接取缓存**，严禁对每个 BC 组重复调 `GetAllSpitAssemblyGroupProperty`（10 个 BC 组 = 10 次冗余查询） |
+| `property` | 首次铺底**必须为 `-10`**（无边界条件），**严禁在铺底阶段写入 4（粘性固壁）/7（远场）/8（对称）等实际属性值**；实际属性只能在铺底完成后、**按用户明确要求**逐组设置（见下方「属性设置闸门」） |
 
-- 分类：外场、物面、对称
-- 物面可按分部件细分：弹头、弹体、弹翼、尾部（🔴 当前型号无舵）
+- 属性分类（**仅作映射参考，不是"照此执行"指令**）：外场→远场(7)、物面→粘性固壁(4)、对称面→对称(8)
+- 物面可按分部件细分：弹头、弹体、弹翼、尾部
 - **首次铺底 property 必须为 -10（无边界条件）**
 
-### §7.5 输出
+> 🔴 **属性设置闸门**：铺底（全部组写入 `-10`）完成后**即停**。实际属性设置走 `BorderConditioConfigProperty(number=2)` **逐组编辑**，且**必须先获得用户明确要求**（如"把外场设为远场""物面设粘性固壁"）才可写入 4/7/8；**用户未明确要求前，不得自行写入任何实际属性值**。本步骤到此为止，下阶段为质量检查（§7.1）。
+
+### §7.3 输出
 
 - **保存工程**：`SaveSpdFile(filename)` `[复用]`，名字默认为模型名，路径默认为模型路径
 - **网格导出**：`ExportGrid(outType, objType, name, outIDs, dataType, precision, unit)` `[复用]`

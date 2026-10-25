@@ -193,6 +193,20 @@ _CORE_TOOL_GROUPS = (
             advanced.ProcessAllTrailingEdges,
         ),
     },
+    {
+        "id": "missile",
+        "description": "导弹专用：AI 部件分割、几何尺寸与部件分组查询、弹翼后缘方向判定与前缘识别、弓形外场创建、网格质量检查、弹翼各向异性处理。该分组与飞机模块分离，仅在导弹工作流中使用。",
+        "tools": (
+            missile.ClassifyMissile,
+            missile.GetMissileDimensions,
+            missile.GetMissilePartGroups,
+            missile.DetermineWingTEDirection,
+            missile.IdentifyWingLeadingEdge,
+            missile.CreateMissileFarField,
+            missile.CheckMissileMeshQuality,
+            missile.MissileAnisoProcessMissileAnisotropy,
+        ),
+    },
     )
 
 if screen_automation is not None:

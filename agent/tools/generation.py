@@ -87,11 +87,28 @@ def GenerateLongAndNarrowFaceGrid(ids: str):
     return send_post_request("GenerateLongAndNarrowFaceGrid", {"ids":ids})
 
 
-def WingAnisoProcessWingAnisotropy():
+def WingAnisoProcessWingAnisotropy(wing_chord_factor: float = 0.001,
+                                   wing_te_chord_factor: float = 0.001,
+                                   wing_root_factor: float = 0.001,
+                                   wing_tip_factor: float = 0.001,
+                                   middle_factor: float = 0.02,
+                                   fuselage_middle_factor: float = 0.04,
+                                   growth_rate: float = 1.2,
+                                   control_layer: int = 50):
     """机翼各向异性处理主入口 — 依次执行全部 7 步子流程并汇总结果。
 
     包含：尺寸数据获取 → 翼段检测 → 交线识别 → 第一组平滑分布 → 前缘线平滑分布 → 各向异性线组创建 → 各向异性域生成。
     前置条件：表面网格已生成，分部件分组已完成（wingUpper/wingLower/wingTip/wingTrailingEdge/fuselage/engine 等分组已存在）。
+
+    Args:
+        wing_chord_factor: 机翼前缘侧尺寸系数（默认 0.001，即 0.1%×MAC；前缘端间距、前缘线组首层高度）。
+        wing_te_chord_factor: 机翼后缘侧尺寸系数（默认 0.001，即 0.1%×MAC；后缘端间距、后缘线组首层高度）。
+        wing_root_factor: 翼根尺寸系数（默认 0.001，即 0.1%×半展长；机翼-机身结合处、前缘线机身侧端）。
+        wing_tip_factor: 翼梢尺寸系数（默认 0.001，即 0.1%×半展长；翼梢结合处、前缘线翼梢侧端）。
+        middle_factor: MAC 分布中间值系数（默认 0.02，即 2%×MAC）。
+        fuselage_middle_factor: 机身侧分布中间值系数（默认 0.04，即 4%×MAC）。
+        growth_rate: 各向异性域增长率（默认 1.2）。
+        control_layer: 各向异性域控制层数（默认 50）。
 
     Returns:
         JSON 字符串，格式：
@@ -102,24 +119,60 @@ def WingAnisoProcessWingAnisotropy():
          "leading_edge_distribution":"success|failed",
          "message":"..."}
     """
-    return send_post_request("WingAnisoProcessWingAnisotropy", {})
+    return send_post_request("WingAnisoProcessWingAnisotropy",
+                             {"wing_chord_factor":wing_chord_factor,
+                              "wing_te_chord_factor":wing_te_chord_factor,
+                              "wing_root_factor":wing_root_factor,
+                              "wing_tip_factor":wing_tip_factor,
+                              "middle_factor":middle_factor,
+                              "fuselage_middle_factor":fuselage_middle_factor,
+                              "growth_rate":growth_rate,
+                              "control_layer":control_layer})
 
 
-def NacelleAnisoProcessNacelleAnisotropy():
+def NacelleAnisoProcessNacelleAnisotropy(nacelle_chord_factor: float = 0.0015,
+                                         nacelle_te_chord_factor: float = 0.0015,
+                                         pylon_joint_factor: float = 0.0015,
+                                         span_factor: float = 0.001,
+                                         middle_factor: float = 0.02,
+                                         growth_rate: float = 1.2,
+                                         control_layer: int = 50):
     """吊舱各向异性处理主入口 — 依次执行全部子步骤并汇总结果。
 
     包含：尺寸数据获取 → 网格线分类 → 9 类分布设置 → 支架前/后缘线分布 → 各向异性线组创建 → 各向异性域生成 → 狭长面处理。
     前置条件：表面网格已生成，发动机子部件分割已完成（engineInner/engineOuter/enginePylonInner/enginePylonOuter/enginePylon/engineTrailingEdge/enginePylonTrailingEdge 等分组已存在）。
+
+    Args:
+        nacelle_chord_factor: 吊舱/支架前缘、吊舱、支架后缘尺寸系数（默认 0.0015，即 0.15%×MAC）。
+        nacelle_te_chord_factor: 吊舱后缘侧尺寸系数（默认 0.0015，即 0.15%×MAC；后缘端、TE 侧线组）。
+        pylon_joint_factor: 支架与机翼/吊舱结合处尺寸系数（默认 0.0015，即 0.15%×MAC）。
+        span_factor: 半展长尺寸系数（默认 0.001，即 0.1%×半展长；各向异性域首层）。
+        middle_factor: MAC 分布中间值系数（默认 0.02，即 2%×MAC）。
+        growth_rate: 各向异性域增长率（默认 1.2）。
+        control_layer: 各向异性域控制层数（默认 50）。
 
     Returns:
         JSON 字符串，格式：
         {"status":"success|failed","mac":<double>,
          "steps":{"step1_dimensions":{...},"step2_classify":{...},...}}
     """
-    return send_post_request("NacelleAnisoProcessNacelleAnisotropy", {})
+    return send_post_request("NacelleAnisoProcessNacelleAnisotropy",
+                             {"nacelle_chord_factor":nacelle_chord_factor,
+                              "nacelle_te_chord_factor":nacelle_te_chord_factor,
+                              "pylon_joint_factor":pylon_joint_factor,
+                              "span_factor":span_factor,
+                              "middle_factor":middle_factor,
+                              "growth_rate":growth_rate,
+                              "control_layer":control_layer})
 
 
-def TailAnisoProcessTailAnisotropy():
+def TailAnisoProcessTailAnisotropy(local_chord_factor: float = 0.001,
+                                   local_chord_middle_factor: float = 0.04,
+                                   span_factor: float = 0.001,
+                                   mac_factor: float = 0.001,
+                                   middle_factor: float = 0.02,
+                                   growth_rate: float = 1.2,
+                                   control_layer: int = 50):
     """尾翼各向异性处理主入口 — 依次执行全部子步骤并汇总结果。
 
     包含：尺寸数据获取 → 尾翼线分类 → 分布设置 → 短边设点数 →
@@ -129,14 +182,30 @@ def TailAnisoProcessTailAnisotropy():
      horizontalTailUpper/horizontalTailLower/horizontalTailTip/horizontalTailTrailingEdge
      等分组已存在）。
 
+    Args:
+        local_chord_factor: 当地弦长尺寸系数（默认 0.001，即 0.1%×当地弦长）。
+        local_chord_middle_factor: 当地弦长分布中间值系数（默认 0.04，即 4%×当地弦长）。
+        span_factor: 半展长尺寸系数（默认 0.001，即 0.1%×半展长）。
+        mac_factor: MAC 尺寸系数（默认 0.001，即 0.1%×MAC）。
+        middle_factor: MAC 分布中间值系数（默认 0.02，即 2%×MAC）。
+        growth_rate: 各向异性域增长率（默认 1.2）。
+        control_layer: 各向异性域控制层数（默认 50）。
+
     Returns:
         JSON 字符串，格式：
         {"status":"success|failed","steps":{...}}
     """
-    return send_post_request("TailAnisoProcessTailAnisotropy", {})
+    return send_post_request("TailAnisoProcessTailAnisotropy",
+                             {"local_chord_factor":local_chord_factor,
+                              "local_chord_middle_factor":local_chord_middle_factor,
+                              "span_factor":span_factor,
+                              "mac_factor":mac_factor,
+                              "middle_factor":middle_factor,
+                              "growth_rate":growth_rate,
+                              "control_layer":control_layer})
 
 
-def RemainingAnisoProcessRemainingAnisotropy():
+def RemainingAnisoProcessRemainingAnisotropy(growth_ratio: float = 1.2):
     """其余面各向异性处理主入口。
 
     在机翼、吊舱、尾翼各向异性处理后，对剩余的所有网格面
@@ -144,11 +213,15 @@ def RemainingAnisoProcessRemainingAnisotropy():
 
     前置条件：机翼、吊舱、尾翼各向异性处理已完成。
 
+    Args:
+        growth_ratio: 各向异性域增长率（默认 1.2）。
+
     Returns:
         JSON 字符串，格式：
         {"status":"success|failed","domain_count":<int>}
     """
-    return send_post_request("RemainingAnisoProcessRemainingAnisotropy", {})
+    return send_post_request("RemainingAnisoProcessRemainingAnisotropy",
+                             {"growth_ratio":growth_ratio})
 
 def GenerateANisoDomainGrid(anisoGroupsJson: str):
     """【底层原子工具】按给定参数生成各向异性域网格，支持多个各向异性组同时设置。

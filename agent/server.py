@@ -142,6 +142,14 @@ GetPointCount = query.GetPointCount
 GetNewConnectorId = query.GetNewConnectorId
 GetDomainsByType = query.GetDomainsByType
 GetRecentMessages = query.GetRecentMessages
+ClassifyMissile = missile.ClassifyMissile
+GetMissileDimensions = missile.GetMissileDimensions
+GetMissilePartGroups = missile.GetMissilePartGroups
+DetermineWingTEDirection = missile.DetermineWingTEDirection
+IdentifyWingLeadingEdge = missile.IdentifyWingLeadingEdge
+CreateMissileFarField = missile.CreateMissileFarField
+CheckMissileMeshQuality = missile.CheckMissileMeshQuality
+MissileAnisoProcessMissileAnisotropy = missile.MissileAnisoProcessMissileAnisotropy
 
 if screen_automation is not None:
     FindGridStarWindow = screen_automation.FindGridStarWindow

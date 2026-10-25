@@ -1,108 +1,158 @@
 # 导弹几何尺寸参数
 
-导弹专用几何参数体系。对应 需求文件 模块 2。
+导弹专用几何参数体系。
 
 ## 工具
 
-- **`GetMissileDimensions()`** — 获取导弹全部关键几何尺寸参数（后端接口名 `GetMissileDimensions`，无参数）
-- 需先运行 AI 部件分割（`ClassifyMissile`）；分割后查分组用 `GetMissilePartGroups()`
+- 🔴 **MCP 工具（首选来源）**：`GetMissileDimensions()` — 无参数，注册在 `missile` 工具分组内。
+  调用前需先 `enable_tool_group("missile")`（`query` / `project` 为默认已启用，`missile` 不是）。
+- **推理计算**：`MissileAnisotropicProcessor::GetBodyDimensions()` — 从 fuselage 面网格坐标推算弹径
+- **内部接口（非 MCP，C++ 层）**：`SPIDER::Data::GetFuselageLength()` — 取全弹长
 
-## 返回参数（7 项，后端 snake_case 字段；🔴 2026-10-08 起当前型号无舵，已移除 fin_* 3 项）
+> ⚠️ `GetMissileDimensions` **是** MCP 工具。历史文档曾写作"不是 MCP 工具、不可调用"，该说法**已作废**——照此执行会放弃唯一的尺寸来源。取尺寸时**先调它**，失败或返回兜底值才回退用户输入。
 
-| 后端字段 | 符号 | 说明 | 用途 |
-|------|------|------|------|
-| `fuselage_length` | — | 全弹长 | 外场基准（弓形外场 1×全弹长） |
-| `body_diameter` | D | 弹径（主体口径） | 弹体/尾部/头部网格尺寸基准。🔴 **固定取 1196.076（事实中心 §2）** |
-| `body_diameter_tail` | — | 弹尾口径 | 尾部区域参考 |
-| `nose_radius` | R | 球头半径（尖头时为 0） | 球头网格尺寸 |
-| `wing_root_chord` | C_root(翼) | 翼根弦长（前缘到尾缘） | **弹翼**网格尺寸基准。🔴 **固定取 3225（事实中心 §2）** |
-| `wing_tip_chord` | C_tip(翼) | 翼梢弦长（三角翼时≈0） | **弹翼**梢部网格尺寸 |
-| `wing_half_span` | — | 半翼展 | 弹翼展向分布 |
+## 尺寸来源
 
-> **命名对应（重要）**：弹翼子面分组为 `wing*`（归并到主组 `wing`）。🔴 **当前型号无舵、无舵轴**——不再有 `fin*` 子面、`finshaft` 分组，`fin_*_chord` / `fin_clearance_height` 字段不再返回。
+> 🔴 **2026-10-17 用户裁定：尺寸恢复为「几何实算」，来源是分割流水线**。
+>    接口 `GetMissileDimensions()` 返回值仍**是唯一权威来源**，但**不再写死**——
+>    它读的是 `ClassifyMissile` 第 10 步 `CalculateDimensions()` 实算并缓存的同一份表。
+>    **未跑分割 → 缓存为空 → 接口返回 `{}`**（不再是固定数值）。
 >
-> **后端未返回项**：无头部类型字段。头部类型按 `nose_radius > 0` 判为球头(ball)、`== 0` 判为尖头(sharp)。
+> 🔴 **调用顺序被约束**：必须先 `ClassifyMissile`（产出 `wing*N` 分组 + 实算尺寸），
+>    再 `GetMissileDimensions()`（读缓存）。顺序颠倒会拿到 `{}`。
 >
-> 🔴 **固定值（无条件生效，完整依据见事实中心 `missile-calibration-constants.md` §2）**：弹径 D（`body_diameter`）**固定取 `1196.076` = 弹尾口径**、翼根弦长 C_root（`wing_root_chord`）**固定取 `3225`**——**不以接口返回值为准**（接口曾返 `136.106`（差 8.8 倍）/ `0`，判定不可信）。本固定值优先于几何闸门 7 的"原样使用返回值"，无条件生效；其余字段（全弹长 / R / C_tip / 半翼展）仍按接口返回值执行。
+> 🔴 **2026-10-16 起弹翼按对**：弹翼尺寸是**数组** `wings[]`（下标 = 对数−1，每项 `root_chord` / `tip_chord` / `half_span`），第 N 对翼取 `wings[N−1]`；标量键 `wing_root_chord` 等 = `wings[0]`，仅作单对翼便捷入口。
+> 🔴 **接口返值单位就是毫米（mm）**，**直接传参，禁止再 ×1000**。
+> 🔴 **弹翼尺寸按对取**（`wings` 数组，2026-10-16 新增）。
 
-### 需求文件 2.1 要求但不在上述 7 项中的量
+| 尺寸 | 来源 | 说明 |
+|------|------|------|
+| 全弹长 fuselage_length | `GetMissileDimensions()` / 用户输入 | 🔴 接口返 **mm**，直接用 |
+| 弹径 D (body_diameter) | `GetMissileDimensions()` | 头锥/弹体交接处口径；球头公式与各向异性用它 |
+| **表面网格有效弹径** body_diameter_surface | `GetMissileDimensions()` 返回的同名字段 | 🔴 **表面网格非球头部分用此值**；失配 >70% 时为弹尾口径（见下） |
+| 弹尾口径 body_diameter_tail | `GetMissileDimensions()` | 失配判据来源；弹尾尺寸 |
+| 翼根弦长 C_root(N) | `GetMissileDimensions()` → `wings[N−1].root_chord` | 第 N 对弹翼尺寸 / 各向异性当地弦长（🔴 **按对取**，不得各对共用） |
+| 翼梢弦长 C_tip(N) | `GetMissileDimensions()` → `wings[N−1].tip_chord` | 🔴 **按翼型分叉**（事实中心 M2）：三角翼（无 `wingTipN`）≈0，禁止 0 代入、梢部端间距钳制到该对 C_root(N) 计算值；梯形翼（有 `wingTipN`）正常使用 |
+| 半翼展 b/2(N) | `GetMissileDimensions()` → `wings[N−1].half_span` | 第 N 对展向分布跨度（🔴 仅 Agent 侧报告；后端不参与尺寸计算） |
+| 球头半径 R (nose_radius) | `GetMissileDimensions()` / 用户输入 | 🔴 接口返 **mm**，直接用；`>0` 球头 / `==0` 尖头（M3） |
 
-| 量 | 需求文件 要求 | 来源 | 当前状态 |
-|---|---|---|---|
-| **平均气动弦长 MAC** | 需求文件 目录含"2.1 MAC 计算"；空间网格参考长度取 MAC（模块 6.3） | **后端接口返回** | ⚠️ 当前 `GetMissileDimensions` 的 7 项**未含 MAC**——需后端补充该字段（或确认由哪个接口返回）；空间网格参考长度暂用全弹长/当地弦长近似 |
-| 特征长度 | 需求文件 2.1："特征长度：软件自行计算" | 软件内部计算，**agent 不传入** | — |
+### 🔴 表面网格弹径取值 `body_diameter_surface`（2026-10-14 用户裁定）
+
+> 原文："表面网格生成中，导弹的几何参数弹径和弹尾口径差距大的时候，表面网格生成**除了球头公式**，弹径 D 就用弹尾口径替代来生成更合理。**球头的网格生成还是用原本的弹径和球头半径参数公式计算**。"
+
+| 情形 | 表面网格（非球头部分） | 球头公式 |
+|------|------------------|---------|
+| `\|D − D_tail\| > 0.7 × D_tail`（失配 >70%，2026-10-16 由 20% 改定） | 🔴 **弹尾口径** | 🔴 **仍用原始 D + R**，不受影响 |
+| 差异 ≤70% / 尾口径非法 | 弹径 D | D + R |
+
+- 接口**已直接给出** `body_diameter_surface`，**取字段即可，不必自判**；字段缺失/为 0 时按上表自判。
+- 球头、弹体二面角加密等**是否也用尾口径**：🔴 用户仅指定"表面网格生成（球头公式除外）"，**球头公式明确例外**；其余表面网格尺寸按上表用 `body_diameter_surface`。
+
+## 使用原则
+
+1. 🔴 **接口返回值唯一权威**（事实中心 §2）——D / `wings[N−1].*` / R / 全弹长**一律直接用接口值**，**无任何固定值例外**
+2. **`GetMissileDimensions` 是 MCP 工具** — 需先 `enable_tool_group("missile")`。🔴 **返回 `{}` 有两种含义**：
+   - **未跑过 `ClassifyMissile`**（尺寸缓存为空，2026-10-17 起）→ **先跑分割**再取尺寸
+   - 分组缺失（分割跑过但没产出可用分组）→ 排查分割
+   返回恒定 `"true"` 同样为兜底值，不得当作成功
+3. 🔴 **单位**：接口返回**毫米（mm）**——**直接传参，禁止 ×1000**
+4. **各向异性处理器内部自动计算** MAC — 调用 `MissileAnisoProcessMissileAnisotropy()` 后，返回结果中包含步骤 2 的每对弹翼 MAC 值
+5. 🔴 **各向异性处理器依赖接口**：一站式工具后端的**弹体尺寸**守卫读的是 `GetMissileDimensions` 写回的 `SPIDER::Data`（🔴 **弹翼尺寸按对直读尺寸缓存 `wings`，2026-10-16 起不经它中转**），**未调接口就调它会 `failed`** → 各向异性前必须先取尺寸
+6. 🔴 **顺序约束（2026-10-17）**：`ClassifyMissile` → `GetMissileDimensions` → `MissileAnisoProcessMissileAnisotropy`。尺寸由分割流水线实算并缓存，跳过分割会拿到空表
+
+### 接口未覆盖的量
+
+| 量 | 来源 | 当前状态 |
+|---|------|---------|
+| **平均气动弦长 MAC** | **各向异性处理器自动计算** | `MissileAnisoProcessMissileAnisotropy()` 返回结果中步骤 2 每对弹翼包含 MAC 值 |
+| 特征长度 | 需求文件 2.1："特征长度：软件自行计算" | 软件内部计算，**agent 不传入** |
 
 ## 参数依赖关系
 
 ```
-body_diameter (D) ──┬── 头部网格参数（球头 min(0.01×D, 0.25×R)、尖角 0.005×D）
+body_diameter (D) ──┬── 头部网格参数（球头 min(0.01×D, 0.25×R)）
                     ├── 弹体网格参数（0.05×D）
                     ├── 尾部网格参数（0.05×D）
                     └── 弹体二面角加密（0.002×D）
 
+body_diameter_surface ──── 表面网格（非球头部分）用的口径
+                           （|D − D_tail| > 0.7×D_tail 时 = 弹尾口径，否则 = D）
+                           🔴 球头公式不用它，仍用原始 body_diameter + nose_radius
+
 nose_radius (R) ───────── 球头网格参数（min(0.01×D, 0.25×R)）
 
-wing_root_chord (C_root = 3225 固定) / wing_tip_chord ──┬── 弹翼网格参数（0.02×当地弦长）
-                                                        └── 弹翼前缘/梢部（0.008×当地弦长）
-                                                        （C_root 固定 3225；C_tip 仍按接口返回值）
+wings[N−1].root_chord / wings[N−1].tip_chord ──┬── 弹翼网格参数（0.02×该对当地弦长）
+                                               └── 弹翼前缘/梢部（0.005×该对当地弦长）
+                                               （🔴 **按对取**：`wingSideSurface2` → `wings[1]`，不得各对共用）
+                                               （🔴 C_tip **按翼型分叉**（M2）：三角翼≈0 → 梢部端间距钳制到该对 C_root 计算值、不代入 0；梯形翼正常使用）
 
-fuselage_length ─────────────── 弓形外场（1×全弹长）
+wings[N−1].half_span (b/2) ── 弹翼展向分布（线性插值 C_local 的跨度，按对取）
+
+fuselage_length ─────────────── 弓形外场（外场大小 = 1.2×全弹长）
+
+body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 ```
 
 ## 参数获取与验证
 
-调用 `GetMissileDimensions()` 后，检查返回值完整性：
+尺寸获取路径（按优先级）：
 
-```plaintext
-1. 弹径 D（body_diameter）→ 🔴 **无条件固定取 `1196.076`（2026-10-09 用户裁定，弹径 = 尾口径，不以接口返回值为准）**：
-   - 接口返回 0 / null / 136.106 / 其他任何值 → **一律用固定值 `1196.076`**。
-   - 禁止出现"接口值非 0 就不校验、直接用接口值"的逻辑 —— 接口曾返回 136.106（与尾口径差 8.8 倍），已判定不可信。
-2. 翼根弦长 C_root（wing_root_chord）→ 🔴 **无条件固定取 `3225`（2026-10-09 用户裁定）**：
-   - 接口返回 0 / null / 其他 → 一律用 `3225`；禁止降级为"全局默认尺寸"；仍按弦长公式（0.008×3225、0.02×3225）计算。
-3. 若 nose_radius 为 null → 无法判断头部类型，禁止分支计算头部网格参数
+1. **`GetMissileDimensions()`（MCP，🔴 唯一权威来源）** — 需先 `enable_tool_group("missile")`，且**必须先跑过 `ClassifyMissile`**（尺寸由分割流水线实算缓存）。一次拿全 `fuselage_length` / `nose_radius` / `body_diameter` / `body_diameter_tail` / `body_diameter_surface` / 🔴 **弹翼 `wings` 数组**（每项 `root_chord` / `tip_chord` / `half_span`，下标 = 对数−1），单位 mm
+2. **各向异性处理器** — `MissileAnisoProcessMissileAnisotropy()` 无参数，内部**自行**取尺寸：弹体尺寸从 `SPIDER::Data` 读（第 1 步写回），🔴 **弹翼尺寸按对直读尺寸缓存 `wings`**（`GetWingPairDims`，不经 `SPIDER::Data` 中转）；算完 MAC 返回 JSON 中 `pairs[].mac` 等字段。🔴 **弹体尺寸依赖第 1 步，未调接口会 `failed`**（弹翼尺寸不依赖）
+3. **内部接口（非 MCP）** — `SPIDER::Data::GetFuselageLength()` 可取全弹长（C++ 层）
+4. ~~历史标定值~~ — 🔴 **已作废**（2026-10-14），禁止引用
+5. **用户输入** — 球头半径 R、其他接口缺失尺寸
 
-当任一核心参数（D / 弦长 / R）无效时，Agent 必须：
-- 对 D / C_root：按上述**无条件固定值**执行（用户已裁定，不缺失、不依赖接口）
-- 对 R / C_tip / 全弹长：无固定值时，不继续执行依赖该参数的网格生成操作、明确告知用户缺少的参数并请求提供
-- 严禁用 0.0 代入公式计算
-```
+### 关键约束
+
+- D（弹径）：取接口值，**禁止由分组属性 `targetSize` 反推**
+- C_root(N)（第 N 对翼根弦长）：🔴 **按对取接口值** `wings[N−1].root_chord`（N 从组名末位数字读出）——不得用某一对的 C_root 代跑其他对
+- C_tip(N)（第 N 对翼梢弦长）：🔴 **按对取** `wings[N−1].tip_chord`，并**按翼型分叉**（事实中心 M2）——三角翼≈0，**禁止 0 代入**，梢部端间距钳制到**该对** C_root 计算值；梯形翼按接口值正常使用
+- 半翼展 b/2(N)：🔴 **按对取接口值** `wings[N−1].half_span`（仅报告字段，后端不参与尺寸计算）
+- 🔴 **单位**：`GetMissileDimensions()` 返回**毫米（mm）**（几何坐标系本就是 mm，后端不做换算）；**直接传参，禁止 ×1000**
 
 ## 几何量的唯一来源（反推禁令）
 
-**D / R / 全弹长 / 各当地弦长（含 MAC）的唯一来源是本接口（`GetMissileDimensions`）或用户直接输入** —— 需求文件 2.1 原文「**备注：具体以用户输入参数为准**」，所以"用户输入"是 需求文件 认可的**正规路径**，不是降级。
-
-| 数量 | 唯一来源 | ❌ 禁止来源 |
+| 数量 | 来源 | ❌ 禁止来源 |
 |---|---|---|
-| D（弹径） | 🔴 **固定值 `1196.076`（弹径 = 尾口径，2026-10-09 用户裁定；接口返回值异常被覆盖）** | 由分组属性 `targetSize` 反推 |
-| R（球头半径） | `nose_radius` / 用户输入 | 反推 |
-| 全弹长 | `fuselage_length`（本接口）/ 用户输入 | 任何非导弹几何查询工具（口径按各自模型定义，对导弹会返回量级不符的值） |
-| 各当地弦长 | 🔴 **翼根 C_root 固定取 `3225`（2026-10-09 用户裁定；接口曾返回 0）**；翼梢 C_tip 仍用 `wing_tip_chord` / 用户输入 | 由分组属性 `targetSize`×10 或 `0.02×弹径` 反推 |
-| MAC | 后端接口返回（**当前 10 项未含**） | 用全弹长/弦长充当真值（只能作近似并在 `note` 声明） |
+| D（弹径） | `GetMissileDimensions()` | 由分组属性 `targetSize` 反推 |
+| D_tail / 表面网格有效弹径 | `GetMissileDimensions()` | 反推 |
+| R（球头半径） | `GetMissileDimensions()` / 用户输入 | 反推 |
+| 全弹长 | `GetMissileDimensions()` / 内部接口 / 用户输入 | 任何非导弹几何查询工具 |
+| 各对当地弦长 C_root(N) / C_tip(N) | `GetMissileDimensions()` 的 **`wings[N−1]`**（按对） | 由分组属性 `targetSize`×10 或 `0.02×弹径` 反推 |
+| 各对半翼展 b/2(N) | `GetMissileDimensions()` 的 **`wings[N−1].half_span`**（按对） | 由分组属性反推 |
+| MAC | 各向异性处理器自动计算（`MissileAnisoProcessMissileAnisotropy` 返回） | 用全弹长/弦长充当真值 |
 
-> ⚠️ **为什么禁止反推**：分组属性 `targetSize=72.16634`、`minSize=3.60832`，比值 **0.05**；而 需求文件 3.2 规定「最小尺寸 = 目标尺寸 × 1/10」——系数对不上。按 `0.05×D` 或 `0.1×D` 反推会得到**相差 2 倍**的 D，直接带偏 `bodySpacing`/`rootSpacing`/各向异性尺寸。**分组属性只用于表面网格的 `groupProperty` 传参。**
-
-> ⚠️ **接口返回兜底值或字段为 0 时**：该字段**不可用** → 对应部件按全局默认尺寸生成，不得用估算值冒充、不得反复重试本接口。受影响的下游：**外场创建（全弹长/球头半径）**、各向异性与后缘的当地弦长。
+> ⚠️ **为什么禁止反推**：分组属性 `targetSize` / `minSize` 的比值并不一致；按 `0.05×D` 或 `0.1×D` 反推会得到**相差 2 倍**的 D，直接带偏 `bodySpacing`/`rootSpacing`/各向异性尺寸。**分组属性只用于表面网格的 `groupProperty` 传参。**
 
 ## 前置条件
 
-1. 部件分组已存在（用 `GetAllSpitAssemblyGroupProperty` / `GetMissilePartGroups` 验证）。⚠️ `ClassifyMissile` 返回恒定 `"true"` 时**不得据此判定"分割完成"**。
+1. 部件分组已存在（用 `GetAllSpitAssemblyGroupProperty` 验证）。
 2. 上述条件不满足时停止
 
 ## 当地弦长使用规则
 
 所有 Skill 和 reference 中出现的"当地弦长"遵循以下规则：
 
-| 出现位置 | 使用 C_root（根部弦长） | 使用 C_tip（梢部弦长） |
-|---------|----------------------|----------------------|
-| **表面网格（模块 3.2）弹翼 0.02×** | **整组取 C_root** | 不适用（分组为整组，无法按展向分段） |
-| 弦向分布（前缘端 0.008×） | 靠近根部段使用 | 靠近梢部段使用 |
-| 弦向分布（后缘端 0.008×） | 靠近根部段使用 | 靠近梢部段使用 |
-| 弦向分布（中间值 0.02×） | 根部段用 C_root | 梢部段用 C_tip |
-| 展向分布（梢部端 edgeSpacing） | — | 用 C_tip |
-| 展向分布（根部端 edgeSpacing） | 用 C_root | — |
-| 各向异性 mindValue（0.02×） | 根部段用 C_root | 梢部段用 C_tip |
-| 后缘面 bodySpacing（靠近梢部端） | — | 用 C_tip |
-| 后缘面 rootSpacing（靠近根部端） | 用 C_root | — |
-| 中间区域 | 线性插值：C_local = C_root + (C_tip - C_root) × (x/L_span) |
+🔴 **一切弦长都按对取**：第 N 对翼的弦长下标一律为 `wings[N−1]`（`C_root(N) = wings[N−1].root_chord`、`C_tip(N) = wings[N−1].tip_chord`）。N 由**翼性子面组名末位数字**读出（`wingSideSurface2` → 第 2 对）。**不得用某一对的弦长代跑其他对**——各对弦长可差 5 倍以上。
 
-- **弹翼（`wing*` 分组）**：🔴 **C_root 固定取 `3225`（2026-10-09 用户裁定）**；C_tip = `wing_tip_chord`（🔴 当前型号无舵，仅此一项）
+| 出现位置 | 使用 C_root(N)（根部弦长） | 使用 C_tip(N)（梢部弦长） | 🔴 三角翼（无 `wingTipN`，C_tip≈0） |
+|---------|----------------------|----------------------|----------------------|
+| **表面网格（模块 3.2）弹翼 0.02×** | **该对整组取 C_root(N)** | 不适用（分组为整组，无法按展向分段） | 该对整组取 C_root(N) |
+| 弦向分布（前缘端 0.005×） | 靠近根部段使用 | 靠近梢部段使用 | **不区分段，一律 C_root(N)**（无分段必要，梢部端钳制到 0.005×C_root(N)） |
+| 弦向分布（后缘端 0.005×） | 靠近根部段使用 | 靠近梢部段使用 | 同上，一律 C_root(N)（0.005×C_root(N)） |
+| 弦向分布（中间值 0.02×） | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
+| 展向分布（梢部端 edgeSpacing） | — | 用 C_tip(N) | **用 C_root(N) 计算值（0.005×C_root(N)）**——尖点处无弦长，钳制到根部比例 |
+| 展向分布（根部端 edgeSpacing） | 用 C_root(N) | — | 用 C_root(N)（0.005×C_root(N)） |
+| 各向异性 mindValue（0.02×） | 根部段用 C_root(N) | 梢部段用 C_tip(N) | 一律 C_root(N)（0.02×C_root(N)） |
+| 后缘面 bodySpacing（靠近梢部端） | — | 用 C_tip(N) | **用 C_root(N) 计算值（0.005×C_root(N)）**（三角翼后缘梢端为自由梢边） |
+| 后缘面 rootSpacing（靠近根部端） | 用 C_root(N) | — | 用 C_root(N)（0.02×C_root(N)） |
+| 中间区域 | 线性插值：C_local = C_root(N) + (C_tip(N) − C_root(N)) × (x/L_span) | | 🔴 此处 L_span = **该对**半翼展 `wings[N−1].half_span`（接口值）；三角翼 C_local 退化：C_local = C_root(N) × (1 − x/(b/2)(N))（尖点处→0，间距钳制见上） |
+
+> **最后一列只在三角翼生效**。梯形翼（有 `wingTipN`）一律按前两列的常规规则计算——C_tip(N) 取接口值，"梢部端"就是真实梢部弦长，**不做钳制**。翼型判定见事实中心 M2。
+>
+> **弹尾加密是唯一例外**：弹尾不属于任何一对翼，取**弦长最大的那一对**的参数（见 `missile-anisotropic-mesh.md` §「弹尾加密」）——由一站式返回的 `pairs[].mac` / 各对 `wings[N−1].root_chord` 比较得出。
+>
+> 三角翼的"当地弦长"定义：从根部 C_root(N) **线性减小至翼尖尖点处为 0**。公式可算但**尖点附近间距不得取 0**——所有「0.005× / 0.02×当地弦长」的梢部端一律钳制到**该对** C_root(N) 的比例值（`0.005×C_root(N)` / `0.02×C_root(N)`，**按接口现算**）。`x/(b/2)(N)` 跨度用**该对**接口半翼展值。
+
+- **弹翼（`wing*` 分组）**：🔴 **C_root(N) 按对取接口值**（`wings[N−1].root_chord`，事实中心 §2）；🔴 **C_tip(N) 按对取并按翼型分叉**（M2 / §2.2.2）——三角翼（无 `wingTipN`）≈0 正常，禁止 0 代入、梢部端间距钳制到**该对** C_root(N) 计算值；梯形翼（有 `wingTipN`）按接口值正常使用
