@@ -21,6 +21,7 @@ from document_loader import (
     read_image_data,
 )
 from llm_client.adapters.base import is_retryable
+from llm_client.output_contract import reasoning_output_contract
 from mcp_bridge import McpBridge
 from paths import UPLOADS_DIR
 import kb_tools
@@ -1065,6 +1066,11 @@ async def run_agent_loop(
     ])
     _fmt_parts.append("</output_format_reminder>")
     system_parts.append("".join(_fmt_parts))
+    # 推理模型专属补丁：推理内容在界面上是折叠的，不写进正文等于没回答。
+    # 放在最后一块：通用提示词会被稀释，模型对结尾的约束遵守得更好。
+    _reasoning_contract = reasoning_output_contract(config, call_model_id)
+    if _reasoning_contract:
+        system_parts.append(_reasoning_contract)
     system_prompt = "\n\n".join(system_parts)
     # 轨迹：turn 以用户消息序号计（本次消息为第 N 条 user）
     _traj_turn = sum(1 for m in session.messages if m.get("role") == "user")
@@ -1084,6 +1090,18 @@ async def run_agent_loop(
     _truncation_retries = 0
     # 本次用户消息内是否真的执行过工具：决定末尾那轮纯文本回复能不能免于格式重试
     _turn_tool_executed = False
+    # 本次用户消息内是否已经给前端发过正文。自动模式是整段补发，一轮对话里可能有
+    # 十几次请求、十几段说明，首尾直接相接会黏成一整坨，段落和列表边界全丢。
+    _text_emitted = False
+
+    def _text_event(text: str):
+        """自动模式的整段正文事件：轮与轮之间补空行，保住段落边界。"""
+        nonlocal _text_emitted
+        if not text:
+            return None
+        delta = text if not _text_emitted else "\n\n" + text
+        _text_emitted = True
+        return {"type": "text_chunk", "delta": delta}
     # 本次用户消息内已经作为图片发给模型的路径。图片只活一轮：同一条 user 消息上
     # 会不断累加工具截图，发过一次的下一轮就退化成占位文本，避免同一批图每轮重传。
     _replayed_images = set()
@@ -1193,6 +1211,9 @@ async def run_agent_loop(
 
         text_acc = ""
         reasoning_acc = ""
+        # 本轮请求里是否已经发过正文：手动模式逐轮实时发送，只有本轮第一段需要看看
+        # 前面有没有上一段的尾巴（见下面补空行的注释）。
+        _turn_text_started = False
         tool_calls = []
         usage = {}
         _stop_reason = "stop"   # v4: 接收 provider 返回的 stop_reason
@@ -1300,7 +1321,19 @@ async def run_agent_loop(
                         _first_token_at = _time.monotonic()
                     # 自动模式先缓冲整段文本，校验阶段计划后再发送，避免无效 options 闪现。
                     if not is_structured_continuation and interaction_mode != "auto":
-                        yield event
+                        delta = event["delta"]
+                        # 一次用户消息里常有多轮请求（工具调用前后各一段说明）。手动模式是
+                        # 逐轮实时发的，第二轮正文若直接接在上一轮末尾，"### 结论"、"- 项目"
+                        # 就落在上一段最后一句后面，行首条件不成立，标题和列表全部退化成
+                        # 普通文字，几段说明黏成一坨。历史重放走 renderHistory 的
+                        # "\n\n" 拼接，所以刷新一下就正常，实时却一直是坏的。这里按同一
+                        # 规则补空行，让实时与重放完全一致。
+                        if delta and not _turn_text_started and _text_emitted:
+                            delta = "\n\n" + delta
+                        if delta:
+                            _turn_text_started = True
+                            _text_emitted = True
+                        yield {**event, "delta": delta}
                 elif event["type"] == "reasoning_chunk":   # v4: 透传并保留推理过程
                     reasoning_acc += event.get("delta", "")
                     if _first_token_at is None:
@@ -1355,7 +1388,9 @@ async def run_agent_loop(
 
         # 结构化延续时文本被缓冲未发送，在此一次性补发，避免气泡空白
         if is_structured_continuation and text_acc:
-            yield {"type": "text_chunk", "delta": text_acc}
+            _event = _text_event(text_acc)
+            if _event:
+                yield _event
 
         # LLM 返回后的工具调用信息
         if tool_calls:
@@ -1564,7 +1599,9 @@ async def run_agent_loop(
         if tool_calls:
             _turn_tool_executed = True
             if interaction_mode == "auto" and text_acc:
-                yield {"type": "text_chunk", "delta": text_acc}
+                _event = _text_event(text_acc)
+                if _event:
+                    yield _event
 
             # 合并记忆后的工具参数与执行日志
             for tc in tool_calls:
@@ -2028,7 +2065,9 @@ async def run_agent_loop(
             )
             # 自动模式的文本在校验通过后一次性发送；手动模式已实时发送。
             if interaction_mode == "auto" and text_acc:
-                yield {"type": "text_chunk", "delta": text_acc}
+                _event = _text_event(text_acc)
+                if _event:
+                    yield _event
             logger.info("[done] session=%s tokens=%s elapsed_ms=%s think_ms=%s ttft_ms=%s tps=%s",
                         session.id, _total_tokens, _elapsed_ms, _think_ms_total, _ttft_ms, _tps)
             yield {
