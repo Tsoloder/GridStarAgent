@@ -702,9 +702,10 @@ function dragHasFiles(event) {
   return false;
 }
 
-// 行内：先整行转义，再把代码段换成占位符（否则代码里的 ** / _ 会被二次解析），
-// 之后依次解析图片、链接、粗体、删除线、斜体，最后把代码段还原
+// 行内：先整行转义，再把反斜杠转义与代码段换成占位符（否则 \* 与代码里的 ** / _ 会被二次解析），
+// 之后依次解析图片、链接、粗体、删除线、斜体，最后把占位符还原
 const MD_CODE_TOKEN = "\u0001";
+const MD_ESCAPE_TOKEN = "\u0005";
 function mdHref(raw) {
   const href = String(raw || "").trim();
   if (/^(?:https?:|mailto:)/i.test(href)) return href;
@@ -714,7 +715,16 @@ function mdHref(raw) {
 }
 function inlineMarkdown(text) {
   const codes = [];
+  // 反斜杠转义必须先护住：模型常把通配符组名写成 engine\*、verticalTail\*/horizontalTail\*，
+  // 这些星号若留在串里，`**…**` 就匹配不上（内容里出现 *），粗体失配后单星号规则
+  // 再把两个 `**` 各拆一半，正文里就会冒出字面星号和错位的斜体。
+  const escapes = [];
   return escapeHtml(text)
+    .replace(/\\([\\`*_{}\[\]()#+\-.!~|])/g, (_, ch) => {
+      const token = MD_ESCAPE_TOKEN + escapes.length + MD_ESCAPE_TOKEN;
+      escapes.push(ch);
+      return token;
+    })
     .replace(/`([^`]+)`/g, (_, code) => {
       const token = MD_CODE_TOKEN + codes.length + MD_CODE_TOKEN;
       codes.push(`<code>${code}</code>`);
@@ -728,12 +738,14 @@ function inlineMarkdown(text) {
       const url = mdHref(href);
       return url ? `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>` : whole;
     })
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    // 懒惰匹配而非 [^*]+：强调区里带上占位符以外的字符不该让它整体失配
+    .replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([\s\S]+?)__/g, "<strong>$1</strong>")
     .replace(/~~([^~]+)~~/g, "<del>$1</del>")
-    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/\*([^*]+?)\*/g, "<em>$1</em>")
     .replace(/(^|[^\w])_([^_]+)_(?=$|[^\w])/g, "$1<em>$2</em>")
-    .replace(new RegExp(`${MD_CODE_TOKEN}(\\d+)${MD_CODE_TOKEN}`, "g"), (_, index) => codes[Number(index)] || "");
+    .replace(new RegExp(`${MD_CODE_TOKEN}(\\d+)${MD_CODE_TOKEN}`, "g"), (_, index) => codes[Number(index)] || "")
+    .replace(new RegExp(`${MD_ESCAPE_TOKEN}(\\d+)${MD_ESCAPE_TOKEN}`, "g"), (_, index) => escapes[Number(index)] || "");
 }
 // 表格：GFM 管道表格，列数不匹配的行按表头列数截断/补空。
 // `\|` 是单元格内写竖线的转义写法，先用占位符护住再切列，切完还原
