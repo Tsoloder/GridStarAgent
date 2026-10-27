@@ -58,7 +58,7 @@
 3. 🔴 **单位**：接口返回**毫米（mm）**——**直接传参，禁止 ×1000**
 4. **各向异性处理器内部自动计算** MAC — 调用 `MissileWingAnisoProcessWingAnisotropy()` 后，返回结果中包含步骤 2 的每对弹翼 MAC 值
 5. 🔴 **各向异性处理器依赖接口**：一站式工具后端按对读 `SPIDER::Data` 的 `m_wingRootChords` / `m_wingThicknesses`（由 `GetMissileDimensions` 写回），**未调接口就调它会 `failed`** → 各向异性前必须先取尺寸
-6. 🔴 **顺序约束（2026-10-17 起，2026-10-22 沿用）**：`ClassifyMissile` → `GetMissileDimensions` → `MissileSurfMeshGenerate` → `MissileWingAnisoProcessWingAnisotropy`。尺寸由分割流水线实算并缓存，跳过分割会拿到空表
+6. 🔴 **顺序约束（2026-10-17 起，2026-10-22 沿用，2026-10-26 改定为「先弹身、后弹翼」）**：`ClassifyMissile` → `GetMissileDimensions` → `MissileSurfMeshGenerate` → `MissileBodyAnisoProcessBodyAnisotropy`（先弹身）→ `MissileWingAnisoProcessWingAnisotropy`（后弹翼）。🔴 **两个各向异性工具都要调，顺序固定不可颠倒。** 尺寸由分割流水线实算并缓存，跳过分割会拿到空表
 
 ### 接口未覆盖的量
 
@@ -100,7 +100,7 @@ body_diameter (D) ────── 弓形外场头部距离（0.2×D）
 尺寸获取路径（按优先级）：
 
 1. **`GetMissileDimensions()`（MCP，🔴 唯一权威来源）** — 需先 `enable_tool_group("missile")`，且**必须先跑过 `ClassifyMissile`**（尺寸由分割流水线实算缓存）。一次拿全 `fuselage_length` / `nose_radius` / `body_diameter` / `body_diameter_tail` / `body_diameter_surface` / 🔴 **弹翼 `wings` 数组**（每项 `root_chord` / `tip_chord` / **`thickness`** / `half_span`，下标 = 对数−1），单位 mm
-2. **各向异性处理器** — `MissileWingAnisoProcessWingAnisotropy()` 无参数，内部**自行**取尺寸：全部从 `SPIDER::Data` 读（由第 1 步写回），🔴 **弹翼按对读 `m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`**（旧文所述"直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转"**已作废**）；算完 MAC 返回 JSON 中 `pairs[].mac` 等字段。🔴 **未调接口 → 按对数组为空 → 直接 `failed`**
+2. **各向异性处理器** — `MissileWingAnisoProcessWingAnisotropy()` 无参数，内部**自行**取尺寸：全部从 `SPIDER::Data` 读（由第 1 步写回），🔴 **弹翼按对读 `m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`**（旧文所述"直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转"**已作废**）；算完 MAC 返回 JSON 中 `pairs[].mac` 等字段。🔴 **未调接口 → 按对数组为空 → 直接 `failed`**。🔴 **弹身另有 `MissileBodyAnisoProcessBodyAnisotropy()`**，尺寸取标量 `body_diameter_tail`（事实中心 §2.3）
 3. **内部接口（非 MCP）** — `SPIDER::Data::GetFuselageLength()` / `GetWingRootChords()` / `GetWingThicknesses()`（C++ 层）
 4. ~~历史标定值~~ — 🔴 **已作废**（2026-10-14），禁止引用
 5. **用户输入** — 球头半径 R、其他接口缺失尺寸

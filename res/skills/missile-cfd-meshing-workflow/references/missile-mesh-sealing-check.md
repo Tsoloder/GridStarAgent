@@ -16,11 +16,11 @@
 
 **标准流程（2–3 轮调用，替代十几轮统计）**：
 
-1. 直接调用 `UGBlockCreate`（按 `missile-farfield-and-volume.md` §6.2/§6.3 参数）；
-2. 返回 `"true"` → **网格封闭**，继续：`GetDomainsByType(3)` 确认外场面已生成 → 进入 §7（质量检查）→ 后续流程；
-3. 返回 `"false"` → 看后端错误信息：
-   - 含「存在不封闭的网格线ID如下：…」→ 网格**不封闭**，按下方「排查顺序」处理，**不封闭线清单以后端报出的为准**；
-   - 不含该字样 → **不是封闭性问题**，回 `missile-farfield-and-volume.md` §6.3「创建失败时的处理」逐项排查。
+1. 直接调用 `CreateMissileFarFieldBlock()`（无入参，参数全由后端按 `missile-farfield-and-volume.md` §6.2/§6.3 规则推导——**不要**改用手调 `UGBlockCreate` 来试参）；
+2. 返回 `status="success"` → **网格封闭**，直接进入 §7（质量检查）→ 后续流程。🔴 **不需要**再 `GetDomainsByType(3)` 确认外场（2026-10-23 省时纪律：建后不核验）；
+3. 返回 `status="failed"` → 看 `message`：
+   - 含「不封闭的网格线ID如下」→ 网格**不封闭**，按下方「排查顺序」处理，**不封闭线清单以后端报出的为准**；
+   - 不含该字样 → **不是封闭性问题**，回 `missile-farfield-and-volume.md` §6.3 的失败 message 表逐项排查。
 
 #### 兜底路径（手动统计，仅在上述路径需要"不封闭线清单"时才用）
 

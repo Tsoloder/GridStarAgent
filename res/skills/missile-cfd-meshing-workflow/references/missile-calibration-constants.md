@@ -82,19 +82,56 @@
 - 🔴 该规则**无条件生效**，即使接口 C_tip 返回 0 也不得回退到 0 代入。
 - 🔴 **按对生效**：钳制目标是**该对**的 C_root，不得用第 1 对的 C_root 替其他对钳制。
 
-> 🔴 **一站式返回后不做核验**：`MissileWingAnisoProcessWingAnisotropy()` 返回 `status="success"` 即为该阶段结束，**直接进入下一阶段**——不读 `step1_dimensions` / `step2_classify` / `step3_distribution` / `step4_aniso_line_groups` / `step5_aniso_domains` 做尺寸正值、`body_diameter_surface` 自洽性、各对 `root_chord`/`thickness`、窄面增长率的任何比对。§2.2.1 / §2.2.2 的规则供**表面网格阶段**取口径，以及 `status="failed"` 后的**分步回退**取值使用。详见 `missile-anisotropic-mesh.md` §「判定与路由」。
+> 🔴 **一站式返回后不做核验**：`MissileWingAnisoProcessWingAnisotropy()` 与 `MissileBodyAnisoProcessBodyAnisotropy()` 返回 `status="success"` 即为该阶段结束，**直接进入下一阶段**——不读 `step1_dimensions` / `step2_classify` / `step3_distribution` / `step4_aniso_line_groups` / `step5_aniso_domains` 做尺寸正值、`body_diameter_surface` 自洽性、各对 `root_chord`/`thickness`、窄面增长率、首层高度的任何比对。§2.2.1 / §2.2.2 / §2.3 的规则供**表面网格阶段**取口径，以及 `status="failed"` 后的**分步回退**取值使用。详见 `missile-anisotropic-mesh.md` §「判定与路由」。
 >
 > ✅ **一站式工具现状（2026-10-22 替换）**：`MissileWingAnisoProcessWingAnisotropy()`（无参数，后端 `MissileWingAnisotropicProcessor`）。🔴 **弹翼尺寸（根弦长 / 厚度）按对读 `SPIDER::Data` 的数组**（`m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`，由 `GetMissileDimensions` 接口写回）——旧文档所述「直读尺寸缓存 `wings`、不经 `SPIDER::Data` 中转」（`GetWingPairDims`）**已作废**；弹体尺寸（D / 尾口径 / R / 全弹长）读 `SPIDER::Data`，来源相同。🔴 **未调 `GetMissileDimensions` → 按对数组为空 → 该工具直接返 `failed`**。反向要求：**各向异性阶段之前必须先完成分割并调用 `GetMissileDimensions`**。
 > ⚠️ **旧一站式 `MissileAnisoProcessMissileAnisotropy`（`MissileAnisotropicProcessor`）已随本次替换弃用**，含其第 7 步弹尾加密；**新工具不含弹尾加密**，弹尾由后续独立工具处理。
+
+#### 2.3 🔴 弹身各向异性尺寸基准（2026-10-26 新增，`MissileBodyAnisoProcessBodyAnisotropy`）
+
+> 🔴 **弹身与弹翼是两个独立的一站式工具，都要调用，且顺序固定：先弹身、后弹翼。**
+> 弹身工具只处理 `fuselage` 组，**不读弹翼按对数组**、也**不写弹翼参数**。
+
+| 量 | 值 | 用途 |
+|---|---|---|
+| 弹身各向异性尺寸唯一来源 | 🔴 `SPIDER::Data::m_bodyDiameterTail`（弹尾口径，mm） | 全部中间值与首层兜底 |
+| 中间值（A / B 类线） | `0.05 × 弹尾口径` | `UGReDimensionSmoothDistribution` 中间值 |
+| 中间值（E 类线） | `0.05 × 弹尾口径` | 与弹头共点那批**同比例** |
+| 增长率 / 层数 | **1.2 / 50**（两组各向异性线组统一） | 组1 `bodyTailJunction` / 组2 `bodyNoseJunction` |
+
+> 🔴 **A/B 与 E 的中间值比例相同（都是 `0.05 × 弹尾口径`）**——2026-10-26 由旧的
+> `0.025×`（A/B）与 `0.04×`（E）统一改为 `0.05×`，**旧比例已作废**。
+
+**弹身网格线分类（"属于弹身"即 `fuselage` 组，五类 A~E）**：
+
+| 类 | 定义 | 分布设置 | 各向异性归属 |
+|---|---|---|---|
+| **A** | 与【弹尾】和【弹翼后缘】同时共点的弹身线 | 首尾端间距 = 共点弹翼后缘线的端间距；增长 1.2/1.2、中间值 `0.05×尾口径` | 组1 |
+| **B** | 与【弹翼前缘】和【弹翼后缘】同时共点的弹身线 | 前缘相邻端取前缘线端间距、后缘相邻端取后缘线端间距；同上中间值 | 组1 |
+| **C** | 弹尾 ∩ 弹身 交线 | 不经步骤 3（仅作组1 的线、面来源） | 🔴 **组1** |
+| **D** | 弹头 ∩ 弹身 交线 | 不经步骤 3；其**首尾端间距平均值**即组2 首层高度 | 🔴 **组2** |
+| **E** | 与【弹头】共点的弹身线 | 共点端 = D 的首尾端间距平均值、**另一端不变**；增长 1.2/1.2、中间值 `0.05×尾口径` | 组2 面集内 |
+
+**两个各向异性线组（`UGNewANisoDomain` type=1，增长率 1.2、层数 50）**：
+
+| 组名 | 线 | 面 | 首层高度 |
+|---|---|---|---|
+| `bodyTailJunction` | A ∪ B ∪ C | 与弹尾相交的弹身面 + 弹尾面 | A 类线端间距 |
+| `bodyNoseJunction` | D | 弹头面 + **其余未做各向异性处理的弹身面** | D 类线首尾端间距平均值 |
+
+> 🔴 首层高度取不到正值时**兜底退 `0.05 × 弹尾口径`**（避免 0 首层），不报错。
+> 🔴 **弹尾口径为 0 → 步骤 1 守卫 `failed`**（`GetMissileDimensions` 未调）。
+> ⚠️ 弹身工具**不含弹尾独立加密**——它做的是【弹尾∩弹身】与【弹头∩弹身】两处**结合处**各向异性，
+> 与旧一站式 step6 的"弹尾加密"不是同一件事。
 
 ## §3 编码与补偿（实机实测，覆盖工具 Schema 注释）
 
 | # | 项 | 值 | 实测依据 | 恢复接口方式 |
 |---|-----|-----|---------|-------------|
-| 3 | 外场创建工具 | **不用 `CreateMissileFarField`**，统一 `UGBlockCreate`（`chooseParam` 第 3 位=3 弓形即产出外场面） | 两轮实测恒 `true` 但 `GetDomainsByType(3)` 仍空（外场未实建） | 后端补实现后恢复：先调用→校验外场非空→空则回退 |
-| 4 | 弓形外场 `geoParam` / 头部距离 | 🔴 **外场长度 = `1.5 × 弹体长度`，另外 3 位 = `1.2 × 弹体长度`**（2026-10-23 用户裁定，**固定套用**）；头部距离 **0.2 × 弹径 D** | 2026-10-23 改定（原「2 × 弹体长度」已作废） | 换弹体时按新弹体长度重算，倍数不变 |
-| 5 | `chooseParam` 编码 | 第 2 位恒 `0`（外场）、第 3 位恒 `3`（弓形）；**第 1 位 = 头部方向位**，映射 **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向 0 / 负向 1；X=0、Y=1、Z=2）。按 `nose` 分组相对弹体中心的指向取值。锥顶置于 `centerCoor + 头部方向 × S/2` | 2026-10-14 依后端 `CreatEllipse()` 源码定（映射确定，非试错） | 换弹头朝向不同的弹体时按弹头指向重取，不照抄数字 |
-| 6 | centerCoor 居中 | 🔴 **直接用 `GetCreateBlockDefaultParam()` 返回的 `centerCoor`**——后端按**模型包围盒中心**算好，且已排除远场面（源码 `MergeDomainGrid` 跳过 `OUTFILED`）。弓形**严格以 `centerCoor` 居中**（X 跨 `±S/2`，Y/Z 对称），**无固有偏移、无需补偿、无需试探生成** | 2026-10-14 依后端源码（`CreatEllipse` 的 `beforePts/afterPts` 变换 + `Ellipse` 局部系对称）定 | 自算包围盒时**必须排除外场面**;|
+| 3 | 外场创建工具 | 🔴 **唯一入口是 `CreateMissileFarFieldBlock()`（无入参）**，内部由后端完成全部参数推导并执行 `UGBlockCreate`（`chooseParam` 第 3 位=3 弓形即产出外场面）。Agent **不再**手调 `GetCreateBlockDefaultParam` / `UGBlockCreate` | 旧 `CreateMissileFarField` 两轮实测恒 `true` 但 `GetDomainsByType(3)` 仍空（外场未实建）；2026-10-26 后端补实现为 `CreateMissileFarFieldBlock` | 已在用，见 farfield §6.3 |
+| 4 | 弓形外场 `geoParam` / 头部距离 | 🔴 **外场长度 = `1.5 × 弹体长度`，另外 3 位 = `1.2 × 弹体长度`**（2026-10-23 用户裁定，**固定套用**）；头部距离 **0.2 × 弹径 D**。由 `CreateMissileFarFieldBlock` 在后端套用 | 2026-10-23 改定（原「2 × 弹体长度」已作废） | 换弹体时按新弹体长度重算，倍数不变 |
+| 5 | `chooseParam` 编码 | 第 2 位恒 `0`（外场）、第 3 位恒 `3`（弓形）；**第 1 位 = 头部方向位**，映射 **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向 0 / 负向 1；X=0、Y=1、Z=2）。后端按 `nose` / `fuselage` **网格面**包围盒中心沿弹体最长轴的先后自动取值。锥顶置于 `centerCoor + 头部方向 × S/2` | 2026-10-14 依后端 `CreatEllipse()` 源码定（映射确定，非试错） | 换弹头朝向不同的弹体时由后端自动重取。**分组缺失时后端回退 `+X` 并在返回里带 `warning`** → 必须向用户确认真实指向 |
+| 6 | centerCoor 居中 | 🔴 **由 `CreateMissileFarFieldBlock` 后端算**：模型包围盒中心，**已排除远场面 `OUTFILED` 与加密源面 `SOURCE`**。弓形**严格以 `centerCoor` 居中**（X 跨 `±S/2`，Y/Z 对称），**无固有偏移、无需补偿、无需试探生成**。Agent 侧不再自算 | 2026-10-14 依后端源码（`CreatEllipse` 的 `beforePts/afterPts` 变换 + `Ellipse` 局部系对称）定 | 自算包围盒时**必须排除外场面** |
 | 7 | 空间网格 ids（`UGUGSp`） | 🔴 **先剔幽灵体块**再拼接（见「§4 幽灵块」） | 2026-10-09 审计修正 | 后端块 ID 回收修复后改回 |
 
 ## §4 幽灵块（已删除对象残留 ID）

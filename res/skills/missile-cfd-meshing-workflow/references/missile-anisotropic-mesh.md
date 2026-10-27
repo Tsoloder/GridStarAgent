@@ -9,7 +9,12 @@
 | 翼梢部 | 梢部端面加密（仅梯形翼有 `wingTipN` 面） |
 | 翼侧面 | 上下表面加密 |
 | 翼结合处 | 翼与弹体连接处加密 |
+| 🔴 **弹身 · 弹尾∩弹身结合处** | `bodyTailJunction`（**2026-10-26 新增**，弹身工具） |
+| 🔴 **弹身 · 弹头∩弹身结合处** | `bodyNoseJunction`（**2026-10-26 新增**，弹身工具） |
 | ~~弹尾~~ | 🔴 **2026-10-22 起不在弹翼各向异性范围内** —— 由后续独立工具处理，本参考不再给出弹尾参数 |
+
+> 🔴 **弹身两处由 `MissileBodyAnisoProcessBodyAnisotropy()` 处理**（见下「弹身工具」节），
+> 与弹翼工具**相互独立、都要调用**，且 🔴 **顺序固定：先弹身、后弹翼**。
 
 ## 🔴 各位置参数（需求基准；分步回退路径一律以此表为准）
 
@@ -38,7 +43,18 @@
 
 ## 工具
 
-各向异性使用**一站式工具** `MissileWingAnisoProcessWingAnisotropy()`（后端 `MissileWingAnisotropicProcessor`）。
+各向异性的实现对象分**弹身**与**弹翼**两块，🔴 **两个一站式工具相互独立，都要调用，且顺序固定：先弹身、后弹翼**：
+
+| 顺序 | 对象 | 一站式工具 | 处理分组 |
+|---|---|---|---|
+| **①** | 🔴 **弹身** | `MissileBodyAnisoProcessBodyAnisotropy()`（后端 `MissileBodyAnisotropicProcessor`） | `fuselage`（结合 `tail` / `nose`） |
+| **②** | 弹翼 | `MissileWingAnisoProcessWingAnisotropy()`（后端 `MissileWingAnisotropicProcessor`） | `wing*N` 各组 |
+
+> 🔴 **漏调任一工具 = 该部分没有各向异性**。弹翼不覆盖弹身，弹身不覆盖弹翼。
+> 🔴 **顺序不可颠倒**：一律**先弹身、后弹翼**。不得交换，也不得只调其中一个。
+
+### 弹翼工具 `MissileWingAnisoProcessWingAnisotropy()`
+
 该工具无参数，内部自动依次执行：
 
 1. **尺寸与对数获取** — 按对读后端 `SPIDER::Data` 的 `m_wingRootChords[N−1]` / `m_wingThicknesses[N−1]`（mm）。
@@ -62,7 +78,26 @@
 
 > ⚠️ **不含弹尾加密（2026-10-22 变更）**：旧一站式（`MissileAnisotropicProcessor`）的第 7 步
 > 弹尾加密已随该工具弃用。返回里**没有 `step6_tail`** 属正常现象，不是失败。
-> 弹尾各向异性由后续独立工具处理。
+
+### 🔴 弹身工具 `MissileBodyAnisoProcessBodyAnisotropy()`（2026-10-26 新增）
+
+该工具无参数，内部自动依次执行：
+
+1. **尺寸** — 读 `SPIDER::Data::m_bodyDiameterTail`（弹尾口径 mm）。🔴 **为 0 → 本步 `failed`**
+   （= `GetMissileDimensions` 未调用）。
+2. **弹身线分类（A~E 五类）** — 详见事实中心 §2.3。
+3. **分布设置** — A/B 类：首尾端间距取自共点弹翼前/后缘线；E 类：共点端取 D 的首尾端间距平均值、
+   **另一端不变**。中间值：A/B 与 E **同为 `0.05×尾口径`**；增长分布 1.2/1.2。
+4. **创建各向异性线组** — type=1，**两组**：
+   - `bodyTailJunction`（C：弹尾∩弹身）：线 = A∪B∪C，面 = 与弹尾相交的弹身面 + 弹尾面，
+     首层 = A 类线端间距，增长率 **1.2**，层数 50
+   - `bodyNoseJunction`（D：弹头∩弹身）：线 = D，面 = 弹头面 + 其余未处理的弹身面，
+     首层 = D 类线首尾端间距平均值，增长率 **1.2**，层数 50
+5. **各向异性域生成** — type=0, generateType=2，对上述两组面分别下发，增长率 **1.2**
+
+> 🔴 **弹身不做「弹尾加密」**：它做的是【弹尾∩弹身】与【弹头∩弹身】两处**结合处**各向异性，
+> 与旧一站式 step6 的"弹尾加密"不是同一件事。返回里没有 `step6_tail` 属正常。
+> 🔴 首层高度取不到正值 → **兜底退 `0.05×尾口径`**，不报错、不失败。
 
 > 🔴 **不做返回后核验**：一站式返回 `status="success"` 即为本阶段结束，**直接进入下一阶段**——
 > 不读 `steps` 内的尺寸/分布/线组字段，不查正值、不比对自洽性、不比对各对 `root_chord`/`thickness`、
@@ -72,12 +107,15 @@
 
 | 条件 | 动作 |
 |------|------|
-| 子面分组存在（`wingSideSurfaceN` 等） | 调用独立 Skill `missile-anisotropy-processing` |
-| 子面分组缺失 | 本阶段 `skipped` + `note` |
+| 子面分组存在（`wingSideSurfaceN` 等） | 调用独立 Skill `missile-anisotropy-processing`（弹翼工具） |
+| 子面分组缺失 | 弹翼部分 `skipped` + `note`；🔴 **弹身工具照常调用**（其定位键是 `fuselage`/`tail`/`nose`，不依赖弹翼子组） |
 | 一站式返回 `status="failed"` | **自动回退分步**（见下「分步回退」，无需询问用户） |
 | 工具返回接口不可用（恒定 true/false/空） | 本阶段 `skipped` + `note`，**禁止回退**（接口不可用时换分步同样调不通） |
 
-> 🔴 定位源闸门（事实中心 G1）：弹翼**带序号子面分组**（`wingSideSurfaceN` / `wingLeadingEdgeN` / `wingTrailingEdgeN`）即定位键——后端只产出子组名，不存在 `wing` 主组。子组名缺失 → `skipped` + `note`，禁止几何反推。
+> 🔴 定位源闸门（事实中心 G1）：弹翼**带序号子面分组**（`wingSideSurfaceN` / `wingLeadingEdgeN` / `wingTrailingEdgeN`）即定位键——后端只产出子组名，不存在 `wing` 主组。子组名缺失 → 弹翼部分 `skipped` + `note`，禁止几何反推。
+> 🔴 **弹身工具与弹翼闸门无关**：`fuselage` / `tail` / `nose` 是分割的**基本部件组**，恒存在；
+> 弹身工具另需弹翼**前缘/后缘**线（A/B 类判定用）——弹翼子组缺失时 A/B 类线会判空，
+> E/C/D 类仍可做，工具可能返 `failed`（步骤 3 有 skip）→ 按分步回退处理。
 
 ## 分步回退（一站式 `status="failed"` 时自动进入）
 
@@ -132,7 +170,11 @@
 
 ## 完成标准
 
-- `MissileWingAnisoProcessWingAnisotropy` 返回 `status` 为 `"success"`（🔴 **只看 `status`，不做任何返回后核验**）
+- 🔴 **`MissileBodyAnisoProcessBodyAnisotropy`（弹身）已先调用且 `status` 为 `"success"`**
+  —— 然后是 `MissileWingAnisoProcessWingAnisotropy`（弹翼）
+- 🔴 **`MissileWingAnisoProcessWingAnisotropy` 返回 `status` 为 `"success"`**（🔴 **只看 `status`，不做任何返回后核验**）
+  —— 两个工具都做完、且**按「先弹身、后弹翼」顺序**，本阶段才算完成；漏调弹身 = 弹身没有各向异性
 - 弹翼网格面已生成各向异性网格
 - 后缘面已做各向异性（`generateType=2`，增长率 1）—— 三角翼/梯形翼一视同仁
-- ⚠️ **弹尾各向异性不属本阶段完成标准**——由后续独立工具处理
+- 弹身两处结合处（`bodyTailJunction` / `bodyNoseJunction`）已生成各向异性网格
+- ⚠️ **弹尾独立加密不属本阶段完成标准**——由后续独立工具处理

@@ -148,9 +148,10 @@ GetMissilePartGroups = missile.GetMissilePartGroups
 MissileSurfMeshGenerate = missile.MissileSurfMeshGenerate
 DetermineWingTEDirection = missile.DetermineWingTEDirection
 IdentifyWingLeadingEdge = missile.IdentifyWingLeadingEdge
-CreateMissileFarField = missile.CreateMissileFarField
+CreateMissileFarFieldBlock = missile.CreateMissileFarFieldBlock
 CheckMissileMeshQuality = missile.CheckMissileMeshQuality
 MissileWingAnisoProcessWingAnisotropy = missile.MissileWingAnisoProcessWingAnisotropy
+MissileBodyAnisoProcessBodyAnisotropy = missile.MissileBodyAnisoProcessBodyAnisotropy
 
 if screen_automation is not None:
     FindGridStarWindow = screen_automation.FindGridStarWindow

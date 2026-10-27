@@ -91,7 +91,8 @@ def MissileSurfMeshGenerate():
       3. `GetMissileDimensions` 已调用（尺寸写回 `SPIDER::Data`）
 
     推荐的完整导弹流程顺序：`ClassifyMissile` → `GetMissileDimensions`
-    → **`MissileSurfMeshGenerate`** → `MissileWingAnisoProcessWingAnisotropy`。
+    → **`MissileSurfMeshGenerate`** → `MissileBodyAnisoProcessBodyAnisotropy`（弹身）
+    → `MissileWingAnisoProcessWingAnisotropy`（弹翼）。🔴 **各向异性阶段先弹身、后弹翼，顺序固定。**
 
     Returns:
         成功时返回 `"true"`（后端 `testSurf()` 为 void，无结构化返回值）。
@@ -177,42 +178,43 @@ def IdentifyWingLeadingEdge(
     })
 
 
-def CreateMissileFarField(fuselageLength: float, noseRadius: float):
-    """创建导弹弓形外场。
+def CreateMissileFarFieldBlock():
+    """创建导弹弓形外场（一键，无参数）。
 
-    ⚠️ **本工具已判定不可用**（两轮实测恒返回 "true" 但 `GetDomainsByType(3)` 仍空，
-    外场未实建）。外场统一改走 `UGBlockCreate`（`chooseParam` 第 3 位 = 3 弓形）。
-    本函数仅为后端补实现后恢复保留。
+    后端接口名 `CreateMissileFarFieldBlock`。取代此前 Agent 侧的
+    「查外场 → 取默认参数 → 查分组面 ID → 查网格线 → 查端点 → 自己推轴向 →
+    再调 UGBlockCreate」这一串（6 次往返 + 一段几何推理），全部收进后端一次完成：
 
-    弓形外场规则（2026-10-13 用户改定）：
-    - 外场尺寸：1.2 倍全弹长
-    - 头部距离：0.2 倍弹径 D（D = `body_diameter`，🔴 **取 GetMissileDimensions 接口值**，
-      2026-10-14 起不再使用固定值 1196.076）
+    1. **弹头方向**：`nose` 分组与 `fuselage` 分组各自的网格包围盒中心比较，
+       取弹体最长轴为主轴、比较该轴上两中心的先后，映射为 `chooseParam` 第 1 位
+       **`0=+X` `1=−X` `2=+Y` `3=−Y` `4=+Z` `5=−Z`**（= 2×轴号 + 正向 0 / 负向 1）。
+    2. **`geoParam`**：外场长度 = **`1.5 × 全弹长`**，另外 3 位 = **`1.2 × 全弹长`**。
+    3. **`centerCoor`**：模型包围盒中心（自动排除外场面 `OUTFILED` 与加密源面 `SOURCE`）。
+    4. **`meshSizeOrDimension`**：默认网格尺寸 × (外场长度 / 默认 geoParam)，等比缩放。
+    5. 拼 `[UGBlockCreate]` 参数并执行（`chooseParam` 第 2 位 `0`=外场、第 3 位 `3`=弓形）。
 
-    场景三（无外场 + 全模）和场景四（无外场 + 半模）时调用。
-    场景一/二已有外场时不需要调用。
+    🔴 **前置条件（顺序不可颠倒）**：
+      1. 数模已导入，且**表面网格已生成**（外场需要封闭的物面网格才能体填充）
+      2. `ClassifyMissile` 已完成 —— 后端靠 `nose` / `fuselage` 分组定弹头方向
+      3. `GetMissileDimensions` 已调用 —— 全弹长写回 `SPIDER::Data`，否则返回 failed
 
-    Args:
-        fuselageLength: 全弹长（外场基准尺寸），来自 GetMissileDimensions 的 fuselage_length 字段（🔴 单位 mm）。
-        noseRadius: 🔴 **参数名与语义已不符，待后端同步**——按新规则头部距离应为
-            `0.2 × 弹径 D`（D 取 GetMissileDimensions 的 `body_diameter` 接口值），
-            当前形参/线协议字段名仍为 `noseRadius`。
-            恢复本工具前须与后端确认改名为 `bodyDiameter`。
+    🔴 **不做返回后核验**：返回 `status="success"` 即视为外场已建，
+    直接进入空间网格（`UGUGSp`）阶段；不查外场面数量、不核对包围盒。
+    唯失败路径需要处理：`status="failed"` 时按 `message` 排查。
 
     Returns:
-        成功时返回 status="success"，result 为 JSON：
-        {
-          "farFieldId": 50,                    # 创建的外场 domain ID
-          "farFieldName": "MissileFarField",   # 外场名称
-          "farFieldSize": 3000.0,              # 实际外场尺寸（= 1.2 × fuselageLength）
-          "headDistance": 1794.1               # 头部距离（= 0.2 × bodyDiameter）
-        }
-        失败时返回 status="error"。
+        JSON 字符串，格式：
+        - 成功：`{"status":"success","geoParam":"1.5L,1.2L,1.2L,1.2L",
+          "chooseParam":"<方向位>,0,3","centerCoor":"x,y,z",
+          "meshSizeOrDimension":<缩放后网格尺寸>,"headDirection":<0-5>}`
+          （回显后端**实际使用**的参数，便于排查；**不要求 Agent 据此复算**）
+        - 失败：`{"status":"failed","message":"..."}`，常见 message：
+          - `fuselage_length is 0: run ClassifyMissile + GetMissileDimensions first`
+          - `empty model bounding box`（无物面网格）
+          - `UGBlockCreate returned false (see sealing check)`
+            → 转 `missile-mesh-sealing-check.md` 排查不封闭线
     """
-    return send_post_request("CreateMissileFarField", {
-        "fuselageLength": fuselageLength,
-        "noseRadius": noseRadius
-    })
+    return send_post_request("CreateMissileFarFieldBlock", {})
 
 
 def CheckMissileMeshQuality(domainIds: str = "", blockIds: str = ""):
@@ -298,9 +300,10 @@ def GetMissileDimensions():
     `wingSideSurfaceN` / `wingTipN`，N 从 1 开始（第 N 对翼，`wingTipN` 仅梯形翼存在）。
 
     > 🔴 **本接口还有副作用**：返回值会写回后端 `SPIDER::Data`，供
-    > `MissileSurfMeshGenerate`（表面网格逐组尺寸）与
-    > `MissileWingAnisoProcessWingAnisotropy`（弹翼各向异性）读取。
-    > 🔴 **两者之前都必须先调用本接口**，否则弹翼按对数组为空、各向异性工具守卫 `failed`。
+    > `MissileSurfMeshGenerate`（表面网格逐组尺寸）、
+    > `MissileWingAnisoProcessWingAnisotropy`（弹翼各向异性）与
+    > `MissileBodyAnisoProcessBodyAnisotropy`（弹身各向异性，读标量 `body_diameter_tail`）读取。
+    > 🔴 **三者之前都必须先调用本接口**，否则弹翼按对数组为空 / 弹尾口径为 0、各向异性工具守卫 `failed`。
 
     > 命名提示：本模块函数名与参数名统一使用现行命名 —— `wing` = 弹翼、`fuselage` = 弹体；当前型号无舵(`fin`)、无舵轴(`finshaft`)，相关分组不再出现。几何尺寸参数 `fin_*_chord` / `fin_clearance_height` **按后端实际返回值处理**：有值则保留使用，未返回则忽略。
 
@@ -388,9 +391,15 @@ def MissileWingAnisoProcessWingAnisotropy():
     ⚠️ **不含弹尾加密**（旧一站式 step6 已随旧工具弃用）。弹尾各向异性由后续
       独立工具处理，本工具不做、也不应期待返回里有 `step6_tail`。
 
+    🔴 **🔴 执行顺序：本工具（弹翼）必须在 `MissileBodyAnisoProcessBodyAnisotropy`
+      （弹身）**之后**执行。** 各向异性阶段固定两步：**① 弹身
+      `MissileBodyAnisoProcessBodyAnisotropy` → ② 弹翼 `MissileWingAnisoProcessWingAnisotropy`**。
+      🔴 **不得调换、不得只调其中一个** —— 漏一个该部分就没有各向异性。
+
     前置条件：
       - 🔴 `ClassifyMissile` 与 `GetMissileDimensions` 均已调用（尺寸已写回后端）
       - 导弹表面网格已生成（`MissileSurfMeshGenerate`）
+      - 🔴 **弹身各向异性已完成**（`MissileBodyAnisoProcessBodyAnisotropy`）
       - 上述带序号弹翼子面分组（`wingSideSurfaceN` 等）已存在
 
     Returns:
@@ -402,3 +411,62 @@ def MissileWingAnisoProcessWingAnisotropy():
         不代表整体失败，不得据此判定失败或重复执行。
     """
     return send_post_request("MissileWingAnisoProcessWingAnisotropy", {})
+
+
+def MissileBodyAnisoProcessBodyAnisotropy():
+    """导弹弹身各向异性处理主入口 — 对 `fuselage` 组做各向异性，依次执行全部子步骤并汇总。
+
+    后端接口名 `MissileBodyAnisoProcessBodyAnisotropy`（`MissileBodyAnisotropicProcessor`），
+    内部 5 步：
+
+    | 步骤 | 功能 |
+    |---|---|
+    | 1 | 尺寸（弹尾口径 `m_bodyDiameterTail`，mm） |
+    | 2 | 弹身网格线分类（A~E 五类） |
+    | 3 | 分布设置（A / B / E 三类平滑增长分布） |
+    | 4 | 各向异性线组创建（2 组，type=1） |
+    | 5 | 各向异性域生成（2 组面，type=0 generateType=2） |
+
+    弹身网格线分类（"属于弹身"即 `fuselage` 组）：
+      - **A** 与【弹尾】和【弹翼后缘】同时共点的弹身线
+      - **B** 与【弹翼前缘】和【弹翼后缘】同时共点的弹身线
+      - **C** 弹尾 ∩ 弹身 交线
+      - **D** 弹头 ∩ 弹身 交线（并记录其首尾端间距平均值）
+      - **E** 与【弹头】共点的弹身线
+
+    分布设置（平滑分布 ReDimension[6]）：
+      - **A**：首尾端间距 = 与之共点的弹翼后缘线端间距；增长分布 1.2/1.2
+      - **B**：前缘相邻端取前缘线端间距、后缘相邻端取后缘线端间距；增长分布 1.2/1.2
+      - **E**：与弹头共点端 = D 的首尾端间距平均值，另一端**不变**；增长分布 1.2/1.2
+      - 中间值：A/B 与 E **同为 `0.05 × 弹尾口径`**
+        （🔴 2026-10-26 由旧的 `0.025×`（A/B）、`0.04×`（E）统一改成 `0.05×`，旧比例已作废）
+
+    各向异性线组（type=1，共 2 组，增长率统一 1.2、层数统一 50）：
+      - `bodyTailJunction`（C：弹尾∩弹身）：面 = 与弹尾相交的弹身面 + 弹尾面；
+        首层高度 = A 的端间距
+      - `bodyNoseJunction`（D：弹头∩弹身）：面 = 弹头面 + 其余未处理的弹身面；
+        首层高度 = D 的首尾端间距平均值
+      - 首层高度取不到正值时**兜底退 `0.05 × 弹尾口径`**，不报错、不失败
+
+    🔴 **尺寸来源**：标量 `SPIDER::Data::m_bodyDiameterTail`（弹尾口径，mm），
+      由 `GetMissileDimensions` 接口写回。🔴 **因此 `GetMissileDimensions` 必须先调用**，
+      否则为 0、本工具守卫 `step1_dimensions` 直接 `failed`。
+
+    🔴 **🔴 执行顺序：本工具（弹身）必须先于 `MissileWingAnisoProcessWingAnisotropy`（弹翼）执行。**
+      各向异性阶段固定两步：**① 弹身 `MissileBodyAnisoProcessBodyAnisotropy` → ② 弹翼
+      `MissileWingAnisoProcessWingAnisotropy`**。🔴 **不得调换、不得只调其中一个**
+      —— 漏一个该部分就没有各向异性，顺序颠倒不符合规定流程。
+
+    前置条件：
+      - 🔴 `ClassifyMissile` 与 `GetMissileDimensions` 均已调用（分组已建、尺寸已写回）
+      - 导弹表面网格已生成（`MissileSurfMeshGenerate`）
+      - `fuselage` / `tail` / `nose` / `wing*N` 分组已存在
+
+    Returns:
+        JSON 字符串，格式：
+        {"status":"success|failed","message":"...","steps":{
+            "step1_dimensions":..., "step2_classify":..., "step3_distribution":...,
+            "step4_aniso_line_groups":..., "step5_aniso_domains":...}}
+        🔴 **只看顶层 `status` 判定成败**；`steps.*` 是执行信息。
+    """
+    return send_post_request("MissileBodyAnisoProcessBodyAnisotropy", {})
