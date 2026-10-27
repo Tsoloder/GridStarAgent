@@ -97,6 +97,7 @@ GridStarAgent/
 ├── voice_asr/                 语音转写模块（whisper.cpp）
 ├── docs/                      设计文档
 ├── package_intranet.py        内网离线分发包打包脚本
+├── 一键部署.bat / 一键启动.bat / 一键停止.bat   Windows 一键部署与启停
 └── LICENSE
 ```
 
@@ -111,6 +112,42 @@ GridStarAgent/
 | GridStar 软件 | 本机运行，HTTP 接口监听 `127.0.0.1:1313`（否则工具调用返回连接失败） |
 | Qt 客户端（可选） | Qt 5.12.2 msvc2017_64 + MSVC x64（qmake / nmake） |
 | 语音输入（可选） | Windows x64。运行时依赖随包分发（`voice_asr/runtime/`），无需目标机另装 whisper 或 VC++ 运行时 |
+
+---
+
+## 一键部署（Windows）
+
+仓库根目录下三个脚本，双击即可，顺序为 **部署 → 启动 →（用完）停止**。
+
+| 脚本 | 作用 |
+| --- | --- |
+| `一键部署.bat` | 用 Python 3.12 在仓库根建 `.venv`，安装 `agent/agent/requirements.txt`，随后自检核心模块导入、数据目录可写性、语音模型与部件分割包。可重复执行；`一键部署.bat --reinstall` 会删掉 `.venv` 重建 |
+| `一键启动.bat` | 按 9008（部件分割模型服务）→ 5656（MCP）→ 1231（Agent + WebUI）的顺序拉起，每个服务各占一个控制台窗口，逐个探测端口就绪后打开 `http://127.0.0.1:1231/ui/`。已在监听的端口直接复用，不会重复拉起 |
+| `一键停止.bat` | 列出 1231 / 5656 / 9008 的监听进程，确认后结束 |
+
+前置条件：Windows x64 + Python 3.12（`py -3.12` 可用）；用自动部件分割时，本机需已启动 GridStar 软件（`127.0.0.1:1313`）。
+
+可选环境变量（在 `cmd` 里 `set` 后运行脚本）：
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `PYTHON` | 自动探测 | 部署时用于创建 `.venv` 的解释器完整路径 |
+| `GRIDSTAR_SEG_HOME` | 自动发现同级 `GridStar_*` 目录 | 部件分割部署包目录（含 `start_server.bat` 的那一层） |
+| `SKIP_SEG` | `0` | 置 `1` 则跳过 9008 模型服务 |
+| `OUT_DIR` | `D:\A_GridStarCode\output` | `ProcessWithServer` 的 `outputDir`，启动时自动创建（工具要求该目录已存在） |
+| `PIP_INDEX_URL` | 官方源 | 内网/镜像源地址，如 `https://pypi.tuna.tsinghua.edu.cn/simple` |
+
+仓库根目录下若存在 `wheels\`，`一键部署.bat` 会自动改用 `pip install --no-index --find-links wheels`，全程不联网——内网离线包就是按这个约定组织的，解压后直接双击 `一键部署.bat` 即可。
+
+### 自动部件分割
+
+`一键启动.bat` 会用部件分割部署包自带的解释器（默认 `D:\Envs\gridstar_ptv3\Scripts\python.exe`，与 `启动服务_本机.bat` 一致）预设 `PYTHON` 后调用同目录的 `start_server.bat`，效果等同双击 `启动服务_本机.bat`：模型加载约 15 秒，日志出现 `listening on 0.0.0.0:9008` 即就绪。
+
+技能里的默认参数是远程服务器 `7.31.130.92:9008`；要用本机模型服务，在对话中显式给出：
+
+```text
+ProcessWithServer serverHost=127.0.0.1 serverPort=9008 outputDir=D:/A_GridStarCode/output
+```
 
 ---
 
@@ -337,13 +374,31 @@ python package_intranet.py --no-wheels               # 只打包源码
 python package_intranet.py --python-version 313 --platform win_amd64
 ```
 
-产物为 `dist/GridStarAgent_intranet_<日期>.zip`，内含源码、`wheels/`、`requirements.txt`、`voice_asr` 运行时资产与 `install_offline.bat`（创建 venv 并以 `--no-index` 离线安装）。
+产物为 `dist/GridStarAgent_intranet_<日期>.zip`，内含源码（含 `一键部署.bat` / `一键启动.bat` / `一键停止.bat`）、`wheels/`、`requirements.txt`、`voice_asr` 运行时资产与 `install_offline.bat`。
+
+### 内网机器上的操作顺序
+
+1. 把 zip 拷进去，解压到本地目录（不要直接在压缩包里双击运行，UNC 路径下 `venv` 会跑不起来）。
+2. 确认目标机已装 **Python 3.12 64 位**（`py -3.12 -V` 能打印版本即可）。
+3. 双击 `一键部署.bat`。检测到同级的 `wheels\` 时自动切离线模式（`--no-index --find-links wheels`），不访问任何外网源；建好 `.venv` 后跑导入、数据目录、语音模型、部件分割包自检。
+4. 双击 `一键启动.bat`，按 9008 → 5656 → 1231 依次拉起并打开界面。
+5. 首次使用在「设置」里配模型供应商。若模型服务也在内网，API 地址填内网地址即可。
+
+也可以继续用手写的 `install_offline.bat`：它建的是 `venv\`，`一键启动.bat` 会自动在 `.venv\` 与 `venv\` 之间择一，两者都可用。
+
+内网机器上拿不到 `pip` 源时不要跑 `一键部署.bat --reinstall`（重建后仍需装依赖，此时若没有 `wheels\` 会失败）。
+
+### 需要单独确认的三件事
+
+- **模型服务可达**：Agent 只访问你配置的 LLM API。纯内网请填内网部署的 OpenAI 兼容服务（Ollama / vLLM 等）。
+- **GridStar 软件**：本机 `127.0.0.1:1313` 必须监听，否则所有工具调用返回连接失败。
+- **部件分割包**：不是本仓库内容，需单独拷入，且目标机要有 `D:\Envs\gridstar_ptv3` 这个解释器环境（或 `set GRIDSTAR_SEG_HOME=` 指向包目录、`set PYTHON=` 指向实际解释器）。
 
 ### 目标机前置条件
 
 打包脚本把语音运行时（含 VC++ 运行时 4 个 DLL）都放进了包，但有两件事它替不了：
 
-1. **Python 3.12 64 位**。`install_offline.bat` 不捆绑 Python，它用 PATH 上的 `python` 建 venv（可用 `set PYTHON=<绝对路径>` 指定）。而 `wheels/` 里 10 个带 ABI 标签的 wheel 是 `cp312-win_amd64`，所以目标机必须是 3.12；版本不一致会在 `pip install` 阶段直接失败。打别的版本：`python package_intranet.py --python-version 313`。
+1. **Python 3.12 64 位**。`install_offline.bat` / `一键部署.bat` 都不捆绑 Python，前者用 PATH 上的 `python`（可用 `set PYTHON=<绝对路径>` 指定），后者优先 `py -3.12`。而 `wheels/` 里带 ABI 标签的 wheel 是 `cp312-win_amd64`，所以目标机必须是 3.12；版本不一致会在 `pip install` 阶段直接失败。打别的版本：`python package_intranet.py --python-version 313`。
 2. **Windows 10/11 x64**。`voice_asr` 的 4 个 DLL 与 shim 都是 x64 PE，32 位 Python 加载会失败。
 
 其余都不需要：不必装 Visual Studio，不必装 VC++ 可再发行组件包，不必装 whisper.cpp 或任何 exe。
@@ -351,9 +406,9 @@ python package_intranet.py --python-version 313 --platform win_amd64
 ### 装完先跑这两个检查
 
 ```bash
-:: 在解压出来的包目录里
-venv\Scripts\python -c "from voice_asr.config import settings; print(settings.is_ready(), settings.model)"
-venv\Scripts\python voice_asr\smoke_test.py --backend-only
+:: 在解压出来的包目录里（用 一键部署.bat 建的是 .venv，用 install_offline.bat 建的是 venv）
+.venv\Scripts\python -c "from voice_asr.config import settings; print(settings.is_ready(), settings.model)"
+.venv\Scripts\python voice_asr\smoke_test.py --backend-only
 ```
 
 第一条只查三个路径是否就位（快）；第二条加载真模型跑一段真音频，是「语音到底能不能用」的判据，退出码 0 即通过。
