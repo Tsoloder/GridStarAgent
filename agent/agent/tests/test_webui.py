@@ -296,8 +296,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=92" in index
-    assert "style.css?v=71" in index
+    assert "app.js?v=93" in index
+    assert "style.css?v=72" in index
 
 
 def test_webui_storage_issue_surfacing_contract():
@@ -384,8 +384,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=71" in index
-    assert "app.js?v=92" in index
+    assert "style.css?v=72" in index
+    assert "app.js?v=93" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -1067,3 +1067,47 @@ def test_webui_javascript_parses():
         )
         assert completed.returncode == 0, f"{name} 语法错误：\n{completed.stderr}"
 
+
+def test_webui_brand_mark_opens_gridstar_main_program():
+    """左上角图标是颗按钮：点它由后端判定 GridStar 在不在跑。"""
+    index = (Path(WEBUI_DIR) / "index.html").read_text(encoding="utf-8")
+    script = (Path(WEBUI_DIR) / "app.js").read_text(encoding="utf-8")
+    stylesheet = (Path(WEBUI_DIR) / "style.css").read_text(encoding="utf-8")
+
+    assert 'id="brand-mark"' in index
+    assert 'class="brand-mark-btn"' in index
+    assert "brandMark: $(\"#brand-mark\")" in script
+    assert "el.brandMark.onclick = launchGridStar" in script
+    assert 'request("/gridstar/ensure", {method: "POST"})' in script
+    assert ".brand-mark-btn{" in stylesheet
+
+
+def test_gridstar_ensure_endpoint_starts_program_when_missing(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(
+        app_module.gridstar_process,
+        "ensure_running",
+        lambda: {"running": True, "launched": True, "pids": [4321], "executable": "GridStar.exe"},
+    )
+
+    response = client.post("/gridstar/ensure")
+
+    assert response.status_code == 200
+    assert response.json()["launched"] is True
+    assert response.json()["pids"] == [4321]
+
+
+def test_gridstar_ensure_endpoint_surfaces_startup_failure(monkeypatch):
+    import app as app_module
+
+    monkeypatch.setattr(
+        app_module.gridstar_process,
+        "ensure_running",
+        lambda: {"running": False, "launched": False, "pids": [], "error": "找不到 GridStar 程序：D:\\missing.exe"},
+    )
+
+    response = client.post("/gridstar/ensure")
+
+    assert response.status_code == 503
+    assert "找不到 GridStar 程序" in response.json()["error"]

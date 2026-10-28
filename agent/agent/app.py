@@ -58,6 +58,7 @@ from llm_client.types import ModelConfig as RuntimeModelConfig
 from llm_client.types import ProviderConfig as RuntimeProviderConfig
 from data_dir_guard import guard_data_dir
 from logging_setup import setup_logging
+import gridstar_process
 from mcp_bridge import McpBridge
 import kb_tools
 from memory_store import MemoryFault, MemoryService
@@ -487,6 +488,23 @@ async def health():
         # 会话存储异常：读不出来时不能和「没有会话」混为一谈
         "storage_issues": storage_issues(),
     }
+
+
+@app.post("/gridstar/ensure")
+async def gridstar_ensure():
+    """确认 GridStar 主程序在跑，不在就拉起来（WebUI 左上角图标点下去走这里）。
+
+    判据是进程可执行文件名而不是窗口标题：标题里恰好带 GridStar 的编辑器不算。
+    已经有一个实例时原样返回、不再启动第二个；启动后要等它出现在进程表里才算数。
+    """
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, gridstar_process.ensure_running
+    )
+    if result.get("running") or result.get("launched"):
+        return result
+    return JSONResponse(
+        {**result, "error": result.get("error") or "GridStar 启动失败"}, status_code=503
+    )
 
 
 @app.get("/skills")

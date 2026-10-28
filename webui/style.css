@@ -1026,3 +1026,7 @@
 .json-editor-foot{display:flex;align-items:center;gap:7px;padding:10px 14px;border-top:1px solid var(--line);background:var(--band-3)}
 .json-editor-grow{flex:1}
 .json-editor-foot .action-button{min-width:72px}
+.brand-mark-btn{display:block;padding:0;border:0;background:none;line-height:0;border-radius:var(--radius-sm)}
+.brand-mark-btn:hover .brand-mark{filter:drop-shadow(0 0 6px var(--cyan-glow))}
+.brand-mark-btn:focus-visible{outline:1px solid var(--cyan);outline-offset:2px}
+@media(prefers-reduced-motion:no-preference){.brand-mark-btn.launching .brand-mark{animation:brandPulse .9s ease-in-out infinite}@keyframes brandPulse{0%,100%{opacity:1}50%{opacity:.4}}}

@@ -19,7 +19,7 @@ const state = {
   // stashed: 切走会话时摘下暂存的消息 DOM，切回后原样挂回继续实时更新
   controllers: new Map(), streams: new Map(), status: new Map(), stashed: new Map(),
   modelListOpen: false, modelOptionIndex: -1, modelSearch: "", modeListOpen: false, categoryListOpen: false, categoryTouched: false, slashOpen: false, slashIndex: 0, slashMode: "root", slashModelQuery: "",
-  attachments: [], uploading: 0,
+  attachments: [], uploading: 0, gridstarBusy: false,
   settings: {open:false,activeTab:"models",activeProviderId:null,original:null,draft:null,revision:null,dirty:false,testingProviderId:null,readingProviderId:null,discoveredModels:{},validationErrors:{},controllers:{},modelMeta:null,refreshingMeta:false,metaError:"",metaErrorKind:"",metaStatus:null,capsTouched:null,},
   mcp: {tools:[],loaded:false,loading:false,connected:false,error:""},
   skillsLoading: false, skillsError: "",
@@ -42,7 +42,7 @@ const state = {
   traj: {events:[], keys:{}, count:{}, records:[], view:"", query:"", selected:null, range:null, scale:null, spans:[], inspectorTab:"overview", loading:false, renderPending:false, collapsed:{}, actualDuration:false},
 };
 const el = {
-  connection: $("#connection"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
+  connection: $("#connection"), brandMark: $("#brand-mark"), newSession: $("#new-session"), sessionTrigger: $("#session-trigger"),
   sessionPanel: $("#session-panel"), sessionSearch: $("#session-search"), sessionList: $("#session-list"),
   closeSessions: $("#close-sessions"), currentTitle: $("#current-title"), messages: $("#messages"),
   welcome: $("#welcome"), phasePanel: $("#phase-panel"), model: $("#model-select"), modelTrigger: $("#model-trigger"), modelLabel: $("#model-label"), modelListbox: $("#model-listbox"), skill: $("#skill-select"), skillChip: $("#skill-chip"), slashMenu: $("#slash-menu"), modeTrigger: $("#mode-trigger"), modeLabel: $("#mode-label"), modeListbox: $("#mode-listbox"), categoryTrigger: $("#category-trigger"), categoryLabel: $("#category-label"), categoryListbox: $("#category-listbox"), categorySelect: $("#category-select"),
@@ -4860,6 +4860,24 @@ async function bootstrap() {
   el.warning.classList.toggle("hidden",state.configLoaded); updateSendState();
   checkVoiceHealth();
 }
+// 左上角图标：点一下先问后端 GridStar 主程序在不在，不在再由后端拉起来。
+// 判定与启动都放在后端：前端看不到别人的进程表，本地缓存也会在用户
+// 手工关掉 GridStar 之后变成假的「已在运行」。
+async function launchGridStar() {
+  if (state.gridstarBusy) return;
+  state.gridstarBusy = true;
+  el.brandMark.classList.add("launching");
+  try {
+    const data = await request("/gridstar/ensure", {method: "POST"});
+    if (data && data.launched) showToast(data.running ? "正在启动 GridStar…" : (data.warning || "正在启动 GridStar…"));
+    else showToast("GridStar 已在运行");
+  } catch (error) {
+    showToast((error && error.message) || "GridStar 启动失败");
+  } finally {
+    state.gridstarBusy = false;
+    el.brandMark.classList.remove("launching");
+  }
+}
 el.newSession.onclick = createSession;
 el.modelTrigger.onclick = () => state.modelListOpen ? closeModelList() : openModelList(); el.modelTrigger.onkeydown = handleModelKeys;
 // 清除技能后把焦点还回输入框，用户可以接着敲 "/" 或正文
@@ -4996,6 +5014,7 @@ window.addEventListener("resize", () => {
 el.sessionTrigger.onclick = () => el.sessionPanel.classList.contains("hidden") ? openSessions() : closeSessions();
 el.closeSessions.onclick = closeSessions; el.sessionSearch.oninput = renderSessions;
 el.connection.onclick = bootstrap;
+el.brandMark.onclick = launchGridStar;
 el.send.onclick = () => { const id = currentId(); if (id && state.controllers.has(id)) stopSession(id); else sendMessage(); };
 el.input.oninput = () => { autoGrowInput(); updateSendState(); syncSlashMenu(); };
 el.input.onkeydown = event => { if (handleSlashKeys(event)) return; if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); if (!isBusy() && !el.send.disabled) sendMessage(); } };
