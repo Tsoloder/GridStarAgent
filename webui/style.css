@@ -273,10 +273,10 @@
 .bubble-copy{display:flex;align-items:center;justify-content:center;width:20px;height:20px;flex:0 0 20px;padding:0;border:1px solid transparent;border-radius:var(--radius-sm);background:none;color:var(--muted-2);cursor:pointer;opacity:.5}
 .turn-card:hover .bubble-copy{opacity:1}
 .bubble-copy:hover{border-color:var(--line-strong);background:var(--surface-2);color:var(--cyan)}
-.bubble-meta{display:flex;align-items:center;margin-left:auto;color:var(--muted-2);font:9px/1.4 Consolas,monospace;letter-spacing:.4px;white-space:nowrap}
+.bubble-meta{display:flex;align-items:center;margin-left:auto;color:var(--muted-2);font:10.5px/1.4 Consolas,monospace;letter-spacing:.2px;white-space:nowrap}
 .bubble-meta>*+*{margin-left:8px}
 .bubble-timing-wrap,.bubble-usage-wrap{position:relative;display:inline-flex}
-.bubble-timing,.bubble-usage{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border:1px solid transparent;border-radius:999px;background:var(--band-3);color:var(--muted);font:9px/1.7 Consolas,monospace;letter-spacing:.4px;cursor:pointer}
+.bubble-timing,.bubble-usage{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border:1px solid transparent;border-radius:999px;background:var(--band-3);color:var(--muted);font:10.5px/1.7 Consolas,monospace;letter-spacing:.2px;cursor:pointer}
 .bubble-timing:hover,.bubble-usage:hover{border-color:var(--cyan);color:var(--cyan)}
 /* display 会覆盖 hidden 属性的默认 display:none，需显式收回 */
 .bubble-timing[hidden],.bubble-usage[hidden],.bubble-timing-pop[hidden],.bubble-usage-pop[hidden],.bubble-timing-pop .pop-row[hidden],.bubble-usage-pop .pop-row[hidden]{display:none}
