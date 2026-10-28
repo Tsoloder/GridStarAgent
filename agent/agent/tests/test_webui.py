@@ -296,8 +296,8 @@ def test_webui_per_session_stream_state_and_badges():
     assert "function queueApproval(id, event)" in script
     assert 'item["waiting"]' in backend
     # 缓存版本随本次前端改动升级
-    assert "app.js?v=88" in index
-    assert "style.css?v=66" in index
+    assert "app.js?v=92" in index
+    assert "style.css?v=71" in index
 
 
 def test_webui_storage_issue_surfacing_contract():
@@ -384,8 +384,8 @@ def test_webui_voice_input_contract():
     assert 'aria-label="语音输入"' in index
     assert index.index('id="voice-btn"') < index.index('id="send"')
     # 缓存版本随本次前端改动升级
-    assert "style.css?v=66" in index
-    assert "app.js?v=88" in index
+    assert "style.css?v=71" in index
+    assert "app.js?v=92" in index
 
     # 录音 → 浏览器端 WAV 编码 → POST /asr → 回填，全链路契约
     for contract in (
@@ -502,11 +502,20 @@ def test_webui_json_param_table_editor():
     assert 'placeholder="点击「其他」后在此输入答案"' in script
     assert '<button class="choice-submit" type="button" disabled>提交答案</button>' in script
     assert "submitBtn.onclick = submit;" in script
-    assert 'if (!text) { input.classList.add("invalid"); input.focus(); return; }' in script
+    assert 'if (!text) { input.classList.add("invalid"); input.focus(); return "done"; }' in script
     assert 'input.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); submit(); } };' in script
     assert 'card.classList.toggle("collapsed")' in script
     assert '$(".choice-close", card).onclick = event => { event.stopPropagation(); closeChoiceOverlay(); };' in script
     assert "按 Esc 取消" in script
+    # 忙碌门禁：卡片不能在上一轮没收尾时锁死自己（锁死后就再也点不动，只能刷新）
+    assert 'if (busyId && (state.controllers.has(busyId) || state.streams.has(busyId))) return "retry";' in script
+    assert 'if (submitOnce() !== "retry") { submitWaits = 0; return; }' in script
+    assert 'showToast("上一轮还在收尾，略等片刻再选");' in script
+    # 结束类选项：只落一条用户消息收尾，不开新一轮，否则 auto 模式会再弹一张同样的卡
+    assert "function isEndTurnOption(label, value)" in script
+    assert "async function endTurnByChoice(label, node)" in script
+    assert "/end-turn" in script
+    assert 'if (!approval && !toolParams && isEndTurnOption(' in script
     # Esc 只在浮层打开时响应，且让位给设置弹窗
     assert 'if (!el.choiceOverlay || el.choiceOverlay.classList.contains("hidden")) return;' in script
     # 卡片样式（三主题共用变量）

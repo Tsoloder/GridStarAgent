@@ -1295,6 +1295,46 @@ function renderStructured(data, parent) {
   if (data.workflow) renderWorkflowProposal(data.workflow, parent);
 }
 const ASK_USER_TOOL = "ask_user_question";
+// 「结束」类选项：点了就是本轮收尾。把它当普通消息发回去，auto 模式的模型会接着
+// 干（再探测、再总结、再弹一张同样的卡），用户点多少次都出不来。所以识别出来后
+// 只落一条用户消息并收尾，不开新一轮。
+// 识别只做保守判断：label 命中收尾措辞、或 value 是白名单里的结束值；含“继续、
+// 下一步、再试”这类明确要继续的措辞一票否决。宁可把它当普通选择发回去，也不要
+// 误呑一条真正的工作指令（比如“停止当前步骤，继续下一个”）。
+const END_TURN_LABEL_PATTERN = /本轮到此结束|结束本轮|结束任务|就此结束|到此为止|先到这里|先到这步|先这样吧|先这样|就这样吧|不用了|不必了|收尾结束|停止本轮|(^|[，,、\s])结束$/;
+const END_TURN_VALUE_PATTERN = /^(stop|stop_here|stop_turn|end|end_turn|exit|quit|finish|done|cancel)$/i;
+const END_TURN_CONTINUE_HINT = /继续|接着|下一步|再试|然后|之后/;
+function isEndTurnOption(label, value) {
+  const text = String(label || "").trim();
+  const raw = String(value || "").trim();
+  // 明确要继续的措辞一票否决，value 再像结束值也不收
+  if (END_TURN_CONTINUE_HINT.test(text)) return false;
+  if (text && text.length <= 24 && END_TURN_LABEL_PATTERN.test(text)) return true;
+  return Boolean(raw) && END_TURN_VALUE_PATTERN.test(raw);
+}
+// 把「结束」类选择落成一条用户消息就收尾：不请求 /chat/stream，不再开一轮
+async function endTurnByChoice(label, node) {
+  const id = currentId();
+  if (!id) return;
+  try {
+    await request(`/sessions/${encodeURIComponent(id)}/end-turn`, {method:"POST",body:JSON.stringify({label})});
+  } catch (error) {
+    // 落盘失败就别装作收尾了：把消息发回去，让模型自己接续，至少不会卡在原地
+    showToast(error.message || "收尾失败，已按普通选择发送");
+    sendMessage(label, label);
+    return;
+  }
+  const item = createMessage("user", label, "", null);
+  if (state.session && Array.isArray(state.session.messages)) {
+    state.session.messages.push({role:"user", content:label, display_content:label, ts:new Date().toISOString()});
+  }
+  if (item) setBubbleTime(item, new Date().toISOString());
+  setStatus(id, "done");
+  closeChoiceOverlay();
+  hidePhasePanel();
+  scrollMessages();
+  refreshSessions();
+}
 let choiceTimer = null;
 // 待作答的询问浮在输入框上方、把输入框盖住；关闭时向下压扁淡出，像缩回输入框一样
 function openChoiceOverlay(payload) {
@@ -1477,20 +1517,39 @@ function renderChoiceCard(payload, parent) {
       entries.forEach(entry => entry.item.classList.remove("locked"));
     }
   };
-  const submit = () => {
-    if (submitted) return;
+  // 提交一次，返回 "done"（已处理）或 "retry"（上一轮还没真正空闲，稍候再来）
+  const submitOnce = () => {
+    if (submitted) return "done";
     // 未选中不发消息，只提示
-    if (selected < 0) return;
+    if (selected < 0) return "done";
     const chosen = entries[selected];
     let value = chosen.label;
     if (chosen.other) {
       const text = input.value.trim();
-      if (!text) { input.classList.add("invalid"); input.focus(); return; }
+      if (!text) { input.classList.add("invalid"); input.focus(); return "done"; }
       value = text;
     } else if (chosen.option && chosen.option.value != null) {
       value = String(chosen.option.value);
     }
-    if (approval) { resolve(approval, value === "approve"); return; }
+    if (approval) { resolve(approval, value === "approve"); return "done"; }
+    // 结束类选项：只落一条用户消息收尾，不开新一轮（否则 auto 模式会再弹一张同样的卡）
+    if (!approval && !toolParams && isEndTurnOption(chosen.other ? value : chosen.label, chosen.option && chosen.option.value)) {
+      const busyId = currentId();
+      if (busyId && (state.controllers.has(busyId) || state.streams.has(busyId))) return "retry";
+      submitted = true;
+      card.classList.add("submitted");
+      input.disabled = true;
+      submitBtn.disabled = true;
+      paramInputs.forEach(field => field.disabled = true);
+      entries.forEach(entry => entry.item.classList.add("locked"));
+      endTurnByChoice(chosen.other ? value : chosen.label);
+      return "done";
+    }
+    // done 事件到达后 SSE 还要走完 drain 才真正关闭，这段窗口里 controllers/streams
+    // 仍然在册，sendMessage 会把这次提交静默丢掉——而卡片此刻已经锁死，用户再点
+    // 也没有任何反应，只能刷新页面，回来又是同一张待确认卡。所以先确认空闲再锁卡。
+    const busyId = currentId();
+    if (busyId && (state.controllers.has(busyId) || state.streams.has(busyId))) return "retry";
     submitted = true;
     card.classList.add("submitted");
     input.disabled = true;
@@ -1503,6 +1562,15 @@ function renderChoiceCard(payload, parent) {
       : value;
     sendMessage(toolParams && chosen.other ? `${payloadText}\n\n${value}` : payloadText, chosen.other ? value : chosen.label);
     closeChoiceOverlay();
+    return "done";
+  };
+  // 收尾窗口通常只有几十到几百毫秒：等到空闲就照常提交；真等到上限才提示，
+  // 绝不把卡停在锁死状态
+  let submitWaits = 0;
+  const submit = () => {
+    if (submitOnce() !== "retry") { submitWaits = 0; return; }
+    if (submitWaits++ >= 15) { submitWaits = 0; showToast("上一轮还在收尾，略等片刻再选"); return; }
+    setTimeout(() => { if (!submitted) submit(); }, 200);
   };
   entries.forEach((entry, index) => {
     // 普通选项点一下就直接确认；「其他」只亮起输入框，写完再点提交答案
@@ -2340,7 +2408,8 @@ function handleStreamEvent(id, type, event, assistant) {
 }
 async function sendMessage(rawMessage = null, displayContent = null, retryAttachments = null) {
   const busyId = currentId();
-  if (busyId && state.controllers.has(busyId)) return;
+  // 别静默吞掉：用户点了发送/选项却什么都没发生，比多一句提示难查得多
+  if (busyId && state.controllers.has(busyId)) { showToast("上一轮还在输出，稍候再发"); return; }
   const message = rawMessage != null ? rawMessage : el.input.value.trim();
   // 附件随消息一起发给大模型：重发沿用原附件，新消息取芯片条里已上传完成的项
   const sentAttachments = retryAttachments != null ? retryAttachments

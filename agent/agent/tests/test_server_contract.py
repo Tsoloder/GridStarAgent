@@ -665,6 +665,47 @@ def test_export_session_route_reports_missing_and_invalid_sessions(monkeypatch):
     assert client.post("/sessions/not-a-uuid/export", json={}).status_code == 400
 
 
+def test_end_turn_route_records_choice_without_starting_new_turn(monkeypatch):
+    """「本轮结束」类选项走后端专用接口：落一条 user 消息就收尾，不开新一轮。
+
+    回归背景：选项若当普通消息发回去，auto 模式的模型会接着干（再探测、再总结、
+    再弹一张同样的选择卡），用户点多少次都出不来；落成 user 消息后，历史里本轮
+    以 user 结尾，刷新页面也不会再按「待确认」重弹那张卡。
+    """
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    saved = []
+
+    class StubSession:
+        def __init__(self, sid):
+            self.id = sid
+            self.title = "结束测试"
+            self.updated_at = ""
+            self.messages = []
+
+        def append_user(self, content, active_skills=None, attachments=None, display_content=""):
+            self.messages.append({"role": "user", "content": content, "display_content": display_content})
+
+    stub = StubSession(session_id)
+    monkeypatch.setattr(server, "load_session", lambda sid: stub)
+    monkeypatch.setattr(server, "save_session", lambda s: saved.append(s))
+    monkeypatch.setattr(server, "update_index", lambda s: None)
+
+    client = TestClient(server.app)
+    response = client.post("/sessions/%s/end-turn" % session_id, json={"label": "本轮到此结束"})
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert len(stub.messages) == 1
+    assert stub.messages[0]["role"] == "user"
+    assert stub.messages[0]["content"] == "本轮到此结束"
+    assert stub.messages[0]["display_content"] == "本轮到此结束"
+    assert saved and saved[0] is stub
+
+    # 不给 label 就是无效请求，不能默默落一条空消息
+    assert client.post("/sessions/%s/end-turn" % session_id, json={}).status_code == 400
+
+
 def test_get_sessions_marks_active_background(monkeypatch):
     """会话列表注入 active/waiting 字段：刷新页面后前端仍能在列表里标出「进行中/待确认」。"""
     import uuid

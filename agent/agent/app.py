@@ -1757,6 +1757,41 @@ async def cancel_background(session_id: str):
     return {"cancelled": cancelled}
 
 
+@app.post("/sessions/{session_id}/end-turn")
+async def end_turn(session_id: str, body: dict = None):
+    """用户点「本轮结束」类选项时调用：只把这个选择落成一条用户消息，不再开新一轮。
+
+    选项里的“结束”如果当普通消息发回去，模型在 auto 模式下会接着干（继续探测、
+    再总结、再弹一张一模一样的选择卡），用户点多少次都出不来，表现为同一张确认
+    卡反复弹。这里把它当成一次明确的收尾动作：落盘一条 user 消息（展示文案就是
+    选项 label），不触发 agent。历史里这一轮因此以 user 消息结尾，刷新页面或切回
+    会话时不会再按「待确认」重弹出那张卡。
+    """
+    body = body or {}
+    label = str(body.get("label") or "").strip()
+    if not label:
+        return JSONResponse({"error": "label is required"}, status_code=400)
+    try:
+        session_id = validate_session_id(session_id)
+    except InvalidSessionId as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    # 后台任务还在跑就是“结束”要结束的东西，先取消再落盘，避免两边同时写会话
+    bg = _background_sessions.get(session_id)
+    cancelled = bool(bg and bg.task is not None and not bg.task.done())
+    if cancelled:
+        bg.task.cancel()
+    async with _session_async_lock(session_id):
+        with locked_session(session_id):
+            s = load_session(session_id)
+            if s is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            s.append_user(label, display_content=label)
+            save_session(s)
+            update_index(s)
+    logger.info("session turn ended by choice: %s | %s", session_id, label[:40])
+    return {"ok": True, "id": session_id, "cancelled": cancelled}
+
+
 @app.put("/sessions/{session_id}/rename")
 async def rename_session(session_id: str, body: dict = None):
     body = body or {}
