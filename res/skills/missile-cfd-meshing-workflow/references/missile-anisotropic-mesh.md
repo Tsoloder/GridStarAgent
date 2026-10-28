@@ -165,8 +165,7 @@
 2. 弹翼**带序号子面分组**已存在（`wingSideSurfaceN`、`wingLeadingEdgeN`、`wingTrailingEdgeN` 等，N = 1/2/3）
 3. 🔴 **`GetMissileDimensions` 已调用**（尺寸写回 `SPIDER::Data`，含**按对**的
    `m_wingRootChords` / `m_wingThicknesses`）——一站式工具第 1 步守卫依赖它，未调用会直接 `failed`
-4. 若用户对网格数量没有要求，可不做各向异性处理
-5. **链路接口可用**：若 `GetConnectorsByDomains` 返回兜底值，则整个各向异性阶段 `skipped`
+4. **链路接口可用**：若 `GetConnectorsByDomains` 返回兜底值，则整个各向异性阶段 `skipped`
 
 ## 完成标准
 

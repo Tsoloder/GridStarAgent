@@ -1,6 +1,6 @@
 ---
 name: missile-cfd-meshing-workflow
-description: 导弹 CFD 非结构网格生成全流程路由 — CAD 导入、水密性消除、导弹 AI 分部件、碎面合并（条件触发）、导弹几何参数 (D / R / 弦长)、表面网格、各向异性 (可选，弹翼 + 弹身)、弓形外场、空间网格、边界条件、质量检查（面网格最小角）、保存与导出。当用户提到导弹、导弹网格、弹翼、弹头 / 弹体 / 尾部, 各向异性, 后缘加密, 弹身加密, 外场, 边界条件, 质量检查, 导出网格时必须使用。
+description: 导弹 CFD 非结构网格生成全流程路由 — CAD 导入、水密性消除、导弹 AI 分部件、碎面合并（条件触发）、导弹几何参数 (D / R / 弦长)、表面网格、各向异性 (弹翼 + 弹身)、弓形外场、空间网格、边界条件、质量检查（面网格最小角）、保存与导出。当用户提到导弹、导弹网格、弹翼、弹头 / 弹体 / 尾部, 各向异性, 后缘加密, 弹身加密, 外场, 边界条件, 质量检查, 导出网格时必须使用。
 aliases: [导弹网格, 网格生成, 导弹部件分割, 碎面合并, 表面网格, 空间网格, 边界条件, 质量检查, 体网格质量, 各向异性, 后缘加密, 弹身各向异性, 弓形外场, 水密性, 继续生成网格]
 tags: [导弹, CFD, 网格, 工业软件, 各向异性, 弓形外场]
 category: CFD
@@ -54,7 +54,7 @@ allowed-tools: []
 
 ## 流程 A：从 CAD 到网格导出（完整链）
 
-阶段链： CAD 导入与单位设置 → 水密性处理与自由边检查 → 导弹 AI 分部件 (ClassifyMissile) → 碎面合并（条件触发） → 导弹几何参数 → 表面网格生成 → 各向异性 (可选，含弹翼后缘) → 体网格块创建、外场生成 → 空间网格 → 边界条件设置 → 质量检查（面网格最小角） → 保存与导出。
+阶段链： CAD 导入与单位设置 → 水密性处理与自由边检查 → 导弹 AI 分部件 (ClassifyMissile) → 碎面合并（条件触发） → 导弹几何参数 → 表面网格生成 → 各向异性 → 体网格块创建、外场生成 → 空间网格 → 边界条件设置 → 质量检查（面网格最小角） → 保存与导出。
 
 | #  | 阶段 / 触发意图 | 读取 |
 |---|---|---|
@@ -64,7 +64,7 @@ allowed-tools: []
 | 4 | 碎面、合并面、合并碎面（⚠️ 会改超面集合 → **合并后按组名重查分组**，事实中心 G2） | `missile-cad-to-mesh.md` §3.1 |
 | 5 | 弹径/弹尾口径/球头半径、**各对弹翼弦长与厚度 `wings[]`**、尺寸测量（🔴 全部**取 `GetMissileDimensions` 接口返回值**，见事实中心 §2；🔴 **须先完成阶段 3 分割**，尺寸由分割实算缓存；接口返 **mm**，禁止 ×1000） | `missile-geometry-parameters.md` |
 | 6 | 导弹表面网格生成 + 碎线合并（🔴 用 **`MissileSurfMeshGenerate`**，无入参，后端按导弹口径逐组自动设尺寸并合并网格线；🔴 **前置：`GetMissileDimensions` 已调用**） | `missile-surface-mesh.md` |
-| 7 | 各向异性（可选），🔴 **两个一站式工具都要调、🔴 顺序固定：先弹身、后弹翼 —— 漏一个该部分就没做、顺序颠倒即违规**：**(a) 弹身** `MissileBodyAnisoProcessBodyAnisotropy`（🔴 **2026-10-26 新增，必须最先执行**）—— 弹尾∩弹身（`bodyTailJunction`）与弹头∩弹身（`bodyNoseJunction`）两处结合处加密；定位键 `fuselage`/`tail`/`nose`，**不依赖弹翼子组**，故弹翼子组缺失时**照常调用**。**(b) 弹翼** `MissileWingAnisoProcessWingAnisotropy`（🔴 **2026-10-26 起固定排在弹身之后**）—— 前缘・后缘・梢部・侧面・结合处加密（**带序号子面分组存在才做**，事实中心 G1）。🔴 **翼后缘一律做各向异性（`generateType=2`），三角翼与梯形翼同款、无分支**——只要是 `wingTrailingEdgeN` 就做。三角翼无 `wingTipN` 面 → 仅「梢部」一项自然 `skipped`，不影响其余位置。🔴 **两者失败（`status="failed"`）时自动回退分步**（`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` + `GenerateANisoDomainGrid`），见 `missile-anisotropic-mesh.md` §「分步回退」；接口恒定值/空则**不回退**、直接 `skipped`。⚠️ **本阶段不含弹尾独立加密** | `missile-anisotropic-mesh.md`（判定 → 路由到独立 Skill `missile-anisotropy-processing`） |
+| 7 | 各向异性，🔴 **两个一站式工具都要调、🔴 顺序固定：先弹身、后弹翼 —— 漏一个该部分就没做、顺序颠倒即违规**：**(a) 弹身** `MissileBodyAnisoProcessBodyAnisotropy`（🔴 **2026-10-26 新增，必须最先执行**）—— 弹尾∩弹身（`bodyTailJunction`）与弹头∩弹身（`bodyNoseJunction`）两处结合处加密；定位键 `fuselage`/`tail`/`nose`，**不依赖弹翼子组**，故弹翼子组缺失时**照常调用**。**(b) 弹翼** `MissileWingAnisoProcessWingAnisotropy`（🔴 **2026-10-26 起固定排在弹身之后**）—— 前缘・后缘・梢部・侧面・结合处加密（**带序号子面分组存在才做**，事实中心 G1）。🔴 **翼后缘一律做各向异性（`generateType=2`），三角翼与梯形翼同款、无分支**——只要是 `wingTrailingEdgeN` 就做。三角翼无 `wingTipN` 面 → 仅「梢部」一项自然 `skipped`，不影响其余位置。🔴 **两者失败（`status="failed"`）时自动回退分步**（`missile-chordwise-direction` / `missile-spanwise-direction` / `missile-root-junction` + `GenerateANisoDomainGrid`），见 `missile-anisotropic-mesh.md` §「分步回退」；接口恒定值/空则**不回退**、直接 `skipped`。⚠️ **本阶段不含弹尾独立加密** | `missile-anisotropic-mesh.md`（判定 → 路由到独立 Skill `missile-anisotropy-processing`） |
 | 8 | 体网格块创建、外场生成（🔴 **一键 `CreateMissileFarFieldBlock()`（无入参）**——方向位推导、`geoParam` 倍数、`centerCoor`、`meshSize` 与 `UGBlockCreate` 调用全在后端完成，见事实中心 #3–#6；🔴 **只看返回 `status`**，`"success"` 即完成，不做建后核验） | `missile-farfield-and-volume.md` §6.1–6.3 |
 | 9 | 空间网格 / 体网格 / 附面层（🔴 `UGUGSp` ids 先剔幽灵块，事实中心 #7/§4） | `missile-farfield-and-volume.md` §6.4 |
 | 10 | 边界条件、BC、物面、远场、对称 | `missile-farfield-and-volume.md` §7.2 |
@@ -79,7 +79,7 @@ allowed-tools: []
 
 ## 硬闸门（任何流程都不得违反）
 
-1. **顺序闸门**：表面网格后固定顺序 `各向异性（可选，含弹翼后缘）→ 体网格块创建、外场生成 → 空间网格 → 边界条件 → 质量检查 → 保存导出`，严禁跳级；各向异性跳过时须在 note 说明。
+1. **顺序闸门**：表面网格后固定顺序 `各向异性→ 体网格块创建、外场生成 → 空间网格 → 边界条件 → 质量检查 → 保存导出`，严禁跳级；各向异性跳过时须在 note 说明。
 2. **水密闸门**：表面网格生成前必须**实际调用 `DealWatertight` 并验证 `free_edge_count` 为 0**。🔴 不得以"分组已存在 / ClassifyMissile 已运行过 / 记忆中有公差值"为由跳过。🔴 **重试策略**：仍有自由边 → 公差 **×5** 重试，🔴 **最多 15 次重试**（累计 ≤16 次调用），**到自由边为 `0` 即停止**。🔴 **模式差异**：**auto 模式自动重试**（重试循环不打断用户，跑完为止）；**manual 模式**出现非半模线自由边且重试未能消除时**停下来请用户手动修复**。达 15 次上限仍不过 → 停止并报告当前自由边数与所用公差。自由边全部位于半模线位置时可接受（视同成功、不再重试）。详见 `missile-cad-to-mesh.md` §2.2。
 3. **边界闸门**：首次铺底**必须统一置 `-10`（无 BC）**，严禁在铺底阶段写入 4/7/8 等实际属性值。🔴 实际属性（物面→粘性固壁、外场→远场、对称→对称）**只能在铺底完成后、按用户明确要求**通过 `BorderConditioConfigProperty` 逐组设置；**用户未明确要求前不写入任何实际属性**。物面可按分部件情况拆成多个物面组。
 4. **质量闸门**：🔴 **只查面网格** —— 面网格最小角 > 10°（各向异性单元处不计）。🔴 **不查体网格**：`ExamineBlock(ExamineMaximumIncludeAngle)` 对整套体网格执行时后端**无响应挂死**（四次实跑均卡住，需用户手动停止），导弹流程**不再调用该工具**，体网格质量指标（≤178°/禁止 179.9°）**本流程不检查**。工具与判据见 `missile-farfield-and-volume.md` §7.1。
