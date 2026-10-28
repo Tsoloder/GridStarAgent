@@ -456,7 +456,7 @@
 /* --- 消息正文新增语法：表格 / 引用 / 分隔线 / 深层标题 / 嵌套列表 / 删除线 / 图片 --- */
 /* 表格：与工具参数表同族，窄屏横向滚动而不撑破气泡 */
 .markdown .md-table-wrap{margin:8px 0;border:1px solid var(--line);border-radius:var(--radius-sm);overflow-x:auto;scrollbar-color:var(--scroll-thumb) var(--scroll-track)}
-.markdown table{width:100%;border-collapse:collapse;font-size:12px}
+.markdown table{width:100%;border-collapse:collapse;font-size:13px}
 .markdown thead th{padding:6px 9px;background:var(--band-3);color:var(--text-bright);font-weight:600;white-space:nowrap;border-bottom:1px solid var(--line)}
 .markdown tbody td{padding:6px 9px;border-top:1px solid var(--line);vertical-align:top;overflow-wrap:break-word}
 .markdown tbody tr:first-child td{border-top:0}
