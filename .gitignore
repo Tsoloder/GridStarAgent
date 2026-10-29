@@ -309,3 +309,34 @@ PartSeparation/reference/SuperFacePointCloudProcessor.h
 PartSeparation/tools/test_pcl1_client.py
 package_portable.py
 .gitignore
+
+# ---------------------------------------------------------------
+# 本机运行环境与工业软件二进制：只存在于这台开发机，不进仓库。
+# 原先是工具追加的 1300 多条逐文件规则，这里收敛成目录级规则。
+# res/ 下的资源二进制不进仓库，但 res/skills/ 是技能文档，跟着仓库走。
+# ---------------------------------------------------------------
+/res/*
+!/res/skills/
+/ppt/
+/Log/
+/BackupData/
+/temp/
+/temp
+/.license/
+/translations/
+/imageformats/
+/platforms/
+/mediaservice/
+/audio/
+/QtChartWidget/bin/
+/QtChartWidget/build/
+/*.dll
+/*.exe
+/*.pdb
+/*.lib
+/CfgNNWAction/
+/bearer/
+/iconengines/
+/playlistformats/
+/styles/
+/engine_debug.txt
