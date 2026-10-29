@@ -56,7 +56,8 @@ DEFAULT_OUT = ROOT / "dist"
 
 # 只搬运行期真正需要的三层：agent 代码、webui 静态、res 资源
 SOURCE_DIRS = ("agent", "webui", "res")
-SOURCE_FILES = ("README.md", "LICENSE")
+# desktop.py 是「启动.bat」的唯一入口，漏了它启动脚本会停在“找不到文件”
+SOURCE_FILES = ("README.md", "LICENSE", "desktop.py")
 
 # 标准库/解释器目录里不进包的部分
 LIB_SKIP = {
@@ -72,8 +73,10 @@ MSVC_DLLS = ("msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
 # 必须能导入，失败即中止（装出来就是废包）
 CORE_IMPORTS = ("fastapi", "uvicorn", "fastmcp", "starlette", "sse_starlette",
                 "httpx", "openai", "requests", "pydantic", "yaml", "sqlite3", "ssl")
-# 缺失只降级对应工具组
-SOFT_IMPORTS = ("mss", "uiautomation", "win32api", "comtypes", "PIL", "openpyxl", "pypdf")
+# 缺失只降级对应工具组。webview 只服务「启动.bat」的桌面窗口，
+# 缺了 desktop.py 会退回浏览器模式，所以也不算致命。
+SOFT_IMPORTS = ("mss", "uiautomation", "win32api", "comtypes", "PIL", "openpyxl",
+                "pypdf", "webview")
 
 COPY_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".pytest_cache")
 
@@ -345,6 +348,32 @@ def verify_app_boot(py: Path, stage: Path, timeout: int = 150) -> None:
 
 
 # ------------------------------------------------------------------- 启动脚本
+# 默认入口：原生窗口。服务由 desktop.py 自己拉起、自己回收，不开控制台窗口。
+DESKTOP_BAT = r"""@echo off
+setlocal EnableExtensions
+title GridStarAgent - 启动
+cd /d "%~dp0"
+
+set "ROOT=%~dp0"
+if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+set "PY=%ROOT%\runtime\python.exe"
+
+if not exist "%PY%" goto no_runtime
+
+"%PY%" "%ROOT%\desktop.py"
+rem 退出码 1 = 服务没起来。留一个 pause，用户能看见报错再走。
+if errorlevel 1 pause
+exit /b 0
+
+:no_runtime
+echo [失败] 找不到便携解释器: %PY%
+echo        多半是解压不完整，重新解压一遍整个目录再试。
+pause
+exit /b 1
+"""
+
+# 老入口：两个控制台窗口 + 浏览器。留给需要在浏览器里用、或者想盯着
+# 两个服务实时日志的人。
 LAUNCH_BAT = r"""@echo off
 setlocal EnableExtensions
 title GridStarAgent 离线版 - 启动
@@ -471,7 +500,6 @@ exit /b 0
 """
 
 SELFTEST_BAT = r"""@echo off
-chcp 65001 >nul
 cd /d "%~dp0"
 if not exist "%~dp0runtime\python.exe" (
     echo [失败] 找不到 runtime\python.exe，解压可能不完整
@@ -488,11 +516,13 @@ DEPLOY_NOTE = """GridStarAgent 离线版（生成于 {date}）
    1. 把整个目录拷到目标机（任意路径都行，路径里尽量别有空格和中文以外的问题字符），
       或者解压本目录同名的 zip。
    2. 双击 自检.bat。全部 PASS 就说明这台机器能跑；有 FAIL 会直接写原因。
-   3. 双击 启动.bat。会依次拉起两个服务并自动打开界面：
+   3. 双击 启动.bat。会开一个原生窗口，两个服务由它自己在后台拉起：
         MCP 工具服务  127.0.0.1:5656    （agent\\server.py）
         Web 服务      127.0.0.1:1231    （agent\\agent\\app.py）
-      浏览 http://127.0.0.1:1231/ui/
-   4. 双击 停止.bat 结束这两个服务。
+      关掉窗口，这两个服务一起结束，不留后台进程。
+   4. 想在浏览器里用（或要盯着两个服务的实时日志），改用 启动_浏览器版.bat，
+      它会开两个控制台窗口并自动打开浏览器；停止用 停止.bat。
+      两种模式共用同一份配置与数据，可以随时换。
 
 二、目标机需要什么
    不需要 Python、不需要 pip、不需要联网、不需要装 VC++ 运行库。
@@ -504,7 +534,7 @@ DEPLOY_NOTE = """GridStarAgent 离线版（生成于 {date}）
    换包不丢数据；换 Windows 账号会看不到旧数据。
 
 四、这个包里有什么、没有什么
-   有：MCP 工具服务、Agent 后端、WebUI 前端、skills 资源。
+   有：MCP 工具服务、Agent 后端、WebUI 前端、skills 资源、desktop.py（桌面窗口入口）。
    没有：voice_asr（语音转文字，缺失只影响 /asr 接口）、
          PartSeparation（部件分割服务，那是另一个 GB 级包）。
    部件分割相关的 ProcessWithServer 需要另配服务地址，单独部署。
@@ -528,7 +558,8 @@ def write_launchers(stage: Path, py_version: str) -> None:
         (stage / name).write_text(body, encoding="gbk", newline="")
         say("   %s" % name)
 
-    write("启动.bat", LAUNCH_BAT)
+    write("启动.bat", DESKTOP_BAT)
+    write("启动_浏览器版.bat", LAUNCH_BAT)
     write("停止.bat", STOP_BAT)
     write("自检.bat", SELFTEST_BAT)
     note = DEPLOY_NOTE.replace("{date}", _dt.datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -604,7 +635,8 @@ for name in ("fastapi", "uvicorn", "fastmcp", "starlette", "sse_starlette",
         ok(name)
     except Exception as exc:
         bad("%s: %s" % (name, exc))
-for name in ("mss", "uiautomation", "win32api", "comtypes", "PIL", "openpyxl", "pypdf"):
+for name in ("mss", "uiautomation", "win32api", "comtypes", "PIL", "openpyxl",
+             "pypdf", "webview"):
     try:
         importlib.import_module(name)
         ok(name + "（可选）")
@@ -613,7 +645,7 @@ for name in ("mss", "uiautomation", "win32api", "comtypes", "PIL", "openpyxl", "
 
 print("== 3. 程序文件 ==")
 for rel in ("agent/server.py", "agent/client.py", "agent/registry.py", "agent/tools",
-            "agent/prompt/base_prompt.md", "agent/agent/app.py",
+            "agent/prompt/base_prompt.md", "agent/agent/app.py", "desktop.py",
             "webui/index.html", "webui/app.js", "res/skills"):
     if (ROOT / rel).exists():
         ok(rel)

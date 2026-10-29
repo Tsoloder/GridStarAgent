@@ -13,3 +13,6 @@ mss>=9,<11; platform_system == "Windows"
 uiautomation>=2.0,<3; platform_system == "Windows"
 # 坐标点击后的回拍图上画操作点十字标记；缺失时只是没有标记，会如实告知模型
 Pillow>=9; platform_system == "Windows"
+# 桌面窗口（desktop.py，由「启动.bat」拉起）。缺失时自动退回浏览器模式，
+# 功能不受影响，只是回到“双击后在浏览器里用”的老样子。
+pywebview>=6.0; platform_system == "Windows"
