@@ -100,6 +100,7 @@ function escapeHtml(value) {
 function showToast(message) {
   el.toast.textContent = message;
   el.toast.classList.remove("hidden");
+  syncToastLift();
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => el.toast.classList.add("hidden"), 5000);
 }
@@ -1346,7 +1347,7 @@ function openChoiceOverlay(payload) {
   renderChoiceCard(payload, host);
   if (!host.firstElementChild) return;
   if (el.composer) el.composer.classList.add("choice-open");
-  requestAnimationFrame(() => { host.classList.add("open"); syncPhasePanelLift(); });
+  requestAnimationFrame(() => { host.classList.add("open"); fitChoiceOverlay(); syncPhasePanelLift(); });
 }
 function closeChoiceOverlay() {
   const host = el.choiceOverlay;
@@ -1355,8 +1356,34 @@ function closeChoiceOverlay() {
   if (el.composer) el.composer.classList.remove("choice-open");
   host.classList.remove("open");
   syncPhasePanelLift();
+  syncToastLift();
   clearTimeout(choiceTimer);
-  choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; }, 240);
+  choiceTimer = setTimeout(() => { host.classList.add("hidden"); host.innerHTML = ""; host.style.maxHeight = ""; }, 240);
+}
+// 浮层挂在 .composer 里向上生长，自己撑不出上限：参数一多就顶到视口外面，
+// 那截内容既不显示也够不着。这里按 composer 的真实位置算出可用高度并写死上限，
+// 顶端距视口留 8px，底部为浮层自身的 bottom 定位间距。
+// 用 composer 的 rect 而不是浮层的，避开入场动画 transform 造成的偏移。
+function fitChoiceOverlay() {
+  const host = el.choiceOverlay;
+  if (!host || !el.composer || host.classList.contains("hidden")) return;
+  const gap = parseFloat(getComputedStyle(host).bottom) || 12;
+  const avail = el.composer.getBoundingClientRect().bottom - gap - 8;
+  host.style.maxHeight = `${Math.max(180, Math.round(avail))}px`;
+  syncToastLift();
+}
+// 提示条默认贴底弹在 125px 处，审批卡一高就被压在下面；浮层打开时把提示抬到它上沿。
+// 两者都相对 main 底边（浮层 host 在 composer 里，底距 12px），所以直接取浮层高度加坡量。
+function syncToastLift() {
+  if (!el.toast) return;
+  const host = el.choiceOverlay;
+  const open = el.composer && el.composer.classList.contains("choice-open") && host && !host.classList.contains("hidden");
+  if (!open) { el.toast.style.bottom = ""; return; }
+  const hostHeight = host.offsetHeight || 0;
+  const box = el.toast.offsetParent;
+  // 卡片把可用高度吃满时提示没地方放：最多贴到容器顶部，不能抬出视口
+  const cap = box ? Math.max(12, box.clientHeight - el.toast.offsetHeight - 8) : Infinity;
+  el.toast.style.bottom = `${Math.round(Math.min(hostHeight + 20, cap))}px`;
 }
 // 选择窗口浮在输入框上方，会盖住紧贴其上的计划窗口：浮层出现/变高时把计划窗口顶开，
 // 浮层收起/变矮后再贴着浮层的上沿落回来
@@ -1410,6 +1437,7 @@ function renderChoiceCard(payload, parent) {
   if (!payload.question) question.classList.add("hidden");
   const paramHost = $(".choice-params", card);
   const paramInputs = [];
+  const paramRows = [];
   if (!params.length) paramHost.classList.add("hidden");
   params.forEach((entry, index) => {
     const row = document.createElement("div"); row.className = "param-row";
@@ -1441,8 +1469,53 @@ function renderChoiceCard(payload, parent) {
     } else {
       row.append(field);
     }
-    paramHost.append(row); paramInputs.push(field);
+    paramHost.append(row); paramInputs.push(field); paramRows.push(row);
   });
+  // 参数多到要滚动时，全量平铺本身就是噪音：审批真正要看的是必填项和值动过的项。
+  // 先按「必填 + 前几项」展开，其余收成一行，展开后再由滚动兜底。
+  const FOLD_AT = 6;
+  const alwaysShow = new Set();
+  params.forEach((entry, index) => { if (entry.required) alwaysShow.add(index); });
+  for (let index = 0; alwaysShow.size < FOLD_AT && index < params.length; index += 1) alwaysShow.add(index);
+  const foldedCount = params.length - alwaysShow.size;
+  let paramsExpanded = false;
+  const applyFold = open => paramRows.forEach((row, index) => row.classList.toggle("folded", !open && !alwaysShow.has(index)));
+  applyFold(false);
+  // 参数区是滚动容器：溢出了且还没滚到底才给一句「滚动查看」，到底就收掉
+  const paramTools = document.createElement("div");
+  paramTools.className = "param-tools";
+  const scrollHint = document.createElement("span");
+  scrollHint.className = "param-scroll-hint hidden";
+  scrollHint.textContent = "滚动查看";
+  const syncToolRow = () => {
+    const overflow = paramHost.scrollHeight - paramHost.clientHeight - paramHost.scrollTop > 2;
+    scrollHint.classList.toggle("hidden", !overflow);
+    // 没有「展开」按钮又没溢出时，这一行不该占位
+    paramTools.classList.toggle("hidden", !overflow && foldedCount <= 0);
+  };
+  if (params.length) paramHost.addEventListener("scroll", syncToolRow, {passive: true});
+  // 上限高度是做完首帧才写的，参数区会跟着收缩：只靠 scroll 事件会漏掉这一次重排
+  if (params.length && typeof ResizeObserver === "function") new ResizeObserver(syncToolRow).observe(paramHost);
+  if (foldedCount > 0) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "param-more";
+    const paintMore = () => {
+      more.textContent = paramsExpanded ? "收起可选参数" : `展开其余 ${foldedCount} 个参数`;
+      more.setAttribute("aria-expanded", String(paramsExpanded));
+    };
+    paintMore();
+    more.onclick = () => {
+      paramsExpanded = !paramsExpanded;
+      applyFold(paramsExpanded);
+      paintMore();
+      // 收起后列表变短，滚动位置得回顶，否则看着像卡在中间
+      requestAnimationFrame(() => { if (!paramsExpanded) paramHost.scrollTop = 0; syncToolRow(); syncPhasePanelLift(); syncToastLift(); });
+    };
+    paramTools.append(more);
+  }
+  paramTools.append(scrollHint);
+  if (params.length) { paramHost.after(paramTools); requestAnimationFrame(syncToolRow); }
   // 参数值随提交一起回填：按条目类型还原数字/布尔/对象的原始形态
   const paramValues = () => {
     const values = {};
@@ -5053,6 +5126,8 @@ el.input.addEventListener("paste", event => {
 });
 autoGrowInput();
 window.addEventListener("resize", autoGrowInput);
+// 窗口尺寸变了，浮层可用的高度也跟着变，重新算上限
+window.addEventListener("resize", fitChoiceOverlay);
 // 浮层高度会随卡片折叠/换提问而变，计划窗口得跟着重新贴合（变大顶开、变小落回）
 if (typeof ResizeObserver === "function" && el.choiceOverlay) new ResizeObserver(syncPhasePanelLift).observe(el.choiceOverlay);
 // Esc 收起询问浮层，露出被盖住的输入框；设置弹窗打开时交给弹窗自己处理。
