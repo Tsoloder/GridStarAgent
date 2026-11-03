@@ -6,6 +6,7 @@
   <title>GridStar AI</title>
   <script>try{document.documentElement.dataset.theme=localStorage.getItem("gs-theme")||"dark"}catch(e){document.documentElement.dataset.theme="dark"}</script>
   <link rel="stylesheet" href="style.css?v=72">
+  <link rel="stylesheet" href="refined.css?v=9">
 </head>
 <body>
   <main class="app-shell">
@@ -27,12 +28,11 @@
       <button id="session-trigger" class="session-trigger" type="button" aria-haspopup="dialog" aria-expanded="false">
         <span id="current-title">选择会话</span><svg class="chevron" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>
       </button>
+      <nav class="view-tabs" role="tablist" aria-label="视图切换">
+        <button id="tab-chat" class="view-tab active" type="button" role="tab" aria-selected="true">对话</button>
+        <button id="tab-trajectory" class="view-tab" type="button" role="tab" aria-selected="false">轨迹</button>
+      </nav>
     </section>
-
-    <nav class="view-tabs" role="tablist" aria-label="视图切换">
-      <button id="tab-chat" class="view-tab active" type="button" role="tab" aria-selected="true">对话</button>
-      <button id="tab-trajectory" class="view-tab" type="button" role="tab" aria-selected="false">轨迹</button>
-    </nav>
 
     <div id="session-panel" class="session-panel hidden" role="dialog" aria-label="会话历史">
       <div class="panel-head">
@@ -44,9 +44,9 @@
 
     <section id="messages" class="messages" aria-live="polite">
       <div id="welcome" class="empty-state">
-        <div class="empty-symbol">⌁</div>
-        <strong>对话已就绪</strong>
-        <p>描述你的工程目标，Agent 将按当前模式执行。</p>
+        <div class="empty-symbol"><img src="Logo.ico" alt="" width="30" height="30"></div>
+        <strong>等待你的下一句话</strong>
+        <p>描述工程目标，我会按当前模式拆解、调用工具并逐步执行。</p>
       </div>
     </section>
 
