@@ -159,31 +159,75 @@ def check_asr_assets() -> list[Path]:
     return [p for p in ASR_REQUIRED if not p.is_file()]
 
 
+# PyPI 上只有源码包（sdist）、没有 wheel 的依赖。pywebview -> proxy_tools 就是这种：
+# 带 --platform/--abi 的下载被 pip 强制要求 --only-binary=:all:，主下载会直接报
+# "No matching distribution found for proxy_tools"，整个内网包就卡在这一步。
+# 处理顺序见 download_wheels：先取 setuptools/wheel，把这类包就地构建成 wheel
+# （构建依赖走本地 wheel 目录，不联网），再让主下载用 --find-links 指回这个目录。
+SDIST_ONLY = ("proxy_tools",)
+
+
+def _name_prefixes(pkg: str) -> tuple[str, ...]:
+    """sdist/wheel 文件名里的包名可能把 - 换成 _，两种都认。"""
+    alt = pkg.replace("-", "_")
+    return (pkg, alt) if alt != pkg else (pkg,)
+
+
 def download_wheels(wheel_dir: Path, pyver: str, platform: str) -> int:
     wheel_dir.mkdir(parents=True, exist_ok=True)
+    tags = ["--python-version", pyver, "--implementation", "cp",
+            "--abi", f"cp{pyver}", "--platform", platform]
+
+    # pip / setuptools / wheel 自身也带上：内网升级要用，下面构建 sdist 时也要用
+    for extra in ("pip", "setuptools", "wheel"):
+        subprocess.run(
+            [sys.executable, "-m", "pip", "download", extra, "-d", str(wheel_dir),
+             "--only-binary=:all:", *tags],
+            cwd=str(ROOT),
+        )
+
+    # sdist-only 的包：下载源码包并构建成 wheel，已构建过的跳过（重复跑不必再来一次）
+    for pkg in SDIST_ONLY:
+        prefixes = _name_prefixes(pkg)
+        if any(wheel_dir.glob(f"{p}-*.whl") for p in prefixes):
+            continue
+        got = subprocess.run(
+            [sys.executable, "-m", "pip", "download", pkg, "--no-deps",
+             "--no-binary=:all:", "-d", str(wheel_dir)],
+            cwd=str(ROOT),
+        )
+        # 这一步失败必须当场报错：静默跳过会让后面的主下载报一句
+        # "proxy_tools 无匹配发行版"，把真正的原因埋在几百行回溯日志里。
+        if got.returncode != 0:
+            raise SystemExit(f"下载 {pkg} 源码包失败（缺它主下载会被 --only-binary 卡死）")
+        sources = [f for p in prefixes
+                   for pat in (f"{p}*.tar.gz", f"{p}*.zip")
+                   for f in wheel_dir.glob(pat)]
+        if not sources:
+            raise SystemExit(f"{pkg}: 源码包没落到 {wheel_dir}，无法构建 wheel")
+        for sdist in sources:
+            built = subprocess.run(
+                [sys.executable, "-m", "pip", "wheel", str(sdist), "--no-deps",
+                 "--no-index", "--find-links", str(wheel_dir), "-w", str(wheel_dir)],
+                cwd=str(ROOT),
+            )
+            if built.returncode != 0:
+                raise SystemExit(f"构建 {sdist.name} 失败，内网侧将无法离线安装 {pkg}")
+            sdist.unlink()   # 留源码包会让内网 pip 试图现场构建，反而更容易失败
+
     base = [
         sys.executable, "-m", "pip", "download",
         "-r", str(REQUIREMENTS),
         "-d", str(wheel_dir),
         "--only-binary=:all:",
-        "--python-version", pyver,
-        "--implementation", "cp",
-        "--abi", f"cp{pyver}",
-        "--platform", platform,
+        "--find-links", str(wheel_dir),
+        *tags,
     ]
     print("== 下载离线依赖 wheel ==")
     print("   " + " ".join(base[1:]))
     res = subprocess.run(base, cwd=str(ROOT))
     if res.returncode != 0:
         raise SystemExit("pip download 失败，请检查网络或改用 --no-wheels")
-    # pip / setuptools / wheel 自身也带上，便于内网升级
-    for extra in ("pip", "setuptools", "wheel"):
-        subprocess.run(
-            [sys.executable, "-m", "pip", "download", extra, "-d", str(wheel_dir),
-             "--only-binary=:all:", "--python-version", pyver, "--implementation", "cp",
-             "--abi", f"cp{pyver}", "--platform", platform],
-            cwd=str(ROOT),
-        )
     return len(list(wheel_dir.glob("*.whl")))
 
 
