@@ -2074,11 +2074,28 @@ function formatToolResult(raw) {
   if (trimmed[0] !== "{" && trimmed[0] !== "[") return text;
   try { return JSON.stringify(expandJsonStrings(JSON.parse(trimmed), 3), null, 2); } catch (_) { return text; }
 }
+function toolResultFailed(raw) {
+  const text = String(raw == null ? "" : raw).trim();
+  // 结构化结果先看字段，不要用关键词猜：业务数据里出现 "error": null、
+  // restore_error、error_count 这类键名都是正常的，关键词一匹配就会把
+  // status:success 的一次成功调用渲染成「失败」。
+  if (text[0] === "{" || text[0] === "[") {
+    try {
+      const data = JSON.parse(text);
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        if (typeof data.status === "string") return data.status.toLowerCase() !== "success";
+        if (typeof data.ok === "boolean") return !data.ok;
+      }
+    } catch (_) { /* 不是合法 JSON，落到下面的文本判断 */ }
+  }
+  const lower = text.toLowerCase();
+  return lower.includes("error") || text.includes("denied");
+}
 function renderToolResult(event, parent) {
   const selector = `[data-call-id="${CSS.escape(event.call_id || "")}"]`;
   let item = parent.querySelector(selector) || document.querySelector(selector);
   if (!item) { renderToolCall({id:event.call_id,name:event.name,args:{}}, parent); item = parent.querySelector(selector); }
-  const failed = String(event.result || "").toLowerCase().includes("error") || String(event.result || "").includes("denied");
+  const failed = toolResultFailed(event.result);
   item.dataset.state = failed ? "failed" : "succeeded";
   const status = $(":scope > summary .status", item); status.textContent = failed ? "失败" : "完成"; status.className = `status ${failed ? "failed" : "succeeded"}`;
   const result = $(".tool-result", item); result.classList.remove("hidden"); $("pre", result).textContent = formatToolResult(event.result);

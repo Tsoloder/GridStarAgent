@@ -172,12 +172,14 @@ def _tool_allowed_by_loaded_skills(name: str, loaded_skills, registry: SkillRegi
 
 
 # 只读、但名字不落在 Get/Query/... 前缀里的工具：桌面感知类。
-# CaptureGridStarWindow 会顺带把窗口切到前台（看清主视口本来就是它的目的，
-# 用途限定在领域识别那一步，见 base_prompt.md §2.8），
-# ActivateGridStarWindow 只切前台，两者都不改任何数据，因此按只读对待：
+# CaptureGridStarWindow / ActivateGridStarWindow 都不改任何业务数据，按只读对待：
 # 不该被 auto 模式的建计划门禁暂缓，也不该在 manual 模式弹审批卡。
-# 真正注入输入的六个（ClickAtPoint / DragAtPoint / ScrollAtPoint / ClickUIElement /
-# TypeTextInUIElement / SendKeyboardShortcut）仍然算操作类，照旧走门禁。
+#
+# CaptureGridStarWindow 现在会在 GridStar 位于其它虚拟桌面时把桌面切过来、
+# 画一圈接管边框，用完自动还回去。那确实会动到用户眼前的屏幕，但用建计划
+# 门禁去防它是错位的控件：「先规划再动手」管的是流程顺序，不是授权。真需要
+# 用户点头，应该走审批那条路，而不是把它一巴掌打回 [deferred]——那会让一次
+# 正常截图在界面上显示成失败，还得让模型多绕一轮先建计划再重试。
 _READONLY_EXTRA_TOOLS = frozenset({
     "CaptureGridStarWindow",
     "ActivateGridStarWindow",
@@ -1997,6 +1999,13 @@ async def run_agent_loop(
                 logger.info("[format] 格式重试 #%d session=%s mode=%s",
                             format_retry, session.id, interaction_mode)
                 session.append_assistant(text_acc, loaded_skills, reasoning_acc)
+                # 这段正文已经落盘了，也必须推给前端：否则形成「会话里有、气泡里没有」——
+                # 模型说完话又被格式提醒拉回下一轮，用户眼前却一片空白，只能刷新才看得到。
+                # 手动模式是边说边发，这里只补自动模式那一份。
+                if interaction_mode == "auto" and text_acc:
+                    _event = _text_event(text_acc)
+                    if _event:
+                        yield _event
                 if interaction_mode == "auto":
                     _reminder_types = "options、workflow（阶段计划请改用 update_plan 工具）"
                 else:

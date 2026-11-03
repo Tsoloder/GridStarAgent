@@ -907,6 +907,26 @@ async def test_task_reply_without_structure_still_retries(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_format_retry_text_is_streamed(tmp_path, monkeypatch):
+    """格式重试把正文拉回下一轮时，这段正文必须先推给前端。
+
+    旧行为：纯文本那一轮已经 append_assistant 落盘，但因为要重试格式契约就直接
+    continue，正文一次 text_chunk 都没发。结果会话里看得到、气泡里一片空白。
+    """
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    runtime = _ScriptedRuntime([
+        _text_events("主视口里是一枚导弹，弹身细长，尾部带十字形弹翼。"),
+        _text_events("```json\n{\"options\": [{\"label\": \"继续\", \"value\": \"go\"}]}\n```"),
+    ])
+    events = await _run_direct(runtime, "当前显示的是什么模型", interaction_mode="auto")
+    chunks = [event for event in events if event["type"] == "text_chunk"]
+    assert chunks, "格式重试前的那段正文没有被推流"
+    assert "导弹" in chunks[0]["delta"]
+
+
+@pytest.mark.asyncio
 async def test_tool_execution_blocks_format_exemption(tmp_path, monkeypatch):
     """本轮执行过工具就仍有决策点：寒暄豁免不生效，缺结构化块照旧重试。"""
     import session as session_mod

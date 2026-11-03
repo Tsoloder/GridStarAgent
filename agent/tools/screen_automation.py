@@ -81,6 +81,18 @@ except Exception as _exc:  # pragma: no cover - 取决于运行环境
     _PYWIN32_ERROR = _exc
     _MISSING_DEPS.append("pywin32 (%s)" % _exc)
 
+# ── 虚拟桌面接管 ────────────────────────────────────────────────
+# 接管模块只管「把窗口所在桌面切到眼前 + 画一圈接管边框」，它不 import 本模块，
+# 避免循环依赖。载不进来时不让整个 screen 分组报错，只是跨桌面截图会如实失败。
+try:
+    from tools import desktop_takeover as _takeover
+except Exception:  # pragma: no cover - 取决于导入路径
+    try:
+        from . import desktop_takeover as _takeover
+    except Exception as _exc:
+        _takeover = None
+        _MISSING_DEPS.append("desktop_takeover (%s)" % _exc)
+
 # ── 目标进程 ─────────────────────────────────────────────────────
 _DEFAULT_PROCESS_NAMES = "gridstar.exe"
 
@@ -98,6 +110,11 @@ _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _TOKEN_QUERY = 0x0008
 _DWMWA_EXTENDED_FRAME_BOUNDS = 9
 _DWMWA_CLOAKED = 14
+# DwmGetWindowAttribute(DWMWA_CLOAKED) 的取值。SHELL 遮蔽是虚拟桌面切换与
+# 「显示桌面」的主要手段，判它就能把「在别的桌面」和「最小化/隐藏」区分开。
+_DWM_CLOAKED_APP = 0x1
+_DWM_CLOAKED_SHELL = 0x2
+_DWM_CLOAKED_INHERITED = 0x4
 _WS_EX_TOOLWINDOW = 0x00000080
 _SM_XVIRTUALSCREEN, _SM_YVIRTUALSCREEN = 76, 77
 _SM_CXVIRTUALSCREEN, _SM_CYVIRTUALSCREEN = 78, 79
@@ -137,6 +154,11 @@ _PRESS_SETTLE_S = 0.02
 # PrintWindow 结果的空白判据：单一颜色占比超过上限即认为没画出来
 _BLANK_DOMINANT_RATIO = 0.98
 _SUSPECT_DOMINANT_RATIO = 0.55
+# 截图拿到之后，接管宽限多久就自动收。给一个短的不为别的：下一步可能紧跟
+# 一次点击，得让它赶上；而领域识别这种「只看一眼」的场景不该守着桌面 45 秒。
+_CAPTURE_IDLE_RELEASE_S = 3.0
+# 点亮边框之后等多久再抓图：分层窗口的 ShowWindow 返回不代表 DWM 已经合成。
+_TAKEOVER_PAINT_SETTLE_S = 0.2
 
 # 前台设置失败后的重试节奏：补发一次 Alt 键换取 SetForegroundWindow 的许可
 _FOREGROUND_RETRY_S = 0.05
@@ -452,19 +474,24 @@ def _window_pid(hwnd: int) -> int:
         return 0
 
 
-def _window_cloaked(hwnd: int) -> bool:
-    """UWP/虚拟桌面下窗口可能「存在但被 DWM 遮蔽」，这类窗口不可见也不可点。"""
+def _window_cloaked(hwnd: int) -> int:
+    """DWM 遮蔽状态：0 未遮蔽、2 被外壳遮蔽（虚拟桌面/显示桌面）、其它见 DWM_CLOAKED_*。
+
+    返回原始数值而不是 bool：光知道「被遮蔽」不够，还得区分是应用自己遮蔽、
+    外壳遮蔽（虚拟桌面）还是继承来的。外壳遮蔽才是「窗口在别的桌面上」的判据。
+    作为布尔用时非 0 即为真，原有调用不受影响。
+    """
     if _dwmapi is None:
-        return False
+        return 0
     value = ctypes.c_int(0)
     try:
         hres = _dwmapi.DwmGetWindowAttribute(
             wintypes.HWND(hwnd), wintypes.DWORD(_DWMWA_CLOAKED),
             ctypes.byref(value), ctypes.sizeof(value),
         )
-        return hres == 0 and bool(value.value)
+        return int(value.value) if hres == 0 else 0
     except Exception:
-        return False
+        return 0
 
 
 def _extended_frame_bounds(hwnd: int) -> Optional[tuple]:
@@ -554,6 +581,7 @@ def _window_facts(hwnd: int, foreground_hwnd: int = 0) -> dict:
     except Exception:
         is_iconic = False
     process_name = _process_basename(pid) or (os.path.basename(exe) if exe else "")
+    cloaked = _window_cloaked(hwnd)
     return {
         "hwnd": int(hwnd),
         "pid": pid,
@@ -569,7 +597,12 @@ def _window_facts(hwnd: int, foreground_hwnd: int = 0) -> dict:
         "is_visible": bool(win32gui.IsWindowVisible(hwnd)),
         "is_enabled": bool(win32gui.IsWindowEnabled(hwnd)),
         "is_iconic": is_iconic,
-        "is_cloaked": _window_cloaked(hwnd),
+        "is_cloaked": cloaked != 0,
+        "cloaked_state": cloaked,
+        # 虚拟桌面切换的主要手段就是 SHELL 遮蔽。它和最小化/隐藏完全不同：
+        # 这类窗口 IsWindowVisible 仍为 True、IsIconic 也是 False，坐标也正常，
+        # 只是 DWM 不合成它，所以区域抓屏一定拿不到它的画面。
+        "on_other_virtual_desktop": cloaked == _DWM_CLOAKED_SHELL,
         "is_foreground": bool(foreground_hwnd) and int(hwnd) == int(foreground_hwnd),
         "is_tool_window": bool(ex_style & _WS_EX_TOOLWINDOW),
         "is_main_window": owner == 0 and not (ex_style & _WS_EX_TOOLWINDOW),
@@ -676,6 +709,29 @@ def _gridstar_candidates(window_title: Optional[str] = None,
     return candidates
 
 
+_HELPER_WINDOW_HINTS = ("__wgl", "nvogldc", "splash", "msctfime", "default ime")
+
+
+def _is_helper_window(facts: dict) -> bool:
+    """判断一个候选是不是 GridStar 自己造的辅助窗，而不是用户界面。
+
+    现场实测 GridStar（Qt + OpenGL）会在同进程里造这么多看不见的窗口：
+    __wglDummyWindowFodder（WGL 假上下文窗，1906x1016）、NVOGLDC invisible、
+    SplashWin（启动闪屏）、MSCTFIME UI / Default IME（输入法）。它们 cloak=0、
+    面积比主窗口还大，落到同一候选池里就会把 NNW-GridStar_2026R1 挤掉，
+    于是截图截到一张 0 内容的假窗口，或者坐标基准建在它身上。
+
+    Returns:
+        True 表示应当排除。
+    """
+    title = (facts.get("title") or "").strip().lower()
+    if title and any(hint in title for hint in _HELPER_WINDOW_HINTS):
+        return True
+    if int(facts.get("width", 0)) <= 0 or int(facts.get("height", 0)) <= 0:
+        return True
+    return False
+
+
 def _select_main_window(candidates: list) -> dict:
     """从候选里挑一个「当前该看的窗口」。
 
@@ -701,7 +757,8 @@ def _select_main_window(candidates: list) -> dict:
 
 
 def _find_gridstar_window(window_title: Optional[str] = None,
-                          include_hidden: bool = False) -> Optional[dict]:
+                          include_hidden: bool = False,
+                          include_cloaked: bool = False) -> Optional[dict]:
     """定位 GridStar 窗口（进程判据），返回窗口身份信息或 None。
 
     Returns:
@@ -711,7 +768,7 @@ def _find_gridstar_window(window_title: Optional[str] = None,
          "is_main_window", "is_elevated", "integrity_rid", "input_blocked",
          "input_block_reason", "transient_windows": [...], "candidate_count": int}
     """
-    candidates = _gridstar_candidates(window_title, include_hidden)
+    candidates = _gridstar_candidates(window_title, include_hidden, include_cloaked)
     if not candidates:
         return None
     chosen = dict(_select_main_window(candidates))
@@ -736,19 +793,46 @@ def _find_gridstar_window(window_title: Optional[str] = None,
 
 
 def _find_gridstar_window_any(window_title: Optional[str] = None) -> Optional[dict]:
-    """定位 GridStar 主窗口：先找可见的，一个可见的都没有时才退回隐藏候选。
+    """定位 GridStar 主窗口：可见的 → 在别的虚拟桌面上的 → 隐藏（托盘）的。
 
-    隐藏候选只给「把窗口叫回来」的场景用（ActivateGridStarWindow /
-    CaptureGridStarWindow）。返回值里带 was_hidden=True，调用方据此如实说明
-    这次是先唤醒再操作，而不是装作窗口本来就在那儿。
+    第二级是这次补上的：窗口在别的虚拟桌面上时 DWM 会给它打 SHELL 遮蔽，
+    老实现把它当成「不可用」过滤掉，回退链只有两级也捞不到它，最终报
+    「未找到 GridStar 窗口」——进程明明在跑、窗口明明没关。
+
+    三级之间必须是这个顺序，不能合成一个候选池：GridStar（Qt + OpenGL）会造
+    一批同进程的辅助窗，它们 cloak=0、面积比主窗口还大，一旦和别的桌面上的真
+    窗口平起平坐地打分，主窗口就会被 __wglDummyWindowFodder 这种假窗口挤掉。
+
+    返回值里带 was_hidden / on_other_virtual_desktop，调用方据此如实说明
+    这次是先唤醒或先切桌面，而不是装作窗口本来就在手边。
     """
     info = _find_gridstar_window(window_title)
     if info is not None:
         return info
-    info = _find_gridstar_window(window_title, include_hidden=True)
-    if info is not None:
-        info["was_hidden"] = True
-    return info
+
+    candidates = _gridstar_candidates(window_title, include_hidden=True, include_cloaked=True)
+    usable = [c for c in candidates if not _is_helper_window(c)]
+
+    # 第二级：真实存在、坐在别的虚拟桌面上的主窗口
+    other_desktop = [c for c in usable
+                     if c.get("on_other_virtual_desktop") and c.get("is_main_window")
+                     and c.get("is_visible")]
+    if other_desktop:
+        chosen = dict(_select_main_window(other_desktop))
+        chosen["was_hidden"] = False
+        chosen["on_other_virtual_desktop"] = True
+        return chosen
+
+    # 第三级：真的只在托盘里（隐藏）的主窗口
+    hidden = [c for c in usable
+              if not c.get("is_visible") and c.get("is_main_window")
+              and c.get("width", 0) > 200 and c.get("height", 0) > 200]
+    if hidden:
+        chosen = dict(_select_main_window(hidden))
+        chosen["was_hidden"] = True
+        chosen.setdefault("on_other_virtual_desktop", False)
+        return chosen
+    return None
 
 
 def _input_gate(info: dict) -> tuple:
@@ -812,7 +896,7 @@ def _err(msg: str) -> str:
 
 def _no_window_error(window_title: Optional[str]) -> str:
     """找不到窗口时，把「为什么找不到」讲清楚，避免模型反复猜测标题。"""
-    found, report = _scan_target_windows(None, include_hidden=True)
+    found, report = _scan_target_windows(None, include_hidden=True, include_cloaked=True)
     detail = [
         "未找到 GridStar 窗口。判据是窗口所属进程的可执行文件名 %s，不是窗口标题。"
         % "、".join(TARGET_PROCESS_NAMES)
@@ -825,6 +909,15 @@ def _no_window_error(window_title: Optional[str]) -> str:
     if window_title:
         detail.append("当前还附加了标题过滤 '%s'。" % window_title)
     if found:
+        on_other_desktop = [item for item in found if item.get("on_other_virtual_desktop")]
+        if on_other_desktop:
+            detail.append(
+                "注意：找到了 %s 个 GridStar 窗口，但它们都在其它虚拟桌面上（cloaked=SHELL），"
+                "当前桌面看不到也拍不到：%s。切回那块桌面，或调用 CaptureGridStarWindow 让它接管。"
+                % (len(on_other_desktop),
+                   "；".join("hwnd=%s「%s」" % (item["hwnd"], item["title"] or "<无标题>")
+                            for item in on_other_desktop))
+            )
         titles = ["%s（pid=%s，可见=%s，最小化=%s）"
                   % (item["title"] or "<无标题>", item["pid"], item["is_visible"], item["is_iconic"])
                   for item in found]
@@ -1515,9 +1608,18 @@ def _point_context(window_title: str, tool: str) -> tuple:
     win_error = _pywin32_error(tool)
     if win_error:
         return None, None, False, win_error
-    info = _find_gridstar_window(window_title or None)
+    info = _find_gridstar_window_any(window_title or None)
     if info is None:
         return None, None, False, _no_window_error(window_title)
+    if info.get("on_other_virtual_desktop"):
+        # 这一道闸门比截图那边更重要：放开 cloaked 之后如果不管，坐标事件会
+        # 落在当前桌面的别的窗口上（比如正在放的 PPT），点一下就翻一页。
+        return None, None, False, _err(
+            "GridStar 在另一个虚拟桌面（hwnd=%s），坐标输入落不到它身上：注入的鼠标事件"
+            "会打到当前桌面最上面的窗口（比如你正在放的 PPT）。请先调用 "
+            "CaptureGridStarWindow 让它接管桌面，或手动切回那块桌面后重试。"
+            % info["hwnd"]
+        )
     allowed, reason = _input_gate(info)
     if not allowed:
         return None, None, False, _err("已识别到 GridStar 进程，但无法向它发送输入：%s" % reason)
@@ -1536,6 +1638,14 @@ def _point_context(window_title: str, tool: str) -> tuple:
             "若 GridStar 以管理员权限运行而本服务不是，请以相同权限运行本服务后重试。"
             % (info["hwnd"], info["is_iconic"], win32gui.GetForegroundWindow())
         )
+
+    # 真正要操作界面时把接管续长：截完立刻点的那一次不该因为宽限到期而断掉。
+    if _takeover is not None:
+        try:
+            if _takeover.status().get("active"):
+                _takeover.schedule_release(_takeover.TAKEOVER_TIMEOUT_S)
+        except Exception:
+            pass
 
     region = _clamp_to_virtual_screen(info["frame_rect"])
     if region["width"] <= 0 or region["height"] <= 0:
@@ -1565,6 +1675,16 @@ def _hit_test_error(info: dict, px: int, py: int) -> Optional[str]:
         top = win32gui.GetAncestor(hit, win32con.GA_ROOT) or hit
     except Exception:
         top = hit
+    # 自己画的那圈接管边框不算遮挡。它本来对鼠标是穿透的，WindowFromPoint 一般
+    # 会跳过它；这里多一道保险，免得万一被报回来就被误判成「压着别的窗口」，
+    # 让接管后 3 秒内的正常点击全部失败。
+    if _takeover is not None:
+        try:
+            overlay = _takeover.border_hwnd()
+        except Exception:
+            overlay = 0
+        if overlay and int(hit) == overlay:
+            return None
     if top == info["hwnd"]:
         return None
     try:
@@ -2053,9 +2173,13 @@ def FindGridStarWindow(window_title: str = "", include_hidden: bool = False) -> 
     missing = _pywin32_error("FindGridStarWindow")
     if missing:
         return missing
-    info = _find_gridstar_window(window_title or None, include_hidden)
+    # 用三级回退：窗口坐在别的虚拟桌面上时必须照样报出来。
+    # 那时候报「未找到」是假话——进程在跑、窗口没关，能操作但动不了它。
+    info = _find_gridstar_window_any(window_title or None)
     if info is None:
         return _no_window_error(window_title)
+    if include_hidden is False:
+        info.pop("was_hidden", None)
     others = info.pop("transient_windows", [])
     return _ok({
         "matched_by": "process",
@@ -2113,6 +2237,12 @@ def ActivateGridStarWindow(window_title: str = "") -> str:
 def CaptureGridStarWindow() -> str:
     """截取 GridStar 窗口的可见区域截图。无需任何参数，直接调用。
 
+    **行为变化（跨虚拟桌面）**：如果 GridStar 在另一个虚拟桌面上，本工具会把那块
+    桌面切到前台（Win+Ctrl+方向键盲切 + 轮询校验），并在窗口上画一圈会呼吸的
+    保时捷蓝边框表示「AI 正在接管」，然后截图。用完 45 秒内自动还原桌面，
+    用户一动鼠标也会立即还原。返回结果的 takeover 字段说明本次切了几次、
+    边框是否亮着；overlay 为 ai_takeover_border 时，图里那圈蓝边不是界面元素。
+
     **用途限定**：这个工具当前只用来确认 GridStar 里导入的是什么领域的模型
     （飞机 / 导弹），也就是领域识别的那一步。识别之外不要调用它：不看按钮在哪、
     不核对上一步操作是否生效、不读界面上的参数与列表，也不要为"再确认一眼"重截；
@@ -2139,6 +2269,35 @@ def CaptureGridStarWindow() -> str:
     return _capture_gridstar(window_title="", activate=True, clean=False)
 
 
+def _synthetic_input_blocked() -> Optional[str]:
+    """当前前台窗口权限高于本进程时，模拟按键会被 UIPI 丢弃，切桌面必然失败。
+
+    keybd_event 返回 void，不报错也不抛异常，所以这类失败是纯静默的：桌面
+    一动不动，而我们以为已经按下了。这里在动手之前先把原因问出来，比盲按
+    十六下再失败干净得多（现场实测：GridStar 以管理员运行时完整性级别是
+    0x3000，本服务是 0x2000，它在前台时 Win+Ctrl 完全无效）。
+
+    Returns:
+        阻断原因；不受阻时返回 None。
+    """
+    try:
+        fg = int(win32gui.GetForegroundWindow()) or 0
+    except Exception:
+        return None
+    if not fg:
+        return None
+    rid = _integrity_rid(_window_pid(fg))
+    self_rid = _self_integrity_rid()
+    if rid is None or self_rid is None or rid <= self_rid:
+        return None
+    return (
+        "当前前台窗口属于更高权限的进程（完整性级别 0x%X > 本服务 0x%X），"
+        "Windows UIPI 会静默丢弃本服务模拟的 Win+Ctrl 按键，虚拟桌面切不过去。"
+        "请手动切回 GridStar 所在的桌面，或以相同权限运行本服务后重试。"
+        % (rid, self_rid)
+    )
+
+
 def _capture_gridstar(window_title: str = "", activate: bool = True,
                       clean: bool = False) -> str:
     """CaptureGridStarWindow 的实现体，保留三个开关给脚本与自测用。
@@ -2157,6 +2316,38 @@ def _capture_gridstar(window_title: str = "", activate: bool = True,
     info = _find_gridstar_window_any(window_title or None)
     if info is None:
         return _no_window_error(window_title)
+
+    # 接管与截图绑定，不再只在跨桌面时才做：那圈蓝边是「AI 正在接管这个窗口」的
+    # 信号，用户在自己桌面上让后台操作时一样该看到。跨桌面只是让它多了一层作用
+    # （把桌面切过来，否则区域抓屏只能拿到当前桌面的画面）。
+    takeover_info = None
+    if _takeover is not None:
+        if info.get("on_other_virtual_desktop"):
+            blocked = _synthetic_input_blocked()
+            if blocked:
+                return _err(
+                    "GridStar 位于另一个虚拟桌面（hwnd=%s），需要自动切过去，但现在切不了：%s"
+                    % (info["hwnd"], blocked)
+                )
+        takeover_info = _takeover.ensure_takeover(info["hwnd"])
+        # 切桌面可能改变窗口位置与前台状态，重新采一次事实再谈截图
+        info = _find_gridstar_window_any(window_title or None) or info
+        if info.get("on_other_virtual_desktop") and not takeover_info.get("ok"):
+            return _err(
+                "GridStar 位于另一个虚拟桌面（hwnd=%s），自动切过去失败：%s"
+                % (info["hwnd"], takeover_info.get("error") or "原因未知")
+            )
+        if takeover_info.get("border"):
+            # 边框是另一个线程建的分层窗口，ShowWindow 返回不等于 DWM 已经把它
+            # 合到屏上。不等这一下，抓到的图里就没有那圈蓝边（实测：不加等待时
+            # 顶边命中 0/2560 个蓝像素）。
+            time.sleep(_TAKEOVER_PAINT_SETTLE_S)
+    elif info.get("on_other_virtual_desktop"):
+        return _err(
+            "GridStar 位于另一个虚拟桌面（hwnd=%s，cloaked=SHELL），无法直接截图。"
+            "接管模块 desktop_takeover 未能加载，请先切换回那块桌面再重试。"
+            % info["hwnd"]
+        )
 
     was_hidden = bool(info.get("was_hidden")) or not info["is_visible"]
     activated = False
@@ -2254,9 +2445,27 @@ def _capture_gridstar(window_title: str = "", activate: bool = True,
             "（前台 hwnd=%s）。需要干净画面时先调用 ActivateGridStarWindow。"
             % win32gui.GetForegroundWindow()
         )
+    if takeover_info is not None:
+        # 成功的 payload 里不留 "error": null：很多消费方（包括模型和前端）
+        # 看到这个键名就会当成出过事，哪怕值是 null。有问题才带 error。
+        payload["takeover"] = {k: v for k, v in takeover_info.items()
+                               if not (k == "error" and v is None)}
+        payload["overlay"] = "ai_takeover_border"
+        payload["overlay_note"] = (
+            "画面最外圈那圈蓝色渐变是 AI 接管标识，不属于 GridStar 界面，"
+            "不要把它当成软件里的元素去描述或定位。接管期间目标窗口所在桌面"
+            "已被切到前台，用完会自动还原。"
+        )
     # 记下这次截图的坐标基准：后续 ClickAtPoint / DragAtPoint / ScrollAtPoint 会拿它
     # 和当时的窗口矩形比对，基准漂了就明说，而不是照旧坐标点到别的位置去。
     _mark_basis(info, region)
+    if takeover_info is not None and takeover_info.get("ok") and _takeover is not None:
+        release = _takeover.schedule_release(_CAPTURE_IDLE_RELEASE_S)
+        payload["takeover_release"] = (
+            "截图已经拿到，%s 秒内没有后续界面操作就自动熄掉边框、把桌面还回去。"
+            % _CAPTURE_IDLE_RELEASE_S if release.get("scheduled")
+            else "接管已经结束，边框与桌面均已还原。"
+        )
     return _ok(payload)
 
 
