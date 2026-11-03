@@ -35,6 +35,11 @@ ROOT = Path(__file__).resolve().parent
 DIST = ROOT / "dist"
 REQUIREMENTS = ROOT / "agent" / "agent" / "requirements.txt"
 
+# 语音模块的源码目录：--no-voice 时整块不带（app.py 里是 try/except 挂载，缺了只留一条 warning）
+VOICE_DIR = "voice_asr"
+# 本机临时目录（截图/对照），不应进分发包
+EXCLUDE_TOP_DIRS = {"_qtrefined"}
+
 INSTALL_BAT = """@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
@@ -98,7 +103,7 @@ def collect_source_files() -> list[Path]:
     return present
 
 
-def copy_sources(stage: Path) -> int:
+def copy_sources(stage: Path, skip_voice: bool = False) -> int:
     files = collect_source_files()
     skip = {ROOT / "package_intranet.py"}
     count = 0
@@ -106,6 +111,12 @@ def copy_sources(stage: Path) -> int:
         if src in skip:
             continue
         rel = src.relative_to(ROOT)
+        # 本机验收用的截图目录不进包（git 里没有忽略规则，这里显式排掉）
+        if rel.parts and rel.parts[0] in EXCLUDE_TOP_DIRS:
+            continue
+        # --no-voice：语音模块（源码 + 资产）整块不带
+        if skip_voice and rel.parts and rel.parts[0] == VOICE_DIR:
+            continue
         dst = stage / rel
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
@@ -231,6 +242,60 @@ def download_wheels(wheel_dir: Path, pyver: str, platform: str) -> int:
     return len(list(wheel_dir.glob("*.whl")))
 
 
+def _deploy_doc(stamp: str, with_wheels: bool, with_voice: bool) -> str:
+    """内网部署说明：包里有什么、怎么装、怎么起，不依赖看的人懂仓库结构。"""
+    voice_line = ("voice_asr/  语音转写模块（切换进包内）" if with_voice
+                  else "voice_asr/  已整块剔除：/asr 接口不会挂载，其它功能不受影响")
+    wheel_line = ("wheels/     离线依赖（install_offline.bat 一键装）" if with_wheels
+                  else "wheels/     未内置离线依赖，按内网源或离线 wheel 自行安装")
+    install = ("双击 install_offline.bat（建 venv + 离线装依赖）" if with_wheels
+               else "python -m pip install -r requirements.txt")
+    return f"""GridStarAgent 内网分发包  {stamp}
+
+一、包里有什么
+  agent/          Python 后端（FastAPI）：WebUI 服务与 MCP 工具服务
+  webui/          前端（浏览器直接打开，也可由 Qt 内嵌）
+  QtChartWidget/  Qt 界面库源码（需要时在内网自行编译）
+  res/ docs/      资源与文档
+  requirements.txt 依赖清单
+  {wheel_line}
+
+二、包里没有什么
+  {voice_line}
+
+三、安装依赖
+  {install}
+  注意：Python 版本要符合 requirements.txt 的要求，且先装完依赖再启动服务。
+
+四、启动
+  1) Web / Agent 服务（必需）
+     cd agent\\agent
+     python app.py --host 0.0.0.0 --port 1231
+     浏览器打开 http://127.0.0.1:1231/ui/
+  2) MCP 工具服务（可选，默认 SSE 127.0.0.1:5656）
+     cd agent
+     python server.py
+  3) 桌面窗口（可选，需要 pywebview）
+     python desktop.py
+
+五、Qt 界面（QtChartWidget，可选）
+  内网需 Qt 5.12.2 + VS2022。在 QtChartWidget\\ 下把 build.bat 里的 Qt / vcvars 路径改成本机后执行：
+    build.bat            编库 + demo + 示例 + 回归测试
+    build.bat shot       额外出一张离屏截图
+  产物是 QtChartWidget\\bin\\QtChartWidget.dll，由宿主程序链接；demo.exe 可单独预览。
+  只用 WebUI 时可完全忽略这一节。
+
+六、配置与数据
+  首次启动会在 %USERPROFILE%\\GridstarAgent.data 下建配置与数据目录，
+  在设置页填入模型 API 地址与 Key 即可。同一台机器的不同 Windows 账号各自一份数据。
+
+七、排障
+  端口被占：换 --port，或 netstat -ano | findstr 1231 找到 PID 后 taskkill /PID <pid> /F
+  页面空白：确认访问的是 /ui/ 后缀，且 1231 端口在监听
+  语音按钮无效：本包未包含语音模块，属于预期行为
+"""
+
+
 def build_zip(stage: Path, zip_base: Path) -> Path:
     shutil.make_archive(str(zip_base), "zip", root_dir=str(stage.parent), base_dir=stage.name)
     return Path(f"{zip_base}.zip")
@@ -241,6 +306,8 @@ def main() -> None:
     ap.add_argument("--no-wheels", action="store_true", help="只打包源码，不下载依赖")
     ap.add_argument("--no-asr", action="store_true",
                     help="不打包语音识别资产（whisper DLL 与 147MB 模型）")
+    ap.add_argument("--no-voice", action="store_true",
+                    help="完全不带语音模块：voice_asr 源码与原生资产都排除")
     ap.add_argument("--python-version", default="312",
                     help="目标 Python 版本，如 311 / 312 / 313（须与内网机器一致）")
     ap.add_argument("--platform", default="win_amd64", help="目标平台，如 win_amd64 / manylinux2014_x86_64")
@@ -258,12 +325,19 @@ def main() -> None:
         shutil.rmtree(DIST)
     stage.mkdir(parents=True)
 
-    n_src = copy_sources(stage)
+    n_src = copy_sources(stage, skip_voice=args.no_voice)
     print(f"== 源码归档: {n_src} 个文件 -> {stage}")
+    (stage / "内网部署说明.txt").write_text(
+        _deploy_doc(stamp, with_wheels=not args.no_wheels, with_voice=not args.no_voice),
+        encoding="utf-8-sig", newline="\r\n")
+    if args.no_voice:
+        print(f"== 语音模块: 已按 --no-voice 整块排除（{VOICE_DIR}/ 不打包，/asr 路由不会挂载）==")
 
     n_asr = 0
     asr_mb = 0.0
-    if args.no_asr:
+    if args.no_voice:
+        pass
+    elif args.no_asr:
         print("== 语音识别资产: 已按 --no-asr 跳过（内网将无法使用语音输入）==")
     else:
         missing = check_asr_assets()
@@ -278,11 +352,14 @@ def main() -> None:
         print(f"== 语音识别资产: {n_asr} 个文件, {asr_mb:.1f} MB")
 
     n_wheel = 0
+    # 依赖清单总是给一份：内网有自己的源时直接 pip install -r 即可
+    shutil.copy2(REQUIREMENTS, stage / "requirements.txt")
     if not args.no_wheels:
         n_wheel = download_wheels(stage / "wheels", args.python_version, args.platform)
-        shutil.copy2(REQUIREMENTS, stage / "requirements.txt")
         (stage / "install_offline.bat").write_text(INSTALL_BAT, encoding="utf-8", newline="\r\n")
         print(f"== 离线依赖: {n_wheel} 个 wheel")
+    else:
+        print("== 离线依赖: 已按 --no-wheels 跳过（只带 requirements.txt）==")
 
     zip_path = Path(args.out) if args.out else build_zip(stage, DIST / name)
     size_mb = zip_path.stat().st_size / 1024 / 1024
