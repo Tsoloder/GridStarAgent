@@ -1,0 +1,259 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 卡片：消息卡 / 询问卡
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 消息卡片
+   · 询问卡
+   · 询问卡外沿
+   ============================================================ */
+
+/* ---------- 9. 消息卡片：从"等宽堆叠"改成"有来有回" ---------- */
+.turn-card,
+.structured,
+.approval-card {
+  max-width: 100%;
+  border-color: rgba(255, 255, 255, .04);
+  border-radius: 14px;
+  background: var(--card-solid);
+  box-shadow: none;
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.turn-card.assistant {
+  width: 100%;
+  max-width: 100%;
+  border-color: rgba(255, 255, 255, .045);
+  background: var(--card-solid-2);
+}
+
+.turn-card.user {
+  width: auto;
+  max-width: min(84%, 620px);
+  border-color: rgba(111, 176, 204, .16);
+  background: var(--bubble-user);
+  border-bottom-right-radius: 5px;
+}
+
+.turn-card.tool {
+  background: transparent;
+  border-color: transparent;
+}
+
+.turn-card > .bubble {
+  max-width: 100%;
+  padding: 14px 16px 0;
+}
+
+.turn-card.user > .bubble { padding: 12px 14px 0; }
+
+.turn-foot { padding: 8px 16px 10px; }
+.turn-card.user .turn-foot { padding: 6px 12px 9px; }
+
+/* ---------- 10. 询问卡：抬成一张玻璃面板，选项做整行可点 ---------- */
+.choice-card {
+  width: 100%;
+  margin: 0;
+  border: 1px solid rgba(255, 255, 255, .085);
+  border-radius: 16px;
+  background: var(--glass-solid);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, .58), 0 1px 0 rgba(255, 255, 255, .045) inset;
+  overflow: hidden;
+}
+
+.choice-head {
+  gap: 10px;
+  padding: 11px 13px;
+  border-bottom: 1px solid rgba(255, 255, 255, .045);
+}
+
+.choice-head:hover { background: rgba(255, 255, 255, .028); }
+
+.choice-title {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: .09em;
+}
+
+.choice-close {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  font-size: 16px;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.choice-close:hover { background: rgba(255, 255, 255, .07); color: var(--text-bright); }
+
+.choice-question {
+  padding: 15px 15px 12px;
+  color: var(--text-bright);
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.55;
+  letter-spacing: -.002em;
+}
+
+.choice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 8px 8px;
+}
+
+.choice-item {
+  align-items: flex-start;
+  gap: 11px;
+  padding: 10px 11px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.choice-item:hover { background: rgba(255, 255, 255, .038); }
+
+.choice-item.selected {
+  border-color: rgba(111, 176, 204, .38);
+  background: rgba(111, 176, 204, .085);
+  box-shadow: 0 0 0 3px rgba(111, 176, 204, .07);
+}
+
+.choice-item:focus-visible { outline: 2px solid rgba(111, 176, 204, .5); outline-offset: 1px; }
+
+.choice-dot {
+  flex: 0 0 15px;
+  width: 15px;
+  height: 15px;
+  margin-top: 3px;
+  border: 1.5px solid rgba(255, 255, 255, .18);
+  background: transparent;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+
+.choice-item:hover .choice-dot { border-color: rgba(255, 255, 255, .32); }
+
+.choice-item.selected .choice-dot {
+  border-color: var(--cyan);
+  background: var(--cyan);
+}
+
+.choice-item.selected .choice-dot:after {
+  width: 5px;
+  height: 5px;
+  margin: -2.5px 0 0 -2.5px;
+  background: #0d1014;
+}
+
+.choice-text strong {
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.choice-text small {
+  margin-top: 3px;
+  color: var(--muted-2);
+  font-size: 11.5px;
+  line-height: 1.5;
+  letter-spacing: .002em;
+}
+
+.choice-item.selected .choice-text small { color: var(--muted); }
+
+.choice-foot {
+  gap: 8px;
+  padding: 4px 12px 12px;
+  border-top: 1px solid rgba(255, 255, 255, .04);
+  padding-top: 12px;
+}
+
+.choice-input {
+  height: 34px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, .3);
+  padding: 0 12px;
+  font-size: 12.5px;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.choice-input:focus {
+  border-color: rgba(111, 176, 204, .45);
+  box-shadow: 0 0 0 3px rgba(111, 176, 204, .1);
+  outline: 0;
+}
+
+.choice-submit,
+.option-button.primary,
+.action-button.approve {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: var(--cyan-dark);
+  color: #eaf6fa;
+  font-weight: 500;
+  transition: background var(--dur) var(--ease), transform var(--dur) var(--ease);
+}
+
+.choice-submit:hover,
+.option-button.primary:hover,
+.action-button.approve:hover { background: var(--cyan-mid); }
+
+.choice-submit:active { transform: scale(.985); }
+
+.option-button,
+.action-button {
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, .035);
+  font-size: 12.5px;
+  transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+}
+
+.option-button:hover,
+.action-button:hover { background: rgba(255, 255, 255, .065); }
+
+.param-more {
+  border-color: rgba(255, 255, 255, .09);
+  border-radius: 8px;
+  font-size: 11px;
+}
+
+.param-row input,
+.param-row select {
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .3);
+  transition: border-color var(--dur) var(--ease);
+}
+
+/* ---------- 10b. 询问卡外沿与底部对齐 ---------- */
+.choice-overlay {
+  left: 0;
+  right: 0;
+  bottom: 14px;
+  padding: 0 max(14px, calc((100% - var(--content-max)) / 2));
+}
+
+.choice-hint {
+  color: var(--muted-2);
+  font-size: 10px;
+  letter-spacing: .02em;
+  text-align: right;
+  opacity: .8;
+  padding-right: 4px;
+}
+
+.phase-panel { margin: 0 14px 10px; }
+
+/* 宽屏：轮次导航贴到主栏左侧，不再飘在屏幕最外沿 */
+@media (min-width: 1200px) {
+  .turn-rail {
+    left: max(10px, calc((100vw - var(--content-max)) / 2 - 24px));
+  }
+}

@@ -1,0 +1,223 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 细节：空状态 / 过程区 / 对比度与表格 / 阶段条 / 会话按钮
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 空状态
+   · 收尾细节
+   · 过程区
+   · 对比度与表格
+   · 阶段条
+   · 会话按钮与标题
+   ============================================================ */
+
+/* ---------- 14. 空状态：一整块安静的中心 ---------- */
+.empty-state { padding: 0 30px; }
+
+.empty-symbol {
+  width: 58px;
+  height: 58px;
+  margin-bottom: 20px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .05), rgba(255, 255, 255, .015));
+  color: var(--cyan);
+  font-size: 22px;
+  box-shadow: 0 18px 40px -18px rgba(0, 0, 0, .9), 0 1px 0 rgba(255, 255, 255, .06) inset;
+}
+
+.empty-symbol img {
+  display: block;
+  border-radius: 8px;
+  opacity: .92;
+  filter: saturate(.85);
+}
+
+.empty-state strong {
+  font-size: 16.5px;
+  font-weight: 700;
+  letter-spacing: -.01em;
+  color: var(--text-bright);
+}
+
+.empty-state p {
+  max-width: 300px;
+  margin: 11px 0 0;
+  color: var(--muted-2);
+  font-size: 12.5px;
+  line-height: 1.8;
+  letter-spacing: .01em;
+}
+
+/* ---------- 14b. 收尾细节：高光、滚动条、选择反馈 ---------- */
+.turn-card {
+  box-shadow: 0 1px 0 rgba(255, 255, 255, .035) inset, 0 1px 2px rgba(0, 0, 0, .3);
+}
+
+.input-wrap {
+  box-shadow: 0 16px 44px -12px rgba(0, 0, 0, .72), 0 1px 0 rgba(255, 255, 255, .05) inset;
+}
+
+.messages::-webkit-scrollbar { width: 7px; }
+.messages::-webkit-scrollbar-track { background: transparent; }
+.messages::-webkit-scrollbar-thumb {
+  border: 0;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .1);
+}
+.messages::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .18); }
+
+/* 浅色主题下把"白色叠加"换回黑色叠加，避免发脏 */
+:root[data-theme="silver"] .turn-card.assistant,
+:root[data-theme="blue"] .turn-card.assistant {
+  background: #ffffff;
+  border-color: rgba(16, 24, 32, .07);
+}
+
+:root[data-theme="silver"] .turn-card,
+:root[data-theme="blue"] .turn-card { background: #fff; }
+
+:root[data-theme="silver"] .controls .model-control:hover,
+:root[data-theme="blue"] .controls .model-control:hover { background: rgba(16, 24, 32, .05); }
+
+/* ---------- 15. 过程区（思考 / 工具）降到背景层 ---------- */
+.turn-process { padding: 4px 16px 0; }
+
+.tool-item + .tool-item { border-top-color: rgba(255, 255, 255, .045); }
+
+.tool-item > summary strong {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .005em;
+}
+
+.tool-item[data-state="succeeded"] > summary strong,
+.tool-item[data-state="failed"] > summary strong { color: var(--text); }
+
+.tool-body {
+  border-radius: 8px;
+  background: rgba(0, 0, 0, .22);
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+/* ---------- 16. 对比度回拉 + 表格做成报告体 ---------- */
+.markdown { color: var(--body-text); }
+
+.markdown strong { color: var(--text-bright); font-weight: 700; }
+
+.markdown table {
+  width: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+}
+
+.markdown .md-table-wrap {
+  margin: 14px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.markdown thead th {
+  padding: 0 14px 9px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .1);
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .07em;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.markdown tbody td {
+  padding: 10px 14px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, .045);
+  color: var(--text);
+  font-size: 13px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown tbody tr:last-child td { border-bottom: 0; }
+
+.markdown tbody tr,
+.markdown tbody tr:nth-child(even),
+.markdown tbody tr td,
+.markdown tbody tr:hover td {
+  background: transparent !important;
+}
+
+.markdown tbody td:first-child { color: var(--text-bright); }
+
+.markdown tbody td {
+  font-size: 13px;
+  letter-spacing: .005em;
+}
+
+/* ---------- 17. 底部阶段条：从横幅改为一行安静状态 ---------- */
+.phase-panel {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto 10px;
+  border: 1px solid rgba(255, 255, 255, .05);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, .022);
+  box-shadow: none;
+}
+
+.phase-head { padding: 9px 13px; }
+
+.phase-head strong {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: .01em;
+}
+
+.phase-head small {
+  color: var(--muted-2);
+  font-size: 10.5px;
+  letter-spacing: .02em;
+}
+
+.phase-progress {
+  height: 1.5px;
+  background: var(--cyan);
+  box-shadow: none;
+  opacity: .75;
+}
+
+/* ---------- 18. 会话按钮与标题拆开层级 ---------- */
+#new-session {
+  background: rgba(255, 255, 255, .06);
+  color: var(--text-bright);
+  border: 1px solid rgba(255, 255, 255, .06);
+  font-weight: 500;
+}
+
+#new-session:hover { background: rgba(255, 255, 255, .1); }
+
+#current-title {
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: .005em;
+}
+
+.message .turn-foot .bubble-copy,
+.message .turn-foot .bubble-time { opacity: .55; }
+
+.message:hover .turn-foot .bubble-copy { opacity: 1; }
+
+@media (max-width: 640px) {
+  .messages { padding: 18px 14px 6px; }
+  .turn-card > .bubble { padding: 13px 14px 0; }
+  .markdown thead th,
+  .markdown tbody td { padding-left: 10px; padding-right: 10px; }
+}

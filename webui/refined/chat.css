@@ -1,0 +1,171 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 对话：消息区留白 / 正文排版 / 表格 / 输入框基础
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 对话区与正文
+   · 输入框基础
+   ============================================================ */
+
+/* ---------- 5. 对话区：留白、阅读宽度、气泡质感 ---------- */
+.messages {
+  padding: 20px 20px 8px;
+  scrollbar-width: thin;
+}
+
+.message {
+  width: 100%;
+  max-width: var(--content-max);
+  margin: 0 auto 18px;
+}
+
+.message:last-child { margin-bottom: 8px; }
+
+.bubble {
+  max-width: 100%;
+  padding: 12px 15px;
+  border: 1px solid rgba(255, 255, 255, .045);
+  border-radius: 12px;
+  background: var(--bubble);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .18);
+}
+
+.message.user .bubble {
+  border-color: rgba(111, 176, 204, .14);
+  background: var(--bubble-user);
+  border-bottom-right-radius: 4px;
+}
+
+.message.assistant .bubble {
+  border-bottom-left-radius: 4px;
+}
+
+.message-label {
+  margin-bottom: 7px;
+  color: var(--muted-2);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: .1em;
+}
+
+/* 正文排版：字号、行高、字距三段拉开 */
+.markdown {
+  font-size: var(--fs-body);
+  line-height: var(--lh-body);
+  letter-spacing: .005em;
+  color: var(--text);
+}
+
+.markdown p { margin: 0 0 10px; }
+.markdown p:last-child { margin-bottom: 0; }
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  margin: 20px 0 9px;
+  color: var(--text-bright);
+  letter-spacing: -.005em;
+  line-height: 1.4;
+}
+
+.markdown h1 { font-size: 19px; font-weight: 700; }
+.markdown h2 { font-size: 16.5px; font-weight: 700; }
+.markdown h3 { font-size: 15px; font-weight: 700; }
+
+.markdown h1:first-child,
+.markdown h2:first-child,
+.markdown h3:first-child { margin-top: 2px; }
+
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  margin: 14px 0 6px;
+  color: var(--text-bright);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.markdown ul,
+.markdown ol { margin: 8px 0; padding-left: 22px; }
+.markdown li { margin: 4px 0; }
+.markdown li::marker { color: var(--muted-2); }
+
+.markdown a {
+  color: var(--cyan);
+  text-decoration-color: rgba(111, 176, 204, .35);
+  text-underline-offset: 2px;
+}
+
+.markdown code {
+  padding: 1.5px 5px;
+  border: 1px solid rgba(255, 255, 255, .05);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .04);
+  color: var(--code-text);
+  font-family: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  font-size: 12.5px;
+}
+
+.markdown pre {
+  border: 1px solid rgba(255, 255, 255, .05);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, .3);
+}
+
+.markdown blockquote {
+  margin: 10px 0;
+  padding: 4px 0 4px 14px;
+  border-left: 2px solid rgba(111, 176, 204, .4);
+  color: var(--muted);
+}
+
+.markdown hr {
+  margin: 18px 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, .06);
+}
+
+/* 表格：去竖线、表头去底色，只留极淡行线 */
+.markdown .md-table-wrap {
+  margin: 12px 0;
+  border: 1px solid rgba(255, 255, 255, .055);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, .012);
+}
+
+.markdown table { font-size: 13px; }
+
+.markdown thead th {
+  padding: 9px 13px;
+  background: transparent;
+  border-bottom: 1px solid rgba(255, 255, 255, .07);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .04em;
+}
+
+.markdown tbody td {
+  padding: 9px 13px;
+  border-top: 1px solid rgba(255, 255, 255, .035);
+  color: var(--text);
+}
+
+.markdown tbody tr:nth-child(even) { background: transparent; }
+.markdown tbody tr:hover td { background: rgba(255, 255, 255, .022); }
+
+/* ---------- 6. 输入区：抬升为一层浮起的书写面 ---------- */
+.composer { padding: 10px 14px 14px; }
+
+.input-wrap {
+  border: 1px solid rgba(255, 255, 255, .075);
+  border-radius: 14px;
+  background: rgba(18, 22, 28, .92);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .34), 0 1px 0 rgba(255, 255, 255, .03) inset;
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+
+.input-wrap:focus-within {
+  border-color: rgba(111, 176, 204, .42);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, .38), 0 0 0 3px rgba(111, 176, 204, .1);
+}

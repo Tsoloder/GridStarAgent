@@ -1,0 +1,181 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 工具栏：会话栏第二行 / 视图切换 / 输入控件行
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 顶栏第二行与视图切换
+   · 输入控件行
+   ============================================================ */
+
+/* ---------- 12. 顶栏：两行一个整体，视图切换并入第二行 ---------- */
+.topbar {
+  height: 52px;
+  flex: 0 0 52px;
+  padding: 0 16px;
+}
+
+.sessionbar {
+  height: 44px;
+  flex: 0 0 44px;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, .035);
+  background: var(--band-1);
+}
+
+.session-trigger {
+  justify-content: flex-start;
+  height: 28px;
+  padding: 0 8px;
+  color: var(--muted);
+}
+
+.sessionbar > * + * { margin-left: 0; }
+
+.view-tabs {
+  height: auto;
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 0;
+  gap: 2px;
+  border: 0;
+  background: transparent;
+}
+
+.view-tab {
+  height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 7px;
+  color: var(--muted-2);
+  font-size: 11.5px;
+  letter-spacing: .02em;
+}
+
+.view-tab.active {
+  border-bottom-color: transparent;
+  background: rgba(255, 255, 255, .07);
+  color: var(--text-bright);
+  font-weight: 500;
+}
+
+/* ---------- 13. 输入区：控件降噪，发送键是唯一亮色点 ---------- */
+.composer {
+  padding: 12px 16px 16px;
+}
+
+.composer > * {
+  max-width: var(--content-max);
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.input-wrap {
+  border-radius: 16px;
+  background: var(--input-bg);
+}
+
+textarea#message-input {
+  min-height: 74px;
+  padding: 14px 15px 6px;
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--text);
+}
+
+textarea#message-input::placeholder { color: var(--muted-2); }
+
+.controls {
+  gap: 2px;
+  padding: 0 10px 10px;
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+.controls > * + * { margin-left: 0; }
+
+/* 右侧按钮组靠左边界：busy-label 占住可伸缩空间，把它后面的控件全推到右边 */
+.controls > .busy-label { margin-left: auto; }
+
+.model-control {
+  height: 27px;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  transition: background var(--dur) var(--ease);
+}
+
+.model-control:hover { background: rgba(255, 255, 255, .05); }
+
+.model-combobox > button {
+  height: 25px;
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: .005em;
+}
+
+.model-combobox > button:hover { color: var(--text-bright); }
+
+.attach,
+.settings-button,
+.voice {
+  width: 27px;
+  height: 27px;
+  border-radius: 8px;
+  color: var(--muted-2);
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+
+.attach:hover,
+.settings-button:hover,
+.voice:hover:not(:disabled) {
+  border-color: transparent;
+  background: rgba(255, 255, 255, .06);
+  color: var(--text-bright);
+}
+
+.send {
+  width: 31px;
+  height: 31px;
+  flex: 0 0 31px;
+  border: 0;
+  border-radius: 9px;
+  background: var(--cyan);
+  color: #08191f;
+  font-size: 15px;
+  box-shadow: 0 2px 10px rgba(111, 176, 204, .22);
+  transition: background var(--dur) var(--ease), transform var(--dur) var(--ease),
+    box-shadow var(--dur) var(--ease);
+}
+
+.send:hover:not(:disabled) {
+  background: #85c2da;
+  box-shadow: 0 3px 14px rgba(111, 176, 204, .32);
+}
+
+.send:active:not(:disabled) { transform: scale(.94); }
+
+.send:disabled {
+  background: rgba(255, 255, 255, .08);
+  color: var(--muted-2);
+  box-shadow: none;
+  opacity: 1;
+}
+
+.send.stop {
+  border: 0;
+  background: var(--err-strong);
+  color: #fff;
+}
+
+.busy-label { font-size: 10.5px; letter-spacing: .02em; }
+
+.config-warning {
+  margin-bottom: 8px;
+  padding: 8px 11px;
+  border-left: 2px solid var(--orange);
+  border-radius: 8px;
+  background: var(--warn-tint);
+  font-size: 11.5px;
+}

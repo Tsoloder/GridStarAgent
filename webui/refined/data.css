@@ -1,0 +1,56 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 数据：轨迹页与用量数据的字体归一
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 轨迹页与用量数据
+   ============================================================ */
+
+/* ---------- 19. 轨迹页与用量数据：并入微软雅黑 ----------
+   原样式里这些列用的是 Consolas/monospace。改成雅黑后用 OpenType 的
+   tabular-nums 保住数字列对齐（雅黑支持 tnum），避免 tok / 耗时错位。 */
+.traj-group-meta,
+.traj-group small,
+.traj-row-label small,
+.traj-row-meta,
+.traj-insp-pos,
+.traj-insp-preview code,
+.proc-sum,
+.bubble-meta,
+.bubble-timing,
+.bubble-usage,
+.bubble-timing-pop .pop-title .pop-total,
+.bubble-usage-pop .pop-title .pop-total,
+.bubble-timing-pop .pop-row > b,
+.bubble-usage-pop .pop-row > b,
+.context-pop .pop-title .pop-total,
+.context-pop .pop-row > b,
+.tool-body,
+.tool-detail pre,
+.tool-args-table,
+.usage-table td.num,
+.pie-legend-pct,
+.usage-listbox button small,
+.model-ctx,
+.model-line small,
+.model-option small,
+.model-candidates small,
+.settings-model small,
+.settings-model .model-api,
+.settings-field code,
+.num-option b,
+.json-editor-static,
+.json-editor-table input,
+.memory-tool-name,
+.memory-field > code,
+.memory-field-input,
+.mcp-param-list code,
+.skill-meta code,
+.skill-tool-list code,
+.slash-item code,
+.provider-sidebar nav small {
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC",
+    "Source Han Sans SC", system-ui, sans-serif !important;
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum" 1;
+}

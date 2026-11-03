@@ -1,0 +1,57 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 浮层：会话面板 / 下拉 / 动效
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 浮层
+   · 动效
+   ============================================================ */
+
+/* ---------- 7. 浮层：统一玻璃底 + 柔和投影 ---------- */
+.session-panel,
+.theme-listbox,
+.model-listbox,
+.skill-panel {
+  border: 1px solid rgba(255, 255, 255, .08);
+  border-radius: 12px;
+  background: var(--glass-bg-2);
+  -webkit-backdrop-filter: var(--glass-blur);
+  backdrop-filter: var(--glass-blur);
+  box-shadow: 0 20px 48px rgba(0, 0, 0, .5);
+  overflow: hidden;
+}
+
+.session-row { border-bottom: 1px solid rgba(255, 255, 255, .035); }
+.session-row:last-child { border-bottom: 0; }
+
+.session-select { border-radius: var(--radius-sm); transition: background var(--dur) var(--ease); }
+.session-select:hover { background: rgba(255, 255, 255, .04); }
+
+.session-badge {
+  font-size: 10px;
+  letter-spacing: .02em;
+  border-radius: 6px;
+  padding: 3px 7px;
+}
+
+/* ---------- 8. 动效：只动 transform/opacity，170ms 出场曲线 ---------- */
+@media (prefers-reduced-motion: no-preference) {
+  .message { animation: msgIn 240ms var(--ease) both; }
+  .session-panel,
+  .theme-listbox,
+  .model-listbox { animation: popIn 160ms var(--ease) both; }
+}
+
+@keyframes msgIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes popIn {
+  from { opacity: 0; transform: translateY(-4px) scale(.99); }
+  to { opacity: 1; transform: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+}

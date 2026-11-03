@@ -1,0 +1,21 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 窄屏：≤640px 的统一收敛（夹在卡片与工具栏之间，顺序不可挪）
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 窄屏适配
+   ============================================================ */
+
+/* ---------- 11. 窄栏适配：表格不再塌成竖排 ---------- */
+@media (max-width: 640px) {
+  .messages { padding: 16px 12px 6px; }
+  .message { margin-bottom: 14px; }
+  .markdown { font-size: 14.5px; }
+  .composer { padding: 8px 10px 10px; }
+  .markdown table { min-width: 460px; }
+  .markdown thead th { white-space: normal; }
+  .turn-card.user { max-width: 92%; }
+  .choice-question { font-size: 14px; padding: 13px 13px 10px; }
+  .turn-rail { left: 1px; }
+  .brand span:last-child { font-size: 13px; }
+}

@@ -1,0 +1,253 @@
+/* ============================================================
+   GridStar Agent · 精修层 / 令牌：调色板三套主题 / 字体 / 字重 / 主栏宽度
+   加载顺序固定（与拆分前单文件完全一致，逐像素等价）：
+   tokens → chrome → chat → overlays → cards → narrow →
+   toolbar → detail → data
+   · 调色板
+   · 字体与字重
+   ============================================================ */
+
+/* ---------- 1. 调色板：把蓝灰堆叠换成中性冷黑 ---------- */
+:root {
+  color-scheme: dark;
+  --bg: #0d1014;
+  --surface: #14181e;
+  --surface-2: #181d24;
+  --surface-3: #1e242c;
+  --line: rgba(255, 255, 255, .055);
+  --line-strong: rgba(255, 255, 255, .1);
+  --text: #cfd7de;
+  --muted: #8a95a1;
+  --muted-2: #67717d;
+  --text-bright: #f1f5f8;
+
+  /* 强调色降饱和、收窄用途：只出现在可交互焦点上 */
+  --cyan: #6fb0cc;
+  --cyan-mid: #4a8aa6;
+  --cyan-dark: #1c4a5d;
+  --cyan-glow: rgba(111, 176, 204, .22);
+  --accent-tint: rgba(111, 176, 204, .1);
+
+  --green: #5fbf94;
+  --orange: #d9a75f;
+  --red: #d97b7b;
+
+  --bg-grad-a: #101419;
+  --band-1: #10141a;
+  --band-2: #0e1217;
+  --band-3: #0f1318;
+  --panel: #11151b;
+  --inset: #0a0d11;
+  --bubble: #15191f;
+  --bubble-user: #17242c;
+
+  --scroll-thumb: #2a333c;
+  --scroll-thumb-hover: #3a4650;
+  --scroll-track: transparent;
+  --scrim: rgba(6, 9, 12, .82);
+  --scrim-2: rgba(13, 16, 20, .9);
+
+  --radius-sm: 5px;
+  --radius: 8px;
+  --radius-lg: 12px;
+
+  --glass-bg: rgba(16, 20, 26, .72);
+  --glass-bg-2: rgba(13, 16, 20, .84);
+  --glass-blur: blur(18px) saturate(1.4);
+
+  --card-grad-1: rgba(28, 36, 45, .7);
+  --card-grad-2: rgba(18, 23, 29, .82);
+  --card-user-grad-1: rgba(29, 47, 57, .68);
+  --card-user-grad-2: rgba(20, 33, 40, .82);
+  --card-shadow: 0 10px 30px rgba(0, 0, 0, .38);
+
+  --assistant-line: rgba(255, 255, 255, .07);
+  --assistant-tint: rgba(255, 255, 255, .03);
+  --assistant-text: #8a95a1;
+
+  --ok-line: rgba(95, 191, 148, .3);
+  --ok-tint: rgba(95, 191, 148, .1);
+  --ok-text: #7fd0ac;
+  --err-line: rgba(217, 123, 123, .3);
+  --err-tint: rgba(217, 123, 123, .1);
+  --err-strong: #b85c5c;
+  --err-text: #f0b4b4;
+  --warn-line: rgba(217, 167, 95, .3);
+  --warn-tint: rgba(217, 167, 95, .1);
+  --warn-text: #e6c68f;
+  --warn-glow: rgba(217, 167, 95, .3);
+
+  /* 排版尺度 */
+  --fs-ui: 13px;
+  --fs-body: 15px;
+  --fs-meta: 11px;
+  --lh-body: 1.78;
+  --ease: cubic-bezier(.22, .8, .24, 1);
+  --dur: 170ms;
+
+  /* 主栏宽度：窄栏满宽、中屏舒展、超宽屏封顶，保证消息区 / 输入框 / 阶段条同一条竖线 */
+  --content-max: clamp(680px, 86vw, 1320px);
+
+  /* 主题相关的实色，深浅两套各自定义 */
+  --body-text: #d9e0e7;
+  --card-solid: #12161b;
+  --card-solid-2: #14181e;
+  --input-bg: rgba(16, 20, 26, .94);
+  --glass-solid: rgba(19, 23, 29, .94);
+  --code-text: #a8d4e6;
+}
+
+/* 浅色两套沿用结构，只把底色与边界重算，保持同一套层级逻辑 */
+:root[data-theme="silver"] {
+  color-scheme: light;
+  --bg: #f6f7f9;
+  --surface: #fff;
+  --surface-2: #f2f4f6;
+  --surface-3: #e9ecef;
+  --line: rgba(16, 24, 32, .07);
+  --line-strong: rgba(16, 24, 32, .13);
+  --text: #333c45;
+  --muted: #667180;
+  --muted-2: #88929e;
+  --text-bright: #0c1116;
+  --cyan: #22789b;
+  --cyan-mid: #3590b3;
+  --cyan-dark: #14607d;
+  --cyan-glow: rgba(34, 120, 155, .18);
+  --accent-tint: rgba(34, 120, 155, .08);
+  --bg-grad-a: #fbfcfd;
+  --band-1: #ffffff;
+  --band-2: #f7f8fa;
+  --band-3: #f2f4f6;
+  --panel: #fff;
+  --inset: #fff;
+  --bubble: #fff;
+  --bubble-user: #eef5f9;
+  --scroll-thumb: #ccd3da;
+  --scroll-thumb-hover: #b3bcc6;
+  --scrim: rgba(24, 30, 36, .38);
+  --scrim-2: rgba(246, 247, 249, .93);
+  --glass-bg: rgba(252, 253, 254, .76);
+  --glass-bg-2: rgba(255, 255, 255, .86);
+  --card-grad-1: rgba(255, 255, 255, .95);
+  --card-grad-2: rgba(240, 244, 248, .9);
+  --card-user-grad-1: rgba(233, 244, 250, .95);
+  --card-user-grad-2: rgba(219, 235, 243, .9);
+  --card-shadow: 0 8px 24px rgba(20, 32, 45, .1);
+  --assistant-line: rgba(16, 24, 32, .08);
+  --assistant-tint: rgba(16, 24, 32, .02);
+  --assistant-text: #667180;
+  --body-text: #2f3740;
+  --card-solid: #ffffff;
+  --card-solid-2: #ffffff;
+  --input-bg: #ffffff;
+  --glass-solid: rgba(255, 255, 255, .97);
+  --code-text: #1a6b8a;
+}
+
+:root[data-theme="blue"] {
+  color-scheme: light;
+  --bg: #eef3f8;
+  --surface: #fbfdff;
+  --surface-2: #eaf1f7;
+  --surface-3: #dfe9f2;
+  --line: rgba(18, 46, 74, .08);
+  --line-strong: rgba(18, 46, 74, .15);
+  --text: #2d4058;
+  --muted: #5c7189;
+  --muted-2: #7f92a6;
+  --text-bright: #0d2136;
+  --cyan: #22789b;
+  --cyan-mid: #3590b3;
+  --cyan-dark: #14607d;
+  --cyan-glow: rgba(34, 120, 155, .18);
+  --accent-tint: rgba(34, 120, 155, .08);
+  --bg-grad-a: #f4f9fd;
+  --band-1: #f8fbfe;
+  --band-2: #eef4fa;
+  --band-3: #e7eff7;
+  --panel: #fbfdff;
+  --inset: #fdfeff;
+  --bubble: #fbfdff;
+  --bubble-user: #e3eefa;
+  --scroll-thumb: #b9c8d8;
+  --scroll-thumb-hover: #9fb2c6;
+  --scrim: rgba(20, 40, 62, .38);
+  --scrim-2: rgba(238, 243, 248, .93);
+  --glass-bg: rgba(244, 249, 253, .76);
+  --glass-bg-2: rgba(251, 253, 255, .86);
+  --card-grad-1: rgba(252, 254, 255, .95);
+  --card-grad-2: rgba(230, 240, 249, .9);
+  --card-user-grad-1: rgba(219, 234, 248, .95);
+  --card-user-grad-2: rgba(203, 224, 242, .9);
+  --card-shadow: 0 8px 24px rgba(20, 40, 62, .12);
+  --assistant-line: rgba(18, 46, 74, .08);
+  --assistant-tint: rgba(18, 46, 74, .02);
+  --assistant-text: #5c7189;
+  --body-text: #2b3a4c;
+  --card-solid: #ffffff;
+  --card-solid-2: #ffffff;
+  --input-bg: #ffffff;
+  --glass-solid: rgba(251, 253, 255, .97);
+  --code-text: #1a6b8a;
+}
+
+/* ---------- 2. 字体：全站微软雅黑，保证内网与客户机观感一致 ---------- */
+:root,
+body,
+button,
+input,
+select,
+textarea {
+  font-family: "Microsoft YaHei", "Microsoft YaHei UI", "PingFang SC", "Source Han Sans SC",
+    system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 雅黑只有 Light / Regular / Bold 三档：500 会被当 Regular，600 直接落到 Bold。
+   所以正文与界面小字一律 400，层级靠字号与颜色拉开；只有真正的标题用 700。 */
+.markdown strong,
+.choice-text strong,
+.empty-state strong {
+  font-weight: 700;
+}
+
+.markdown h1,
+.markdown h2 {
+  font-weight: 700;
+}
+
+.markdown h3,
+.markdown h4 {
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.brand span:last-child {
+  font-weight: 700;
+  letter-spacing: .03em;
+}
+
+/* 雅黑字面偏宽、笔画粗，小字号下靠轻微字距把气口拉开 */
+.markdown {
+  letter-spacing: .012em;
+}
+
+.choice-text strong {
+  letter-spacing: .01em;
+}
+
+.markdown h1 {
+  font-size: 19px;
+  letter-spacing: .005em;
+}
+
+.markdown h2 {
+  font-size: 16.5px;
+  letter-spacing: .005em;
+}
+
+.markdown h3 {
+  font-size: 15px;
+}
