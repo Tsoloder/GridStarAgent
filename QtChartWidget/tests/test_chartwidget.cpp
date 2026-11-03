@@ -590,16 +590,16 @@ void TestChartWidget::themeSwitchAndSignal()
     QCOMPARE(spy.count(), 1);
     QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("silver"));
     // 换肤必须真正重设 QSS（--bg-grad-a 三套皮肤各不相同），只有 id 变了不算数
-    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#f7f8f9")));
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#fbfcfd")));
 
     m_chart->setTheme(QStringLiteral("blue"));
     QCOMPARE(m_chart->theme(), QStringLiteral("blue"));
-    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#eaf2fa")));
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#f4f9fd")));
 
     // 未知皮肤回退深色
     m_chart->setTheme(QStringLiteral("nope"));
     QCOMPARE(m_chart->theme(), QStringLiteral("dark"));
-    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#15212a")));
+    QVERIFY(m_chart->styleSheet().contains(QStringLiteral("#101419")));
 }
 
 void TestChartWidget::zoomSteps()
@@ -987,17 +987,17 @@ void TestChartWidget::processAndToolHoverAccent()
     QVERIFY(thinkHead && thinkSum && thinkLabel);
 
     // webui .proc-row:hover：摘要与箭头转青，.proc-label 仍保持 muted
-    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#78909d")));
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#67717d")));
     QEvent enter(QEvent::HoverEnter);
     QApplication::sendEvent(thinkHead, &enter);
     QVERIFY(thinkRow->property("hovered").toBool());
-    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#50badf")));
-    QCOMPARE(thinkLabel->palette().color(QPalette::WindowText), QColor(QStringLiteral("#8499a6")));
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#6fb0cc")));
+    QCOMPARE(thinkLabel->palette().color(QPalette::WindowText), QColor(QStringLiteral("#8a95a1")));
 
     QEvent leave(QEvent::HoverLeave);
     QApplication::sendEvent(thinkHead, &leave);
     QVERIFY(!thinkRow->property("hovered").toBool());
-    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#78909d")));
+    QCOMPARE(thinkSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#67717d")));
 
     // 工具项：名称随 summary 悬停转青，状态标签仍保留自己的绿色
     QWidget *toolItem = widgetByClass(m_chart.data(), QStringLiteral("toolItem"));
@@ -1007,15 +1007,15 @@ void TestChartWidget::processAndToolHoverAccent()
     auto *toolStatus = qobject_cast<QLabel *>(widgetByClass(toolItem, QStringLiteral("statusLabel")));
     QVERIFY(toolSummary && toolName && toolStatus);
     const QColor statusColor = toolStatus->palette().color(QPalette::WindowText);
-    QCOMPARE(statusColor, QColor(QStringLiteral("#50ce91")));
+    QCOMPARE(statusColor, QColor(QStringLiteral("#5fbf94")));
 
     QApplication::sendEvent(toolSummary, &enter);
     QVERIFY(toolSummary->property("hovered").toBool());
-    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#50badf")));
+    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#6fb0cc")));
     QCOMPARE(toolStatus->palette().color(QPalette::WindowText), statusColor);
     QApplication::sendEvent(toolSummary, &leave);
     QVERIFY(!toolSummary->property("hovered").toBool());
-    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#eaf6fa")));
+    QCOMPARE(toolName->palette().color(QPalette::WindowText), QColor(QStringLiteral("#cfd7de")));
 
     // 运行中的工具行优先级高于 hover：摘要保持橙色
     m_chart->appendToolCall(QStringLiteral("hover_running"),
@@ -1034,9 +1034,9 @@ void TestChartWidget::processAndToolHoverAccent()
     QWidget *toolsHead = widgetByClass(toolsRow, QStringLiteral("procRowHead"));
     auto *toolsSum = qobject_cast<QLabel *>(widgetByClass(toolsRow, QStringLiteral("procSum")));
     QVERIFY(toolsHead && toolsSum);
-    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#e7a84d")));
+    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#d9a75f")));
     QApplication::sendEvent(toolsHead, &enter);
-    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#e7a84d")));
+    QCOMPARE(toolsSum->palette().color(QPalette::WindowText), QColor(QStringLiteral("#d9a75f")));
 }
 
 // ---------------------------------------------------------------- 气泡明细浮层
@@ -1284,7 +1284,7 @@ void TestChartWidget::choiceOverlayShowsAboveComposer()
 
     const int composerBottom =
         composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
-    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 12);
+    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 14);
 
     const QList<QWidget *> items = widgetsByClass(card, QStringLiteral("choiceItem"));
     QCOMPARE(items.size(), 3);
@@ -1316,7 +1316,7 @@ void TestChartWidget::choiceOverlayShowsAboveComposer()
     QVERIFY(collapsedHeight < expandedHeight);
     QCOMPARE(collapsedHeight, card->sizeHint().height());
     QCOMPARE(card->mapTo(m_chart.data(), QPoint(0, collapsedHeight)).y(),
-             composerBottom - 12);
+             composerBottom - 14);
     QCOMPARE(labelText(card, QStringLiteral("choiceCaret")), QString::fromUtf8("⌃"));
     QWidget *list = widgetByClass(card, QStringLiteral("choiceList"));
     QVERIFY(list && !list->isVisible());
@@ -1381,7 +1381,7 @@ void TestChartWidget::choiceOverlayFitsNarrowWindow()
 
     const int composerBottom =
         composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
-    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 12);
+    QCOMPARE(cardRect.y() + cardRect.height(), composerBottom - 14);
 
     // 内容比可视区高时正文自己滚动：选项必须完整躺在滚动内容里（不被压扁/裁掉），
     // 并且能滚到最后一项，而不是被卡片底边吃掉一半。
@@ -1411,7 +1411,7 @@ void TestChartWidget::choiceOverlayFitsNarrowWindow()
                                 .arg(m_chart->width()).arg(m_chart->height())));
         const int narrowComposerBottom =
             composer->mapTo(m_chart.data(), QPoint(0, composer->height())).y();
-        QCOMPARE(narrowRect.y() + narrowRect.height(), narrowComposerBottom - 12);
+        QCOMPARE(narrowRect.y() + narrowRect.height(), narrowComposerBottom - 14);
         if (body->height() > scroll->viewport()->height()) {
             QVERIFY2(scroll->verticalScrollBar()->maximum() > 0,
                      qPrintable(QStringLiteral("capped card: body %1 over viewport %2, scrollbar missing")
@@ -4312,8 +4312,10 @@ void TestChartWidget::kbDirImportCarriesFolder()
 
 int main(int argc, char *argv[])
 {
-    // 无头运行：不弹真实窗口，行为与渲染逻辑不变
-    qputenv("QT_QPA_PLATFORM", "offscreen");
+    // 无头运行：不弹真实窗口，行为与渲染逻辑不变；
+    // 外部显式指定平台（如 QT_QPA_PLATFORM=windows 做可视化排查）时沿用外部值
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM"))
+        qputenv("QT_QPA_PLATFORM", "offscreen");
     // offscreen 平台默认不加载系统字体，会刷屏 "Cannot find font directory" 警告
     if (qgetenv("QT_QPA_FONTDIR").isEmpty()) {
         const QByteArray windir = qgetenv("WINDIR");

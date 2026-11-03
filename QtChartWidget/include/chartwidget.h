@@ -389,7 +389,11 @@ private:
     QWidget *m_emptyState = nullptr;
     QWidget *m_phaseWrap = nullptr;
     PhasePanel *m_phasePanel = nullptr;
+    QVBoxLayout *m_phaseLayout = nullptr;
     QSpacerItem *m_phaseLiftSpacer = nullptr;
+    // 主栏外距（webui/refined 的 --content-max：clamp(680, 86vw, 1320px)）。
+    // 消息区 / 阶段条 / 输入区共用同一个值，保证三者停在同一条竖线上。
+    int m_contentSide = -1;
     TrajectoryView *m_trajView = nullptr;
     Composer *m_composer = nullptr;
     QString m_viewTab = QStringLiteral("chat");
@@ -407,6 +411,8 @@ private:
     QList<TurnRailRow *> m_railRows;
     QList<QPointer<MessageWidget>> m_railTurns;
     int m_railActive = 0;
+    // 主栏宽度变化时重排消息区与阶段条的外距（resizeEvent / 缩放时调用）
+    void syncContentMargins();
 
     // 叠加层
     SessionPanel *m_sessionPanel = nullptr;

@@ -66,6 +66,15 @@ struct Palette
     QColor assistantLine;      // --assistant-line
     QColor assistantTint;      // --assistant-tint
     QColor assistantText;      // --assistant-text
+    // webui/refined/tokens.css 新增的实色层（精修层把半透明叠加换成定值底色）
+    QColor bodyText;           // --body-text（正文实色，比 --text 略亮一档）
+    QColor cardSolid;          // --card-solid（消息卡实底，替代渐变叠加）
+    QColor cardSolid2;         // --card-solid-2（助手卡实底）
+    QColor inputBg;            // --input-bg（输入框浮起的那层）
+    QColor glassSolid;         // --glass-solid（询问卡实底玻璃）
+    QColor codeText;           // --code-text（行内代码 / 键名）
+    QColor hairline;           // 骨架分割线（顶栏 .045 / 会话栏 .035）
+    QColor hoverTint;          // 中性悬停层（深色白 5% / 浅色黑 5%）
     bool dark = true;          // color-scheme: dark
 };
 
@@ -84,6 +93,12 @@ QStringList themeIds();
 QString uiFont();
 QString monoFont();
 int basePixelSize();
+
+// 主栏宽度：webui/refined/tokens.css 的 --content-max: clamp(680px, 86vw, 1320px)。
+// 消息区 / 输入区 / 阶段条 / 问答卡都对齐到这一条竖线，随界面缩放同步收放。
+int contentMaxWidth(int viewportWidth);
+// 主栏左右外距：把 contentMaxWidth 宽的内容居中到 viewportWidth 宽的区域
+int contentSidePadding(int viewportWidth);
 
 // 界面缩放（VSCode 式快捷键 Ctrl+= / Ctrl+- / Ctrl+0）。
 // 所有字号（QSS 里的 font-size 与代码中的硬编码 px）统一经 zoomFactor 缩放。

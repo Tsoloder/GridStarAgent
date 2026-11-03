@@ -21,6 +21,7 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTimer>
 #include <QToolTip>
 #include <QVBoxLayout>
@@ -258,6 +259,8 @@ ChoiceOverlay::ChoiceOverlay(QWidget *parent) : QFrame(parent)
     m_listLayout->setContentsMargins(6, 0, 6, 6);
     m_listLayout->setSpacing(0);
     bodyLayout->addWidget(m_list);
+    // 卡片比内容高时，多出的高度不该被选项均摊（审批卡的批准/拒绝会被拉成两条空行）
+    bodyLayout->addStretch(1);
 
     m_foot = new QWidget(this);
     m_foot->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -438,6 +441,8 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
                                     jsonParamField(area, spec.name), m_params);
             row->ensurePolished(); // QSS 的边距/字号要先落地，量出的行高才是最终值
             m_paramsLayout->addWidget(row);
+            m_paramRows.append(row);
+            m_paramRequired.append(spec.required);
         } else {
             auto *input = new QLineEdit(valueForInput(spec.value), m_params);
             setClass(input, QStringLiteral("paramInput"));
@@ -449,10 +454,13 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
                                     right, m_params);
             row->ensurePolished();
             m_paramsLayout->addWidget(row);
+            m_paramRows.append(row);
+            m_paramRequired.append(spec.required);
         }
         m_paramEntries.append(entry);
     }
     m_params->setVisible(!m_paramEntries.isEmpty());
+    buildParamFold();
 
     // 选项：审批固定批准/拒绝；参数块无选项时补确认/取消
     QVariantList options = payload.value(QStringLiteral("options")).toList();
@@ -626,16 +634,18 @@ int ChoiceOverlay::heightForCardWidth(int width)
     // widgetResizable 下并不跟着刚设好的 body 最小高度走，结果卡片被算矮，
     // 底部作答区被挤出可视区（参数多的审批卡就是这个症状）。
     // 改成头 + 正文自然高 + 脚三项直接相加，其中正文高由 syncBodyHeight() 标定。
-    const int headH = m_head ? m_head->sizeHint().height() : 0;
-    const int footH = m_foot ? m_foot->sizeHint().height() : 0;
+    // 头与脚只算可见高度：折叠（m_foot 隐藏）或审批卡（无作答区）时不能再把它们的自然高算进去，
+    // 否则卡片会比 sizeHint 高出一整块，折叠动作看起来没生效。
+    const int headH = (m_head && m_head->isVisible()) ? m_head->sizeHint().height() : 0;
+    const int footH = (m_foot && m_foot->isVisible()) ? m_foot->sizeHint().height() : 0;
     const QMargins m = margins();
-    int bodyNatural = m_bodyNatural;
-    if (m_body && m_body->layout()) {
+    int bodyNatural = m_collapsed ? 0 : m_bodyNatural;
+    if (!m_collapsed && m_body && m_body->layout()) {
         // 两个口径取大：sizeHint 在窄宽下偏小、heightForWidth 在宽未定稿时偏大，
         // 取大至少保证底部作答区不被顶出去
         bodyNatural = qMax(bodyNatural, m_body->layout()->sizeHint().height());
     }
-    const int total = headH + bodyNatural + footH + m.top() + m.bottom();
+    const int total = headH + (m_collapsed ? 0 : bodyNatural) + footH + m.top() + m.bottom();
     return qMax(total, sizeHint().height());
 }
 
@@ -700,6 +710,11 @@ void ChoiceOverlay::rebuild()
             entry.area->deleteLater();
     }
     m_paramEntries.clear();
+    m_paramRows.clear();
+    m_paramRequired.clear();
+    m_paramMore = nullptr;
+    m_paramFoldCount = 0;
+    m_paramsExpanded = false;
     while (QLayoutItem *item = m_paramsLayout->takeAt(0)) {
         if (QWidget *w = item->widget())
             w->deleteLater();
@@ -728,9 +743,60 @@ void ChoiceOverlay::closeOverlay()
     fadeOut();
 }
 
-void ChoiceOverlay::toggleCollapsed()
+// webui 64bf303：参数多到要滚动时，平铺本身就是噪音。审批真正要看的是必填项与值动过的项，
+// 所以先按「必填 + 前几项」展开（总数封顶 6），其余收成一行，展开后再由滚动兜底。
+void ChoiceOverlay::buildParamFold()
 {
-    m_collapsed = !m_collapsed;
+    const int foldAt = 6;
+    m_paramAlwaysShow.clear();
+    for (int i = 0; i < m_paramRequired.size(); ++i) {
+        if (m_paramRequired.at(i))
+            m_paramAlwaysShow.insert(i);
+    }
+    for (int i = 0; i < m_paramRows.size() && m_paramAlwaysShow.size() < foldAt; ++i)
+        m_paramAlwaysShow.insert(i);
+    m_paramFoldCount = m_paramRows.size() - m_paramAlwaysShow.size();
+    m_paramsExpanded = false;
+
+    if (m_paramFoldCount > 0) {
+        m_paramMore = new QPushButton(m_params);
+        setClass(m_paramMore, QStringLiteral("paramMore"));
+        m_paramMore->setCursor(Qt::PointingHandCursor);
+        m_paramMore->setFocusPolicy(Qt::TabFocus);
+        m_paramMore->setFlat(true);
+        connect(m_paramMore, &QPushButton::clicked, this, [this] {
+            m_paramsExpanded = !m_paramsExpanded;
+            applyParamFold(m_paramsExpanded);
+            // 收起后列表变短，滚动位置得回顶，否则看着像卡在中间
+            if (!m_paramsExpanded && m_scroll)
+                m_scroll->verticalScrollBar()->setValue(0);
+            updateGeometry();
+            emit sizeChanged();
+        });
+        m_paramsLayout->addWidget(m_paramMore);
+    }
+    applyParamFold(false);
+}
+
+void ChoiceOverlay::applyParamFold(bool expanded)
+{
+    for (int i = 0; i < m_paramRows.size(); ++i) {
+        QWidget *row = m_paramRows.at(i);
+        if (!row)
+            continue;
+        row->setVisible(expanded || m_paramAlwaysShow.contains(i));
+    }
+    if (m_paramMore) {
+        m_paramMore->setText(expanded
+                                 ? QStringLiteral("收起可选参数")
+                                 : QStringLiteral("展开其余 %1 个参数").arg(m_paramFoldCount));
+        m_paramMore->setProperty("expanded", expanded);
+        gs::restyle(m_paramMore);
+    }
+}
+
+void ChoiceOverlay::toggleCollapsed()
+{    m_collapsed = !m_collapsed;
     m_caret->setText(m_collapsed ? QString::fromUtf8("⌃") : QString::fromUtf8("⌄"));
     m_question->setVisible(!m_collapsed && !m_question->text().isEmpty());
     m_params->setVisible(!m_collapsed && !m_paramEntries.isEmpty());

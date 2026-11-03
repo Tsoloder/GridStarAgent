@@ -2,6 +2,7 @@
 #define GS_CHOICEOVERLAY_H
 
 #include <QFrame>
+#include <QSet>
 #include <QVariant>
 
 QT_BEGIN_NAMESPACE
@@ -93,6 +94,10 @@ private:
     void activate(int index);
     void setSubmitted(bool submitted);
     QVariantMap paramValues() const;
+    // webui 64bf303：参数超 6 项时只展开必填与前几项，其余收成一行；
+    // 参数区是唯一可收缩块，标题与作答区固定，长参数不再顶出视口。
+    void buildParamFold();
+    void applyParamFold(bool expanded);
     // webui .choice-overlay 的入场/离场过渡（opacity .18s / 收起 .16s）
     void fadeIn();
     void fadeOut();
@@ -116,6 +121,13 @@ private:
 
     QList<ParamEntry> m_paramEntries;
     QList<OptionEntry> m_optionEntries;
+    // 参数折叠：行 widget + 是否必填（必填项永远展开）
+    QList<QWidget *> m_paramRows;
+    QList<bool> m_paramRequired;
+    QSet<int> m_paramAlwaysShow;
+    QPushButton *m_paramMore = nullptr;
+    int m_paramFoldCount = 0;
+    bool m_paramsExpanded = false;
     bool m_isApproval = false;
     bool m_isToolParams = false;
     QString m_toolName;

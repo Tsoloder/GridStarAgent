@@ -313,8 +313,7 @@ ChartWidget::ChartWidget(QWidget *parent)
     m_root->setSpacing(0);
 
     buildTopbar();
-    buildSessionbar();
-    buildViewTabs();
+    buildSessionbar(); // 内部会把视图切换（对话 / 轨迹）旋到第二行右侧
     buildMessages();
     buildTurnRail();
 
@@ -323,15 +322,15 @@ ChartWidget::ChartWidget(QWidget *parent)
     m_trajView->setVisible(false);
     m_root->addWidget(m_trajView, 1);
 
-    // .phase-panel { margin: 0 9px 8px }
+    // .phase-panel { margin: 0 auto 10px }：与消息区同一条主栏竖线
     m_phaseWrap = new QWidget(this);
-    auto *phaseLayout = new QVBoxLayout(m_phaseWrap);
-    phaseLayout->setContentsMargins(9, 0, 9, 8);
-    phaseLayout->setSpacing(0);
+    m_phaseLayout = new QVBoxLayout(m_phaseWrap);
+    m_phaseLayout->setContentsMargins(0, 0, 0, 8);
+    m_phaseLayout->setSpacing(0);
     m_phasePanel = new PhasePanel(m_phaseWrap);
-    phaseLayout->addWidget(m_phasePanel);
+    m_phaseLayout->addWidget(m_phasePanel);
     m_phaseLiftSpacer = new QSpacerItem(0, 0, QSizePolicy::Fixed, QSizePolicy::Fixed);
-    phaseLayout->addSpacerItem(m_phaseLiftSpacer);
+    m_phaseLayout->addSpacerItem(m_phaseLiftSpacer);
     m_phaseWrap->setVisible(false);
     m_root->addWidget(m_phaseWrap);
     rootLayout->setPhaseWidget(m_phaseWrap);
@@ -506,21 +505,21 @@ ChartWidget::~ChartWidget()
 
 void ChartWidget::buildTopbar()
 {
-    // .topbar { height:48px; padding:0 12px; display:flex; align-items:center }
+    // .topbar { height:52px; padding:0 16px; display:flex; align-items:center }
     auto *topbar = new QWidget(this);
     topbar->setObjectName(QStringLiteral("topbar"));
     topbar->setAttribute(Qt::WA_StyledBackground, true);
-    topbar->setFixedHeight(48);
+    topbar->setFixedHeight(52);
     auto *layout = new QHBoxLayout(topbar);
-    layout->setContentsMargins(12, 0, 12, 0);
-    layout->setSpacing(8);
+    layout->setContentsMargins(16, 0, 16, 0);
+    layout->setSpacing(10);
 
     // 品牌图标：webui 6213b58 把它改成 button（#brand-mark.brand-mark-btn），
     // 点击即 POST /gridstar/ensure 拉起 GridStar 主程序；库侧只发信号，请求与 Toast 由宿主做
     auto *mark = new QPushButton(topbar);
     mark->setObjectName(QStringLiteral("brandMark"));
     setClass(mark, QStringLiteral("brandMarkBtn"));
-    mark->setFixedSize(24, 24);
+    mark->setFixedSize(22, 22); // .brand-mark { width:22px; height:22px }
     mark->setCursor(Qt::PointingHandCursor);
     mark->setFocusPolicy(Qt::TabFocus);
     mark->setToolTip(QStringLiteral("打开 GridStar"));
@@ -528,12 +527,15 @@ void ChartWidget::buildTopbar()
     const QPixmap logo(QStringLiteral(":/icons/Logo.ico"));
     if (!logo.isNull()) {
         mark->setIcon(QIcon(logo));
-        mark->setIconSize(QSize(24, 24));
+        mark->setIconSize(QSize(22, 22));
     }
     connect(mark, &QPushButton::clicked, this, &ChartWidget::launchAppRequested);
 
     auto *brand = new QLabel(QStringLiteral("GridStar Agent"), topbar);
     brand->setObjectName(QStringLiteral("brandText"));
+    // 窄窗口下先压标题，不要让顶栏把宿主的最小宽度顶到 300 以上
+    brand->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    brand->setMinimumWidth(0);
 
     m_connection = new ConnectionButton(topbar);
 
@@ -545,7 +547,7 @@ void ChartWidget::buildTopbar()
     m_themeTrigger->setCursor(Qt::PointingHandCursor);
     m_themeTrigger->setToolTip(QStringLiteral("切换皮肤"));
     auto *themeLayout = new QHBoxLayout(m_themeTrigger);
-    themeLayout->setContentsMargins(8, 0, 8, 0);
+    themeLayout->setContentsMargins(7, 0, 9, 0);
     themeLayout->setSpacing(6);
     m_themeSwatch = new ThemeSwatch(themeId(), 12, true, m_themeTrigger);
     m_themeLabel = new QLabel(themeName(), m_themeTrigger);
@@ -568,39 +570,40 @@ void ChartWidget::buildTopbar()
 
 void ChartWidget::buildSessionbar()
 {
-    // .sessionbar { height:44px; padding:6px 9px; display:flex; align-items:center }
+    // .sessionbar { height:44px; gap:10px; padding:0 12px; background:var(--band-1) }
+    // 第二行是一个整体：新建 / 会话名 / 右侧视图切换
     auto *bar = new QWidget(this);
     bar->setObjectName(QStringLiteral("sessionbar"));
     bar->setAttribute(Qt::WA_StyledBackground, true);
     bar->setFixedHeight(44);
     auto *layout = new QHBoxLayout(bar);
-    layout->setContentsMargins(9, 6, 9, 6);
-    layout->setSpacing(8); // .sessionbar>*+* { margin-left:8px }
+    layout->setContentsMargins(12, 0, 12, 0);
+    layout->setSpacing(10);
 
     auto *newSession = new IconPushButton(bar);
     newSession->setObjectName(QStringLiteral("newSession"));
-    newSession->setFixedHeight(30); // .compact { height:30px }
+    newSession->setFixedHeight(28); // .compact { height:28px }
     newSession->setCursor(Qt::PointingHandCursor);
     newSession->setText(QStringLiteral("新对话"));
-    newSession->setIconColors(gs::palette().muted, gs::palette().cyan);
-    newSession->setIconName(QStringLiteral("plus"), 14);
+    newSession->setIconColors(gs::palette().textBright, gs::palette().cyan);
+    newSession->setIconName(QStringLiteral("plus"), 13);
     m_newSession = newSession;
     layout->addWidget(m_newSession);
 
-    // .session-trigger { flex:1; height:30px; justify-content:flex-end; padding:0 5px }
+    // .session-trigger { height:28px; padding:0 8px; justify-content:flex-start }
     m_sessionTrigger = new QWidget(bar);
     m_sessionTrigger->setObjectName(QStringLiteral("sessionTrigger"));
     m_sessionTrigger->setAttribute(Qt::WA_StyledBackground, true);
-    m_sessionTrigger->setFixedHeight(30);
+    m_sessionTrigger->setFixedHeight(28);
     m_sessionTrigger->setCursor(Qt::PointingHandCursor);
     auto *triggerLayout = new QHBoxLayout(m_sessionTrigger);
-    triggerLayout->setContentsMargins(5, 0, 5, 0);
+    triggerLayout->setContentsMargins(8, 0, 8, 0);
     triggerLayout->setSpacing(7); // .session-trigger>*+* { margin-left:7px }
 
     // 不用 makeLabel：它带 TextSelectableByMouse，会吞掉鼠标事件导致点击不冒泡到触发器
     m_currentTitle = new QLabel(QStringLiteral("选择会话"), m_sessionTrigger);
     m_currentTitle->setObjectName(QStringLiteral("currentTitle"));
-    m_currentTitle->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_currentTitle->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_currentTitle->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_currentTitle->setProperty("full", QStringLiteral("选择会话"));
 
@@ -611,41 +614,45 @@ void ChartWidget::buildSessionbar()
     triggerLayout->addWidget(m_currentTitle, 1);
     triggerLayout->addWidget(m_sessionChevron);
     layout->addWidget(m_sessionTrigger, 1);
+
+    // 视图切换并入本行右侧（refined/toolbar.css：.view-tabs { margin-left:auto }）
+    buildViewTabs();
+    layout->addWidget(m_viewTabs, 0, Qt::AlignVCenter);
     m_root->addWidget(bar);
 }
 
 void ChartWidget::buildViewTabs()
 {
-    // .view-tabs { height:34px; display:flex; border-bottom:1px solid line }
+    // .view-tabs { margin-left:auto; gap:2px; border:0; background:transparent }
+    // .view-tab { height:26px; padding:0 11px; border-radius:7px; font-size:11.5px }
     m_viewTabs = new QWidget(this);
     m_viewTabs->setObjectName(QStringLiteral("viewTabs"));
     m_viewTabs->setAttribute(Qt::WA_StyledBackground, true);
-    m_viewTabs->setFixedHeight(34);
     auto *layout = new QHBoxLayout(m_viewTabs);
     layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+    layout->setSpacing(2);
 
     m_tabChat = new QPushButton(QStringLiteral("对话"), m_viewTabs);
     setClass(m_tabChat, QStringLiteral("viewTab"));
     m_tabChat->setProperty("active", true);
     m_tabChat->setCursor(Qt::PointingHandCursor);
     m_tabChat->setFocusPolicy(Qt::TabFocus); // webui 的 .view-tab 是 button：可 Tab、不留点击焦点环
+    m_tabChat->setFixedHeight(26);
 
     m_tabTraj = new QPushButton(QStringLiteral("轨迹"), m_viewTabs);
     setClass(m_tabTraj, QStringLiteral("viewTab"));
     m_tabTraj->setProperty("active", false);
     m_tabTraj->setCursor(Qt::PointingHandCursor);
     m_tabTraj->setFocusPolicy(Qt::TabFocus);
+    m_tabTraj->setFixedHeight(26);
 
     layout->addWidget(m_tabChat);
     layout->addWidget(m_tabTraj);
-    layout->addStretch(1);
-    m_root->addWidget(m_viewTabs);
 }
 
 void ChartWidget::buildMessages()
 {
-    // .messages { flex:1; overflow-y:auto; padding:13px 11px }
+    // .messages { flex:1; overflow-y:auto; padding:20px 20px 8px }
     m_messages = new QScrollArea(this);
     m_messages->setObjectName(QStringLiteral("messages"));
     m_messages->setFrameShape(QFrame::NoFrame);
@@ -656,15 +663,31 @@ void ChartWidget::buildMessages()
     m_messageList = new QWidget(m_messages);
     m_messageList->setObjectName(QStringLiteral("messageList"));
     m_messageLayout = new QVBoxLayout(m_messageList);
-    // .message { margin:0 0 13px } → 间距 13，底部留白由最后一条消息的 margin 提供
-    m_messageLayout->setContentsMargins(11, 13, 11, 0);
-    m_messageLayout->setSpacing(13);
+    // .message { margin:0 auto 18px }；左右外距由 syncContentMargins() 按主栏宽度写入
+    m_messageLayout->setContentsMargins(20, 20, 20, 0);
+    m_messageLayout->setSpacing(18);
 
     m_emptyState = createEmptyState();
     m_messageLayout->addWidget(m_emptyState, 1);
     m_messageLayout->addStretch(0);
     m_messages->setWidget(m_messageList);
     m_root->addWidget(m_messages, 1);
+}
+
+// 主栏宽度：消息区 / 阶段条 / 输入区共用一条竖线（refined 的 --content-max）
+void ChartWidget::syncContentMargins()
+{
+    // 用宿主自身宽度算：resizeEvent 里 viewport 的宽度还没跟上，读到旧值会把 side 定死为 0
+    const int side = gs::contentSidePadding(width());
+    if (side == m_contentSide)
+        return;
+    m_contentSide = side;
+    if (m_messageLayout)
+        m_messageLayout->setContentsMargins(side, 20, side, 0);
+    if (m_phaseLayout)
+        m_phaseLayout->setContentsMargins(side, 0, side, 10);
+    if (m_composer)
+        m_composer->setContentSidePadding(side);
 }
 
 void ChartWidget::buildTurnRail()
@@ -745,9 +768,9 @@ QWidget *ChartWidget::createEmptyState()
     symbol->setObjectName(QStringLiteral("emptySymbol"));
     symbol->setAttribute(Qt::WA_StyledBackground, true);
     symbol->setAlignment(Qt::AlignCenter);
-    symbol->setFixedSize(40, 40);
-    symbol->setPixmap(iconPixmap(QStringLiteral("zap"), gs::palette().cyan, 22));
-    symbol->setContentsMargins(0, 0, 0, 12); // .empty-symbol { margin-bottom:12px }
+    symbol->setFixedSize(58, 58);
+    symbol->setPixmap(iconPixmap(QStringLiteral("zap"), gs::palette().cyan, 24));
+    symbol->setContentsMargins(0, 0, 0, 20); // .empty-symbol { margin-bottom:20px }
 
     auto *title = new QLabel(QStringLiteral("对话已就绪"), box);
     title->setObjectName(QStringLiteral("emptyTitle"));
@@ -759,12 +782,12 @@ QWidget *ChartWidget::createEmptyState()
     hint->setWordWrap(true);
     // .empty-state p { max-width:270px; margin:7px 0 }：只给 max-width 时 QLabel 的 sizeHint
     // 会收到单行宽（实测 120px），两行文本被裁成一行且右侧截断；这里定宽再按字体度量给最小高
-    hint->setFixedWidth(270);
-    hint->setContentsMargins(0, 7, 0, 7);
+    hint->setFixedWidth(300);
+    hint->setContentsMargins(0, 11, 0, 0);
     {
         const QFontMetrics metrics(hint->font());
-        const QRect needed = metrics.boundingRect(QRect(0, 0, 270, 0), Qt::TextWordWrap, hint->text());
-        hint->setMinimumHeight(needed.height() + 14); // + margin:7px 上下
+        const QRect needed = metrics.boundingRect(QRect(0, 0, 300, 0), Qt::TextWordWrap, hint->text());
+        hint->setMinimumHeight(needed.height() + 11); // + margin-top:11px
     }
 
     layout->addStretch(1);
@@ -823,10 +846,13 @@ void ChartWidget::updateTitleElide()
 
 void ChartWidget::layoutOverlays()
 {
+    syncContentMargins();
     const QSize host = size();
     m_sessionPanel->layoutIn(host);
-    // Toast 浮在输入区之上（输入区高度随控件行换行变化，不能用固定底距）
-    m_toast->layoutIn(host, m_composer ? m_composer->height() + 12 : 125);
+    // Toast 浮在输入区之上（输入区高度随控件行换行变化，不能用固定底距）；
+    // 审批卡很局时会被压在卡片底下，所以再把卡片高度加上去（webui syncToastLift）
+    const int composerBottom = m_composer ? m_composer->height() + gs::scaledPx(14) : 125;
+    m_toast->layoutIn(host, composerBottom + (m_composer ? m_composer->choiceHeight() : 0));
     m_dropOverlay->layoutIn(host);
     updateTitleElide();
 
@@ -2141,6 +2167,7 @@ void ChartWidget::dropEvent(QDropEvent *event)
 void ChartWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    syncContentMargins();
     layoutOverlays();
 }
 
@@ -2364,7 +2391,7 @@ extern "C" QTCHARTWIDGET_EXPORT QWidget *qtchartwidget_create()
 
 extern "C" QTCHARTWIDGET_EXPORT const char *qtchartwidget_version()
 {
-    // 2.3.0：公开头只做加法（记忆 / 知识库 / 分类 / 上下文用量 / 结束本轮 / 模型信息快照），
-    // 改这里时同步改 CHANGELOG 与 README
-    return "2.3.0";
+    // 2.4.0：对齐 webui 的精修视觉层（中性冷黑调色板 / 正文 15px / 主栏 clamp(680,86vw,1320)）
+    // 与审批卡限高 + 参数分级折叠；公开头只做加法。改这里时同步改 CHANGELOG 与 README
+    return "2.4.0";
 }

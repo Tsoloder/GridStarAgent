@@ -300,17 +300,24 @@ void MarkdownView::addCodeBlock(QVBoxLayout *layout, QWidget *parent, const QStr
 void MarkdownView::addHeading(QVBoxLayout *layout, QWidget *parent, const QString &text, int level)
 {
     QString html = inlineMarkdownToHtml(text);
-    // h1~h3 直接用 .mdHeading 的字号（QSS 里已随缩放展开）；h4~h6 在 CSS 里小一档
-    if (level > 3)
-        html = QStringLiteral("<span style=\"font-size:%1px;\">%2</span>")
-                   .arg(scaledPx(14))
+    // refined/chat.css：h1 19px / h2 17px / h3 15px / h4~h6 14px（QSS 的 mdHeading 是 h3 那一档）
+    int headingPx = 15;
+    if (level == 1)
+        headingPx = 19;
+    else if (level == 2)
+        headingPx = 17;
+    else if (level > 3)
+        headingPx = 14;
+    if (headingPx != 15)
+        html = QStringLiteral("<span style=\"font-size:%1px; line-height:140%;\">%2</span>")
+                   .arg(scaledPx(headingPx))
                    .arg(html);
 
     QLabel *label = makeLabel(QStringLiteral("mdHeading"), html, parent);
     label->setTextFormat(Qt::RichText);
     label->setWordWrap(true);
     label->setOpenExternalLinks(true);
-    label->setContentsMargins(0, scaledPx(10), 0, scaledPx(5)); // CSS: h1~h6 margin 10px 0 5px
+    label->setContentsMargins(0, scaledPx(20), 0, scaledPx(9)); // CSS: h1~h3 margin 20px 0 9px
     layout->addWidget(label);
 }
 
@@ -334,7 +341,7 @@ void MarkdownView::addParagraph(QVBoxLayout *layout, QWidget *parent, const QStr
     label->setTextFormat(Qt::RichText);
     label->setWordWrap(true);
     label->setOpenExternalLinks(true);
-    label->setContentsMargins(0, 0, 0, scaledPx(7)); // CSS: .markdown p margin 0 0 7px
+    label->setContentsMargins(0, 0, 0, scaledPx(10)); // CSS: .markdown p margin 0 0 10px
     layout->addWidget(label);
 }
 
@@ -344,19 +351,19 @@ void MarkdownView::addRule(QVBoxLayout *layout, QWidget *parent)
     label->setFixedHeight(qMax(1, scaledPx(1)));
     label->setAttribute(Qt::WA_StyledBackground, true);
     label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    layout->addSpacing(scaledPx(10)); // CSS: hr margin 10px 0
+    layout->addSpacing(scaledPx(18)); // CSS: hr margin 18px 0
     layout->addWidget(label);
-    layout->addSpacing(scaledPx(10));
+    layout->addSpacing(scaledPx(18));
 }
 
 void MarkdownView::addList(QVBoxLayout *layout, QWidget *parent, const QString &html)
 {
-    // 嵌套层级以每个列表项的 margin-left 体现，所以这里只留 CSS 的 ul/ol margin 5px 0
+    // 嵌套层级以每个列表项的 margin-left 体现，所以这里只留 CSS 的 ul/ol margin 8px 0
     QLabel *label = makeLabel(QStringLiteral("mdList"), html, parent);
     label->setTextFormat(Qt::RichText);
     label->setWordWrap(true);
     label->setOpenExternalLinks(true);
-    label->setContentsMargins(0, scaledPx(5), 0, scaledPx(5));
+    label->setContentsMargins(0, scaledPx(8), 0, scaledPx(8));
     layout->addWidget(label);
 }
 
@@ -473,9 +480,9 @@ void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringL
         return;
 
     const Palette &p = gs::palette();
-    const int gap = qMax(1, scaledPx(1)); // 网格缝隙 1px：容器底色透出来就是水平/垂直分隔线
-    const int padH = scaledPx(9);
-    const int padV = scaledPx(6);
+    const int padH = scaledPx(14);
+    const int padV = scaledPx(10);
+    const int lineH = qMax(1, scaledPx(1));
 
     auto *frame = new QFrame(parent);
     setClass(frame, QStringLiteral("mdTable"));
@@ -491,39 +498,49 @@ void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringL
     scroll->viewport()->setAutoFillBackground(false);
     scroll->setStyleSheet(QStringLiteral("background: transparent;"));
 
+    // refined/detail.css：表格去外框、去竖线、表头无底色，只留极淡行线（报告体）
     auto *grid = new QWidget;
-    grid->setStyleSheet(QStringLiteral("background-color:%1;").arg(cssColor(p.line)));
+    grid->setStyleSheet(QStringLiteral("background: transparent;"));
     auto *gridLayout = new QGridLayout(grid);
     gridLayout->setContentsMargins(0, 0, 0, 0);
-    gridLayout->setSpacing(gap);
+    gridLayout->setHorizontalSpacing(scaledPx(6));
+    gridLayout->setVerticalSpacing(0);
 
     auto makeCell = [&](const QString &cls, const QString &text, const QString &align,
-                        const QColor &background, bool wrap) {
+                        bool wrap) {
         QLabel *cell = makeLabel(cls, inlineMarkdownToHtml(text), grid);
         cell->setTextFormat(Qt::RichText);
         cell->setWordWrap(wrap);
         cell->setAlignment(cellAlignment(align) | Qt::AlignVCenter);
-        cell->setContentsMargins(padH, padV, padH, padV); // CSS: th/td padding 6px 9px
-        cell->setStyleSheet(QStringLiteral("background-color:%1;").arg(cssColor(background)));
+        cell->setContentsMargins(padH, padV, padH, padV);
+        cell->setStyleSheet(QStringLiteral("background: transparent;"));
         return cell;
+    };
+    auto addRule = [&](int row, const QColor &color) {
+        auto *line = new QFrame(grid);
+        line->setFixedHeight(lineH);
+        line->setAttribute(Qt::WA_StyledBackground, true);
+        line->setStyleSheet(QStringLiteral("background-color:%1;").arg(cssColor(color)));
+        gridLayout->addWidget(line, row, 0, 1, qMax(1, columns));
     };
 
     for (int c = 0; c < columns; ++c)
         gridLayout->addWidget(makeCell(QStringLiteral("mdTableHead"), head.value(c),
-                                       aligns.value(c), p.band3, false),
+                                       aligns.value(c), false),
                               0, c);
+    addRule(1, p.lineStrong);
 
     for (int r = 0; r < rows.size(); ++r) {
-        // CSS: tbody tr:nth-child(even) 用 --band-2，其余行透出表格底色 --inset
-        const QColor background = (r % 2 == 1) ? p.band2 : p.inset;
+        const int row = 2 + r * 2;
         for (int c = 0; c < columns; ++c)
             gridLayout->addWidget(makeCell(QStringLiteral("mdTableCell"), rows.at(r).value(c),
-                                           aligns.value(c), background, true),
-                                  r + 1, c);
+                                           aligns.value(c), true),
+                                  row, c);
+        if (r + 1 < rows.size())
+            addRule(row + 1, p.hairline);
     }
     gridLayout->setColumnStretch(columns - 1, 1);
-    if (!rows.isEmpty())
-        gridLayout->setRowStretch(rows.size(), 1);
+    gridLayout->setRowStretch(2 + qMax(0, rows.size() - 1) * 2 + 1, 1);
 
     scroll->setWidget(grid);
     scroll->ensurePolished(); // 先把 QSS（表格 11px 字号）烙上，量出来的自然宽度才是最终渲染宽度
@@ -535,9 +552,9 @@ void MarkdownView::addTable(QVBoxLayout *layout, QWidget *parent, const QStringL
     scroll->setNaturalSize(natural);
     frameLayout->addWidget(scroll);
 
-    layout->addSpacing(scaledPx(8)); // CSS: .md-table-wrap margin 8px 0
+    layout->addSpacing(scaledPx(14)); // CSS: .md-table-wrap margin 14px 0
     layout->addWidget(frame);
-    layout->addSpacing(scaledPx(8));
+    layout->addSpacing(scaledPx(14));
 }
 
 int MarkdownView::renderBlocks(const QStringList &lines, const QVector<CodeFence> &fences,

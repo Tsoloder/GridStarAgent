@@ -135,9 +135,10 @@ demo.exe --tab usage-cal # 用量页 + 展开日期区间浮层（离屏没有�
 demo.exe --tab theme     # 展开皮肤下拉浮层（核对浮层样式用）
 demo.exe --tab rail      # 展开轮次列表面板（离屏无法悬停，等价派发 Enter）
 demo.exe --shot out.png  # 离屏渲染并截图后退出
+demo.exe --shot out.png --size 1440x900  # 指定截图尺寸（验收主栏宽度 / 宽屏排版）
 ```
 
-`--theme` / `--tab` 可与 `--shot` 组合，用于按皮肤或页签出对照图；
+`--theme` / `--tab` / `--size` 可与 `--shot` 组合，用于按皮肤、页签或窗口尺寸出对照图；
 `--tab usage` 时截图目标是设置对话框（内容比窗口高，截图前会把对话框拉高以拍全三图与明细表）。
 
 离屏截图（`--shot`）使用 `offscreen` 平台插件，该平台默认不加载系统字体，
@@ -145,6 +146,13 @@ demo.exe --shot out.png  # 离屏渲染并截图后退出
 
 ```powershell
 $env:QT_QPA_FONTDIR = 'C:\Windows\Fonts'
+```
+
+要看**真正带文字的截图**，直接指定 Windows 平台插件（窗口会一闪而过）：
+
+```powershell
+$env:QT_QPA_PLATFORM = 'windows'
+demo.exe --shot out.png --size 1440x900
 ```
 
 ### 连接真实后台（live 模式）
@@ -374,6 +382,22 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
   （只按时间窗过滤，不随当前筛选缩水）；显示名优先取 `setModels` 里的 `provider_name` / `name`
   请求以 `usageStatsRequested` 下发的 `requestId` 对账（回填时必须原样带回）：晚到的旧响应、
   旧失败都会被丢弃，不会覆盖当前视图；结果缓存与 app.js 同口径，满 32 条整体清空
+
+### 视觉口径（对齐 webui/refined 精修层）
+
+- **调色板**：三套皮肤都改成中性冷黑底（`--bg #0d1014`），边界一律用低透明描边
+  （`--line: rgba(255,255,255,.055)`），强调色只出现在可交互焦点上（`--cyan #6fb0cc`）；
+  发送键是全站唯一亮色块
+- **字体层级**：全站微软雅黑，字重只有 400 / 700 两档（雅黑只能这两档）；
+  正文 15px / 表头 11px / 单元格 13px；标题 h1 19 / h2 17 / h3 15 / h4~h6 14
+- **主栏宽度**：`clamp(680px, 86vw, 1320px)`（`gs::contentMaxWidth()`）。
+  消息区 / 输入区 / 阶段条 / 问答卡都居中到这一条竖线；窗口窄到这个下限以下时满宽显示
+- **骨架**：顶栏 52px；会话栏 44px，视图切换（对话 / 轨迹）是它右侧的胶囊，不再单独占一行
+- **卡片**：消息卡实底 14px 圆角；用户卡 `min(84%, 620px)` 靠右并切掉右下角；
+  输入框 16px 圆角 + 深投影；浮层统一玻璃底 + 12px 圆角
+- **表格**：去外框、去竖线、表头无底色，只留行线；首列用 `--text-bright` 强调
+- **问答卡**：底边贴输入区上方 14px，高度上限到宿主顶边上方 8px；
+  参数超 6 项时只展开必填与前几项，其余收成「展开其余 N 个参数」
 
 ### 其它行为口径（与 webui 对齐）
 

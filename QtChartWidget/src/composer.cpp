@@ -28,10 +28,10 @@
 namespace gs {
 namespace {
 
-// 输入框高度：默认三行（75px），随内容增高，到上限后锁定并改为可滚动
-const int kInputMinHeight = 75;
+// 输入框高度：默认三行（74px），随内容增高，到上限后锁定并改为可滚动
+const int kInputMinHeight = 74;
 const int kInputMaxHeight = 200;
-const int kInputChrome = 16; // padding 10px + 6px
+const int kInputChrome = 20; // padding 14px + 6px
 
 } // namespace
 
@@ -41,10 +41,10 @@ Composer::Composer(QWidget *parent)
     setObjectName(QStringLiteral("composer"));
     setAttribute(Qt::WA_StyledBackground, true);
 
-    // .composer { padding:8px 9px 12px }
-    auto *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(9, 8, 9, 12);
-    outer->setSpacing(0);
+    // .composer { padding:12px 16px 16px }；左右外距随主栏宽度收放
+    m_outer = new QVBoxLayout(this);
+    m_outer->setContentsMargins(16, 12, 16, 16);
+    m_outer->setSpacing(0);
 
     // 配置警告（.config-warning）
     m_warning = new QLabel(QStringLiteral("后端尚未配置模型，聊天暂不可用。"), this);
@@ -55,9 +55,8 @@ Composer::Composer(QWidget *parent)
     m_warningGap = new QWidget(this);
     m_warningGap->setFixedHeight(6);
     m_warningGap->setVisible(false);
-    outer->addWidget(m_warning);
-    outer->addWidget(m_warningGap);
-
+    m_outer->addWidget(m_warning);
+    m_outer->addWidget(m_warningGap);
     // 输入容器（.input-wrap）：附件条 + 输入框 + 控件行，整体是一张浮起的卡片
     m_inputWrap = new QFrame(this);
     m_inputWrap->setObjectName(QStringLiteral("inputWrap"));
@@ -94,8 +93,8 @@ Composer::Composer(QWidget *parent)
     m_controls = new QWidget(m_inputWrap);
     m_controls->setObjectName(QStringLiteral("controls"));
     auto *hl = new QHBoxLayout(m_controls);
-    hl->setContentsMargins(8, 0, 8, 8);
-    hl->setSpacing(5);
+    hl->setContentsMargins(10, 0, 10, 10);
+    hl->setSpacing(2);
 
     m_leftControls = new QWidget(m_controls);
     auto *leftFlow = new FlowLayout(m_leftControls, 0, 5, 5);
@@ -103,12 +102,12 @@ Composer::Composer(QWidget *parent)
 
     m_attach = new IconPushButton(m_leftControls);
     m_attach->setObjectName(QStringLiteral("attachButton"));
-    m_attach->setFixedSize(30, 30);
+    m_attach->setFixedSize(27, 27);
     m_attach->setToolTip(QStringLiteral("添加附件"));
     m_attach->setCursor(Qt::PointingHandCursor);
     m_attach->setFocusPolicy(Qt::TabFocus); // webui 的 button 可聚焦；TabFocus 不留点击焦点环
-    m_attach->setIconColors(gs::palette().muted2, gs::palette().cyan);
-    m_attach->setIconName(QStringLiteral("paperclip"), 16);
+    m_attach->setIconColors(gs::palette().muted2, gs::palette().textBright);
+    m_attach->setIconName(QStringLiteral("paperclip"), 15);
     leftFlow->addWidget(m_attach);
 
     // 交互模式下拉（.model-control.mode-control）：原来是一对分段按钮，webui 已改成下拉
@@ -116,7 +115,7 @@ Composer::Composer(QWidget *parent)
         auto *frame = new QFrame(m_leftControls);
         setClass(frame, QStringLiteral("modelControl"));
         frame->setAttribute(Qt::WA_StyledBackground, true);
-        frame->setFixedHeight(30);
+        frame->setFixedHeight(27);
         frame->setMaximumWidth(240);
         frame->setToolTip(tip);
         auto *layout = new QHBoxLayout(frame);
@@ -200,30 +199,30 @@ Composer::Composer(QWidget *parent)
 
     m_settings = new IconPushButton(m_controls);
     m_settings->setObjectName(QStringLiteral("settingsButton"));
-    m_settings->setFixedSize(30, 30);
+    m_settings->setFixedSize(27, 27);
     m_settings->setToolTip(QStringLiteral("打开设置"));
     m_settings->setCursor(Qt::PointingHandCursor);
     m_settings->setFocusPolicy(Qt::TabFocus);
-    m_settings->setIconColors(gs::palette().muted2, gs::palette().cyan);
-    m_settings->setIconName(QStringLiteral("settings"), 16);
+    m_settings->setIconColors(gs::palette().muted2, gs::palette().textBright);
+    m_settings->setIconName(QStringLiteral("settings"), 15);
 
     m_voice = new IconPushButton(m_controls);
     m_voice->setObjectName(QStringLiteral("voiceButton"));
-    m_voice->setFixedSize(30, 30);
+    m_voice->setFixedSize(27, 27);
     m_voice->setToolTip(QStringLiteral("语音输入"));
     m_voice->setCursor(Qt::PointingHandCursor);
     m_voice->setFocusPolicy(Qt::TabFocus);
-    m_voice->setIconColors(gs::palette().muted2, gs::palette().cyan);
-    m_voice->setIconName(QStringLiteral("mic"), 16);
+    m_voice->setIconColors(gs::palette().muted2, gs::palette().textBright);
+    m_voice->setIconName(QStringLiteral("mic"), 15);
     m_voice->setEnabled(false);
 
     m_send = new IconPushButton(m_controls);
     m_send->setObjectName(QStringLiteral("sendButton"));
-    m_send->setFixedSize(30, 30);
+    m_send->setFixedSize(31, 31);
     m_send->setToolTip(QStringLiteral("发送"));
     m_send->setCursor(Qt::PointingHandCursor);
     m_send->setFocusPolicy(Qt::TabFocus);
-    m_send->setIconColors(QColor(QStringLiteral("#ffffff")),
+    m_send->setIconColors(QColor(QStringLiteral("#08191f")),
                           QColor(QStringLiteral("#ffffff")),
                           QColor(QStringLiteral("#cfe3ec")));
     m_send->setIconName(QStringLiteral("arrow-up"), 16);
@@ -235,7 +234,7 @@ Composer::Composer(QWidget *parent)
     hl->addWidget(m_voice, 0);
     hl->addWidget(m_send, 0);
     wl->addWidget(m_controls);
-    outer->addWidget(m_inputWrap);
+    m_outer->addWidget(m_inputWrap);
 
     // 选择浮层（.choice-overlay）：绝对定位在输入框上方，不入布局。
     // Qt 会裁剪子控件，因此挂到 Composer 的顶层宿主上；布局时再映射回输入区坐标。
@@ -454,9 +453,12 @@ void Composer::layoutChoiceOverlay()
     // 下面按宽度量高时会再触发 resizeEvent -> sizeChanged -> 本函数，重的这层直接跳过
     m_choiceLayingOut = true;
 
-    const int cardWidth = qMax(0, width() - 18);
-    // webui .choice-overlay{bottom:12px}：卡片底边贴在输入区上方 12px、向上生长
-    const int cardBottom = mapTo(host, QPoint(0, height() - 12)).y();
+    // refined/cards.css：.choice-overlay 左右 padding:max(14px,(100%-content-max)/2)、bottom:14px。
+    // 卡片与消息区 / 输入框停在同一条主栏竖线上，底边贴在输入区上方 14px。
+    const int sidePad = qMax(gs::scaledPx(9), gs::contentSidePadding(width()));
+    const int cardWidth = qMax(0, width() - sidePad * 2);
+    const int bottomGap = gs::scaledPx(14);
+    const int cardBottom = mapTo(host, QPoint(0, height() - bottomGap)).y();
     int cardHeight = 0;
     {
         // 隐藏态/旧宽度量出来的 sizeHint 偏小，窄窗口上底部的作答区会被卡片底边裁掉，
@@ -464,9 +466,10 @@ void Composer::layoutChoiceOverlay()
         QSignalBlocker blocker(m_choice);
         cardHeight = m_choice->heightForCardWidth(cardWidth);
     }
-    // 内容比可视区还高时贴住宿主顶边，正文自己滚动；不能顶出宿主被裁掉
-    cardHeight = qBound(0, cardHeight, qMax(0, cardBottom - host->rect().top()));
-    const QPoint topLeft = mapTo(host, QPoint(9, height() - 12 - cardHeight));
+    // 内容比可视区还高时贴住宿主顶边（顶端留 8px），正文自己滚动；不能顶出宿主被裁掉
+    const int topLimit = host->rect().top() + gs::scaledPx(8);
+    cardHeight = qBound(0, cardHeight, qMax(0, cardBottom - topLimit));
+    const QPoint topLeft = mapTo(host, QPoint(sidePad, height() - bottomGap - cardHeight));
     m_choice->setGeometry(QRect(topLeft, QSize(cardWidth, cardHeight)));
     m_choice->raise();
 
@@ -477,9 +480,9 @@ void Composer::layoutChoiceOverlay()
         QSignalBlocker blocker(m_choice);
         settledHeight = m_choice->heightForCardWidth(cardWidth);
     }
-    settledHeight = qBound(0, settledHeight, qMax(0, cardBottom - host->rect().top()));
+    settledHeight = qBound(0, settledHeight, qMax(0, cardBottom - topLimit));
     if (settledHeight > cardHeight) {
-        m_choice->setGeometry(QRect(mapTo(host, QPoint(9, height() - 12 - settledHeight)),
+        m_choice->setGeometry(QRect(mapTo(host, QPoint(sidePad, height() - bottomGap - settledHeight)),
                                     QSize(cardWidth, settledHeight)));
     }
 
@@ -1082,6 +1085,15 @@ void Composer::setConfigWarning(const QString &text)
     m_warning->setText(text);
     m_warning->setVisible(!text.isEmpty());
     m_warningGap->setVisible(!text.isEmpty());
+}
+
+void Composer::setContentSidePadding(int side)
+{
+    m_contentSide = qMax(0, side);
+    if (!m_outer)
+        return;
+    // 上下沿用 .composer { padding:12px 16px 16px }；左右跟着主栏收放
+    m_outer->setContentsMargins(m_contentSide, 12, m_contentSide, 16);
 }
 
 void Composer::setModels(const QVariantList &models)

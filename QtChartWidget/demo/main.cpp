@@ -3851,6 +3851,7 @@ int main(int argc, char *argv[])
     QString apiBase = QStringLiteral("http://127.0.0.1:1231");
     QString theme;
     QString tab;
+    QSize shotSize(460, 820);
     QStringList rest;
     for (int i = 1; i < argc; ++i) {
         const QString arg = QString::fromLocal8Bit(argv[i]);
@@ -3864,6 +3865,12 @@ int main(int argc, char *argv[])
             theme = QString::fromLocal8Bit(argv[++i]);
         } else if (arg == QLatin1String("--tab") && i + 1 < argc) {
             tab = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == QLatin1String("--size") && i + 1 < argc) {
+            // 截图尺寸：宽x高（如 --size 1400x900），验收主栏宽度 / 宽屏排版时用
+            const QString spec = QString::fromLocal8Bit(argv[++i]);
+            const QStringList parts = spec.split(QLatin1Char('x'));
+            if (parts.size() == 2 && parts.at(0).toInt() > 0 && parts.at(1).toInt() > 0)
+                shotSize = QSize(parts.at(0).toInt(), parts.at(1).toInt());
         } else if (arg == QLatin1String("--empty")) {
             emptyShot = true;
         } else {
@@ -3879,7 +3886,7 @@ int main(int argc, char *argv[])
 
     auto *chart = new ChartWidget;
     chart->setWindowTitle(QStringLiteral("GridStar AI · QtChartWidget"));
-    chart->resize(460, 820);
+    chart->resize(shotSize);
     if (!theme.isEmpty())
         chart->setTheme(theme); // dark / silver / blue
 

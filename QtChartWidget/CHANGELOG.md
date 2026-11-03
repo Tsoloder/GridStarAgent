@@ -3,6 +3,57 @@
 版本号遵循语义化版本：**公开头 `include/chartwidget.h` 有破坏性改动时主版本号 +1**。
 版本字符串在 `src/chartwidget.cpp` 的 `qtchartwidget_version()`，改这里时同步改本文件。
 
+## 2.4.0
+
+对齐 `webui/` 自 `2.3.0` 之后的三次提交：`c0f077e`（精修视觉层）、`b6de22b`（refined.css 拆九模块，纯重构）、
+`64bf303`（审批卡限高与参数分级折叠）。公开头仍是加法（只多一个 `gs::contentMaxWidth()` /
+`gs::contentSidePadding()` 与 `Composer::setContentSidePadding()`），故次版本号 +1。
+
+### 视觉层：调色板换成中性冷黑
+
+- `webui/refined/tokens.css` 的三套 `:root` 变量全部搬进 `theme.cpp`：底色去掉原来的蓝灰堆叠，
+  边界一律用低透明描边（`--line: rgba(255,255,255,.055)`），强调色收窄到交互焦点
+- `Palette` 补 8 个字段：`bodyText` / `cardSolid` / `cardSolid2` / `inputBg` / `glassSolid` /
+  `codeText` / `hairline` / `hoverTint`，对应 refined 新增的实色层
+- 强调色降饱和：`--cyan #6fb0cc`、`--cyan-dark #1c4a5d`、`--cyan-mid #4a8aa6`；发送键回到全站唯一亮色点
+- 状态色重算（`ok/err/warn` 三族都改成 30% 描边 + 10% 填充）
+
+### 视觉层：字体与版心
+
+- 正文进到 15px（`--fs-body`），行高与段距按 refined 的 1.78 / 10px 重排；标题分级 h1 19 / h2 17 / h3 15 / h4~h6 14
+- 字重收敛到 400 / 700 两档（雅黑只有这两档可用）：原来的 500 / 600 全部落到 400 或 700，层级靠字号与颜色拉开
+- 表格去外框、去竖线、表头去底色，只留行线（报告体）；表头 11px、单元格 13px、首列用 `text-bright`
+- 轨迹页与用量数据的数字列并入雅黑（`font-family: %UI%` 取代 `%MONO%`），代码块仍保持等宽
+- 主栏宽度落地为 `clamp(680px, 86vw, 1320px)`：消息区 / 输入区 / 阶段条 / 问答卡停在同一条竖线上，
+  新增 `gs::contentMaxWidth()` / `gs::contentSidePadding()`，随界面缩放同步收放
+
+### 视觉层：骨架
+
+- 顶栏 48 → **52**，内距 12 → 16，品牌图标 24 → 22
+- 视图切换（对话 / 轨迹）**并进会话栏第二行右侧**成为胶囊按钮，不再单独占一行带下划线的标签栏；
+  会话栏 44 高、内距 12、会话名改左对齐（`justify-content:flex-start`）
+- 消息卡从渐变改为实底（`--card-solid`）+ 14px 圆角；用户卡 `min(84%, 620px)` 靠右、右下角切 5px
+- 输入区：`input-wrap` 16px 圆角 + `--input-bg` 实底 + 深投影；输入框内距 14/15/6、默认高 74；
+  控件行 padding 0 10 10、gap 2；附件 / 设置 / 语音 27×27；发送键 31×31、9px 圆角、`#08191f` 前景
+- 浮层（会话面板 / 下拉 / 斜杠面板 / 上下文浮层）统一玻璃底 + 12px 圆角 + 柔和投影
+- 阶段条从渐变横幅改为一行安静状态：`--assistant-tint` 底 + 12px 圆角 + 1.5px 青色进度
+- 空状态图标 40 → 58（18px 圆角），标题 16.5px 700、提示 12.5px
+
+### 审批卡：按窗口限高 + 参数分级折叠（webui 64bf303）
+
+- 卡片底边贴输入区上方 **14px**（原 12），左右外距对齐主栏 `max(9, (100% - content-max) / 2)`
+- 高度上限改成「宿主顶边留 8px」（`--choice-overlay` 按 `composer.bottom - gap - 8` 算的口径），
+  正文滚动区是唯一可收缩块，标题与作答区固定
+- 参数超 6 项时只展开必填与前几项，其余收成一行，底部给「展开其余 N 个参数」/「收起可选参数」；
+  收起时滚动位置回顶
+- 浮层打开时 Toast 抬到卡片上沿（`Composer::choiceHeight()`），不再被长卡片压住
+
+### 其他
+
+- `demo` 新增 `--size WxH`（验收宽屏版心用）；截图时显式 `QT_QPA_PLATFORM=windows` 才会渲染文字，
+  offscreen 平台下字体不出图属于既有现象
+- 回归用例随几何调整同步更新断言（问答卡底距 12 → 14、会话栏并入视图切换后的高度口径等）
+
 ## 2.3.0
 
 对齐 `webui/` 自 `bf57771` 之后的 18 个提交（`webui` 侧共 `app.js +2359`、

@@ -13,6 +13,7 @@ class QHideEvent;
 class QMoveEvent;
 class QShowEvent;
 class QTimer;
+class QVBoxLayout;
 QT_END_NAMESPACE
 
 namespace gs {
@@ -69,6 +70,10 @@ public:
     void clearContextUsage();
 
     void addAttachments(const QVariantList &items);
+
+    // 主栏外距：消息区 / 阶段条 / 输入区共用（webui/refined 的 --content-max）。
+    // 由 ChartWidget 在窗口尺寸变化时写入，输入区跟着同一条竖线居中。
+    void setContentSidePadding(int side);
     void clearAttachments();
     QVariantList attachments() const { return m_attachments; }
 
@@ -225,6 +230,8 @@ private:
 
     QLabel *m_warning = nullptr;
     QWidget *m_warningGap = nullptr;
+    QVBoxLayout *m_outer = nullptr;
+    int m_contentSide = 16;
     QWidget *m_inputWrap = nullptr;
     QWidget *m_attachBar = nullptr;
     FlowLayout *m_attachLayout = nullptr;

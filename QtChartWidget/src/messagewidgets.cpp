@@ -664,6 +664,9 @@ void ToolItemWidget::setState(const QString &state)
 {
     m_state = state;
     m_dot->setState(state);
+    // 顶层行也带一份状态：QSS 没有兄弟选择器，.tool-item 的 name 颜色只能从自己的属性上取
+    setProperty("state", state);
+    restyle(this);
     if (state == QLatin1String("running")) {
         m_status->setText(QStringLiteral("执行中"));
         m_status->setProperty("status", QVariant());
@@ -834,7 +837,11 @@ MessageWidget::MessageWidget(const QString &role, const QString &label, QWidget 
     m_bubble = new QFrame(this);
     m_bubble->setObjectName(QStringLiteral("bubble"));
     m_bubbleLayout = new QVBoxLayout(m_bubble);
-    m_bubbleLayout->setContentsMargins(12, 10, 12, 0);
+    // .turn-card>.bubble { padding:14px 16px 0 }；用户卡 12px 14px 0
+    if (role == QLatin1String("user"))
+        m_bubbleLayout->setContentsMargins(14, 12, 14, 0);
+    else
+        m_bubbleLayout->setContentsMargins(16, 14, 16, 0);
     m_bubbleLayout->setSpacing(0);
 
     if (!label.isEmpty())
@@ -857,7 +864,7 @@ MessageWidget::MessageWidget(const QString &role, const QString &label, QWidget 
         m_process = new QWidget(m_card);
         m_process->setObjectName(QStringLiteral("turnProcess"));
         m_processLayout = new QVBoxLayout(m_process);
-        m_processLayout->setContentsMargins(12, 2, 12, 0);
+        m_processLayout->setContentsMargins(16, 4, 16, 0);
         m_processLayout->setSpacing(0);
         m_process->setVisible(false);
         m_cardLayout->addWidget(m_process);
@@ -890,7 +897,11 @@ void MessageWidget::buildFoot()
     m_foot = new QWidget(m_card);
     m_foot->setObjectName(QStringLiteral("turnFoot"));
     auto *hl = new QHBoxLayout(m_foot);
-    hl->setContentsMargins(12, 6, 12, 8);
+    // .turn-foot { padding:8px 16px 10px }；用户卡 6px 12px 9px
+    if (m_role == QLatin1String("user"))
+        hl->setContentsMargins(12, 6, 12, 9);
+    else
+        hl->setContentsMargins(16, 8, 16, 10);
     hl->setSpacing(8);
 
     m_copy = new IconPushButton(m_foot);
@@ -1330,15 +1341,18 @@ void MessageWidget::leaveEvent(QEvent *event)
     QWidget::leaveEvent(event);
 }
 
-// CSS: .message > * { max-width: 94% }；助手卡片宽度恒定，避免流式时宽度跳动
+// webui/refined：.turn-card.assistant 满栏（100%），.turn-card.user 取 min(84%, 620px)
+// 并靠右。助手卡宽度恒定，避免流式时宽度跳动。
 void MessageWidget::applyMaxWidths()
 {
-    const int maxWidth = qRound(width() * 0.94);
+    const int full = width();
+    const bool isUser = m_role == QLatin1String("user");
+    const int maxWidth = isUser ? qMin(qRound(full * 0.84), gs::scaledPx(620)) : full;
     for (int i = 0; i < m_stack->count(); ++i) {
         if (QWidget *child = m_stack->itemAt(i)->widget()) {
             child->setMaximumWidth(maxWidth);
-            if (m_card && child == m_card && m_role == QLatin1String("assistant"))
-                child->setMinimumWidth(maxWidth);
+            if (m_card && child == m_card)
+                child->setMinimumWidth(isUser ? 0 : maxWidth);
         }
     }
 }
