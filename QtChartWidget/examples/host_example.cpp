@@ -14,6 +14,7 @@
 #include <chartwidget.h>
 
 #include <QApplication>
+#include <QDebug>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -73,10 +74,30 @@ QVariantList demoSkills()
 {
     return { obj({ { "id", "grid-analysis" },
                    { "name", "电网分析" },
-                   { "description", "潮流计算与故障研判" } }),
+                   { "description", "潮流计算与故障研判" },
+                   { "category", "aircraft" } }),
              obj({ { "id", "dispatch-report" },
                    { "name", "调度报告" },
-                   { "description", "生成处置记录" } }) };
+                   { "description", "生成处置记录" },
+                   { "category", "common" } }) };
+}
+
+// 专业分类下拉（webui #category-select）：首项「全部」由库自己补（id 为空串），
+// 这里只给真实分类。webui 里它是从 skills 的 category 去重的，不是独立接口。
+QVariantList demoCategories()
+{
+    return { obj({ { "id", "aircraft" }, { "name", "Aircraft" } }),
+             obj({ { "id", "common" }, { "name", "Common" } }) };
+}
+
+// 输入区知识库下拉（webui #kb-select）：「不使用」（__none__）与「全部」（*）
+// 两项由库自己补，这里只给库列表，字段与 GET /kb/libraries 同构
+QVariantList demoKnowledgeBases()
+{
+    return { obj({ { "id", "kb-aero" }, { "name", "气动手册" },
+                   { "documents", 42 }, { "chunks", 1860 } }),
+             obj({ { "id", "kb-struct" }, { "name", "结构强度规范" },
+                   { "documents", 18 }, { "chunks", 740 } }) };
 }
 
 QVariantList demoHistory()
@@ -146,6 +167,14 @@ void streamAnswer(ChartWidget *chart, const QString &text)
                                                       QStringLiteral("action") }) } }) } }));
             chart->finishAssistant();                  // 结束本轮流式（结构化块定稿）
             chart->setTokenUsage(1842, 1510, 332, false);
+            // 上下文圆环：分母是该模型的窗口，分子是「最近一次请求实际送出的 input」
+            // （含缓存读，不是本轮累计）；estimated 只影响浮层上的“本地估算”小注
+            chart->setContextUsage(obj({ { "max", 32768 },
+                                         { "used", 1510 },
+                                         { "left", 31258 },
+                                         { "percent", 5 },
+                                         { "estimated", false },
+                                         { "model", "gridstar/gs-pro-32k" } }));
             chart->setBusy(false);                     // 停止按钮恢复为发送按钮
         });
     };
@@ -192,6 +221,17 @@ int main(int argc, char *argv[])
     chart->setMode(QStringLiteral("auto"));
     chart->setConfigLoaded(true);
     chart->setHistory(demoHistory());
+    // 输入区两件新下拉 + 上下文圆环（值都来自宿主的业务数据，库不自己算）
+    chart->setCategories(demoCategories());
+    chart->setCurrentCategory(QStringLiteral("aircraft"));
+    chart->setKnowledgeBases(demoKnowledgeBases());
+    chart->setCurrentKnowledgeBase(QStringLiteral("*"));
+    chart->setContextUsage(obj({ { "max", 32768 },
+                                 { "used", 12480 },
+                                 { "left", 20288 },
+                                 { "percent", 38 },
+                                 { "estimated", true },
+                                 { "model", "gridstar/gs-pro-32k" } }));
 
     // 3) 接线：信号 → 宿主业务。以下覆盖 ChartWidget 的全部交互信号。
 
@@ -238,6 +278,11 @@ int main(int argc, char *argv[])
     QObject::connect(chart, &ChartWidget::sessionSelected, chart, [chart](const QString &id) {
         Q_UNUSED(id);
         chart->setHistory(demoHistory()); // 拉取该会话历史后回填
+        // 切会话要一起回填的三样：meta.category（syncCategoryFromSession）、
+        // meta.kb_library（setCurrentKnowledgeBase）、以及从历史恢复的上下文圆环
+        chart->syncCategoryFromSession(QStringLiteral("aircraft"));
+        chart->setCurrentKnowledgeBase(QStringLiteral("*"));
+        chart->clearContextUsage(); // 历史里没有 usage.context_used 时就是清空
     });
     QObject::connect(chart, &ChartWidget::sessionRenamed, chart, [](const QString &id) {
         Q_UNUSED(id); // 宿主弹重命名对话框 → PUT /sessions/{id} → setSessions() 刷新
@@ -349,6 +394,225 @@ int main(int argc, char *argv[])
                              { "candidates",
                                obj({ { "providers", QVariant(QVariantList()) },
                                      { "models", QVariant(QVariantList()) } }) } }));
+                     });
+
+    // ---- 分类 / 知识库 / 上下文圆环（webui #category-select / #kb-select / #context-ring）----
+    // 这三个都不联网：宿主把选中值记在自己的会话状态里，下一轮 /chat/stream 带上即可。
+    QObject::connect(chart, &ChartWidget::categorySelected, chart, [chart](const QString &id) {
+        Q_UNUSED(chart);
+        // 真实宿主：记到当前会话的 meta.category；下一轮 POST /chat/stream 的 body 带
+        // selected_category=<id> 与 category_explicit=true（“全部”传空串也算显式）
+        qInfo() << "[host] category ->" << id;
+    });
+    QObject::connect(chart, &ChartWidget::knowledgeBaseSelected, chart,
+                     [chart](const QString &id) {
+                         Q_UNUSED(chart);
+                         // 真实宿主：下一轮 POST /chat/stream 的 body 带 kb_library=<id>；
+                         // 库侧的 __none__ 要映射成空串，* 表示跨库检索
+                         qInfo() << "[host] kb ->" << id;
+                     });
+    // 圆环没有信号：宿主在每轮 done 之后按「最近一次请求实际送出的 input（含缓存读）」与
+    // 当前模型的 context_window 算一次，调 setContextUsage（见上面 streamAnswer 里的例子）；
+    // 切会话时从历史里最近一条带 usage.context_used 的消息恢复，没有就 clearContextUsage。
+
+    // ---- 设置中心「记忆」页：宿主调 /memory/* ----
+    QObject::connect(chart, &ChartWidget::memoryRefreshRequested, chart, [chart] {
+        // 真实宿主：并发 GET /memory/summary + GET /memory/tool-parameters，
+        // 分别回填 setMemorySummary / setMemoryTools
+        Q_UNUSED(chart);
+    });
+    QObject::connect(chart, &ChartWidget::memoryListRequested, chart,
+                     [chart](int page, const QVariantMap &filters) {
+                         // 真实宿主：GET /memory/experiences?status=&kind=&scope=&q=&page=&page_size=
+                         // （filters 里已带 page_size），回填 setMemoryExperiences / setMemoryListFailed
+                         Q_UNUSED(chart);
+                         Q_UNUSED(page);
+                         Q_UNUSED(filters);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryConfigPatchRequested, chart,
+                     [chart](const QVariantMap &updates) {
+                         // 真实宿主：PATCH /memory/config（body 就是 updates），成功后回填 summary
+                         Q_UNUSED(chart);
+                         Q_UNUSED(updates);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryActionRequested, chart,
+                     [chart](const QString &id, const QString &action) {
+                         // 真实宿主：PATCH /memory/experiences/{id}，body {action}，成功后重拉列表与 summary
+                         Q_UNUSED(chart);
+                         Q_UNUSED(id);
+                         Q_UNUSED(action);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryBulkRequested, chart,
+                     [chart](const QStringList &ids, const QString &action) {
+                         // 真实宿主：POST /memory/experiences/bulk，body {ids, action}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(ids);
+                         Q_UNUSED(action);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryDetailRequested, chart, [chart](const QString &id) {
+        // 真实宿主：GET /memory/experiences/{id} 后自己弹详情（示例宿主也可直接用列表里的 payload）
+        Q_UNUSED(chart);
+        Q_UNUSED(id);
+    });
+    QObject::connect(chart, &ChartWidget::memoryFieldSaveRequested, chart,
+                     [chart](const QString &tool, const QString &field, const QVariant &value) {
+                         // 真实宿主：PATCH /memory/tool-parameters/{tool}/{field}，body {value}；
+                         // 成功后重拉 GET /memory/tool-parameters 并 setMemoryTools
+                         Q_UNUSED(chart);
+                         Q_UNUSED(tool);
+                         Q_UNUSED(field);
+                         Q_UNUSED(value);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryFieldDeleteRequested, chart,
+                     [chart](const QString &tool, const QString &field) {
+                         // 真实宿主：DELETE /memory/tool-parameters/{tool}/{field}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(tool);
+                         Q_UNUSED(field);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryToolClearRequested, chart,
+                     [chart](const QString &tool) {
+                         // 真实宿主：DELETE /memory/tool-parameters/{tool}（清掉该工具记住的全部字段）
+                         Q_UNUSED(chart);
+                         Q_UNUSED(tool);
+                     });
+    QObject::connect(chart, &ChartWidget::memoryToolsClearAllRequested, chart, [chart] {
+        // 真实宿主：DELETE /memory/tool-parameters（清空全部工具参数记忆）
+        Q_UNUSED(chart);
+    });
+    QObject::connect(chart, &ChartWidget::memoryMaintenanceRequested, chart,
+                     [chart](const QString &kind) {
+                         // 真实宿主：POST /memory/maintenance/runs，body {kind}；投递成功后重拉 summary
+                         Q_UNUSED(chart);
+                         Q_UNUSED(kind);
+                     });
+
+    // ---- 设置中心「知识库」页：宿主调 /kb/* ----
+    QObject::connect(chart, &ChartWidget::kbRefreshRequested, chart,
+                     [chart](const QString &libraryId) {
+                         // 真实宿主：GET /kb/libraries → setKbLibraries，再按选中库并发
+                         // GET /kb/status?library_id= / GET /kb/folders?library_id= /
+                         // GET /kb/documents?library_id=&folder=
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbFolderChanged, chart,
+                     [chart](const QString &libraryId, const QString &folderId) {
+                         // 真实宿主：只重拉 GET /kb/documents?library_id=&folder=
+                         // （folderId 为 all 时不传 folder，root 传空串，其余传 id）
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(folderId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbLibraryCreateRequested, chart,
+                     [chart](const QString &name) {
+                         // 真实宿主：POST /kb/libraries {name}，回填 setKbLibraries
+                         Q_UNUSED(chart);
+                         Q_UNUSED(name);
+                     });
+    QObject::connect(chart, &ChartWidget::kbLibraryRenameRequested, chart,
+                     [chart](const QString &libraryId, const QString &name) {
+                         // 真实宿主：PATCH /kb/libraries/{id} {name}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(name);
+                     });
+    QObject::connect(chart, &ChartWidget::kbLibraryDeleteRequested, chart,
+                     [chart](const QString &libraryId) {
+                         // 真实宿主：DELETE /kb/libraries/{id}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbFilesImportRequested, chart,
+                     [chart](const QStringList &paths, const QString &libraryId,
+                             const QString &folderId) {
+                         // 真实宿主：逐份 POST /kb/upload?name=&library_id=&folder_id=
+                         // （正文即文件字节，不是 multipart）；上传进度与报错都在宿主侧
+                         Q_UNUSED(chart);
+                         Q_UNUSED(paths);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(folderId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbDirImportRequested, chart,
+                     [chart](const QString &libraryId, const QString &dirPath) {
+                         // 真实宿主：POST /kb/import，body
+                         // {paths:[dirPath], recursive:true, mirror_tree:true, library_id}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(dirPath);
+                     });
+    QObject::connect(chart, &ChartWidget::kbDocumentDeleteRequested, chart,
+                     [chart](const QString &docId) {
+                         // 真实宿主：DELETE /kb/documents/{id}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(docId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbDocumentReindexRequested, chart,
+                     [chart](const QString &docId) {
+                         // 真实宿主：POST /kb/documents/{id}/reindex
+                         Q_UNUSED(chart);
+                         Q_UNUSED(docId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbDocumentMoveRequested, chart,
+                     [chart](const QString &docId, const QString &folderId) {
+                         // 真实宿主：PATCH /kb/documents/{id} {folder_id}（空串 = 库根）
+                         Q_UNUSED(chart);
+                         Q_UNUSED(docId);
+                         Q_UNUSED(folderId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbFolderCreateRequested, chart,
+                     [chart](const QString &libraryId, const QString &parentId,
+                             const QString &name) {
+                         // 真实宿主：POST /kb/folders {library_id, name, parent_id}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(parentId);
+                         Q_UNUSED(name);
+                     });
+    QObject::connect(chart, &ChartWidget::kbFolderRenameRequested, chart,
+                     [chart](const QString &folderId, const QString &name) {
+                         // 真实宿主：PATCH /kb/folders/{id} {name}
+                         Q_UNUSED(chart);
+                         Q_UNUSED(folderId);
+                         Q_UNUSED(name);
+                     });
+    QObject::connect(chart, &ChartWidget::kbFolderDeleteRequested, chart,
+                     [chart](const QString &folderId) {
+                         // 真实宿主：DELETE /kb/folders/{id}（里面的资料上移到上一层，不删文件）
+                         Q_UNUSED(chart);
+                         Q_UNUSED(folderId);
+                     });
+    QObject::connect(chart, &ChartWidget::kbSearchRequested, chart,
+                     [chart](const QString &libraryId, const QString &query) {
+                         // 真实宿主：GET /kb/search?q=&top_k=6&library_id=，回填 setKbSearchResult
+                         Q_UNUSED(chart);
+                         Q_UNUSED(libraryId);
+                         Q_UNUSED(query);
+                     });
+
+    // ---- 顶栏与模型信息 ----
+    QObject::connect(chart, &ChartWidget::launchAppRequested, chart, [chart] {
+        // 真实宿主：弹确认后 POST /gridstar/ensure；launched 为真提示「正在启动 GridStar…」，
+        // 否则提示「GridStar 已在运行」
+        chart->showToast(QStringLiteral("演示模式：不会真的启动主程序"));
+    });
+    QObject::connect(chart, &ChartWidget::endTurnRequested, chart, [chart](const QString &label) {
+        // 真实宿主：POST /sessions/{id}/end-turn，body {label}；失败时提示
+        // 「收尾失败，已按普通选择发送」并改走正常发消息
+        Q_UNUSED(chart);
+        Q_UNUSED(label);
+    });
+    QObject::connect(chart, &ChartWidget::modelMetadataRefreshRequested, chart, [chart] {
+        // 真实宿主：POST /config/model-metadata/refresh → setModelMetadata（失败用 kind="refresh"）
+        Q_UNUSED(chart);
+    });
+    QObject::connect(chart, &ChartWidget::modelLimitsResolveRequested, chart,
+                     [chart](const QString &providerId, const QString &modelId) {
+                         // 真实宿主：POST /config/model-metadata/resolve，body {models:[{id, base_url}]}，
+                         // 把返回的 limits 并进快照的 "limits" 键后 setModelMetadata
+                         Q_UNUSED(chart);
+                         Q_UNUSED(providerId);
+                         Q_UNUSED(modelId);
                      });
 
     // ---- 附件与语音 ----

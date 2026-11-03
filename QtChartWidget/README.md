@@ -22,17 +22,22 @@ QtChartWidget/
 │   ├── markdownview.cpp     Markdown / 代码块 / 表格 / 引用 / 任务列表 / ```json 结构化块
 │   ├── messagewidgets.*     一轮一张卡：正文 + 过程区（思考/工具）+ 底部信息行 + 工具参数表
 │   ├── choiceoverlay.*      选择浮层（模型提问 / 工具参数确认 / 审批共用，浮在输入框上方）
-│   ├── composer.cpp         输入区（三行输入框 / 流式工具栏 / 附件芯片 / 斜杠面板与浮层宿主）
+│   ├── composer.cpp         输入区（三行输入框 / 流式工具栏 / 附件芯片 / 分类与知识库下拉 /
+│   │                        上下文用量圆环 / 斜杠面板与浮层宿主）
 │   ├── trajectoryview.*     轨迹视图（时间轴概览 + 事件账本 + 记录详情，对应 webui 轨迹 tab）
 │   ├── popups.cpp           会话面板（含状态徽标）、模式与模型下拉、斜杠面板、皮肤下拉、Toast
 │   ├── phasepanel.cpp       阶段计划面板（圆点指示器 + 统计串，跑完即收起）
-│   ├── settingsdialog.cpp   设置中心对话框（模型 / 技能 / MCP 工具 / 用量 四个 Tab）
+│   ├── settingsdialog.cpp   设置中心对话框（模型 / 技能 / MCP 工具 / 记忆 / 知识库 / 用量 六个 Tab）
+│   ├── memorypanel.*        记忆页（状态条 / 开关 / 筛选 / 卡片列表 / 参数记忆 / 维护，对应 #panel-memory）
+│   ├── kbpanel.*            知识库页（多库 / 归档树 / 资料清单 / 拖拽归档 / 检索试跑，对应 #panel-kb）
+│   ├── jsoneditor.*         审批参数的 JSON 表格编辑器（四种形状：分部件组 / 键值对 / 值列表 / 对象数组）
 │   ├── usagepanel.*         用量面板（筛选下拉 / 概览卡 / 日历区间浮层 / 明细表，对应 #panel-usage）
 │   ├── usagecharts.*        自绘图表（折线 / 环形 / 堆叠柱 + 缩放平移，对应 webui/charts.js）
 │   └── commonwidgets.*      FlowLayout、Chevron、StatusDot、PulseDot、ThemeSwatch、
 │                            TurnRailDot、TurnRailRow、MiniBar、ConnectionButton、IconPushButton 等
 ├── resources/
-│   ├── icons/               20 个 feather 风格 SVG 图标（viewBox 24×24，运行时着色）
+│   ├── icons/               feather 风格 SVG 图标（viewBox 24×24，运行时着色），
+│   │                        含四个模型能力图标 cap-vision / -video / -audio / -reasoning
 │   ├── Logo.ico             顶栏品牌标（与 webui/Logo.ico 同一张）
 │   └── icons.qrc            资源清单（前缀 /icons，编译进 DLL）
 ├── demo/
@@ -122,6 +127,10 @@ demo.exe --theme silver  # 皮肤：dark / silver / blue
 demo.exe --tab traj      # 直接打开「轨迹」页签（含示例轨迹事件）
 demo.exe --tab models    # 直接打开设置中心的「模型」页（skills / mcp 同理）
 demo.exe --tab usage     # 直接打开设置中心的「用量」页（含示例用量数据）
+demo.exe --tab memory    # 记忆页（状态条 / 开关 / 筛选 / 卡片 / 参数记忆 / 维护）
+demo.exe --tab kb        # 知识库页（多库 / 归档树 / 资料清单 / 检索试跑）
+demo.exe --tab model-form # 模型页并展开第一张模型卡（行式表单 / 数值预设 / 四个能力开关）
+demo.exe --tab ring      # 展开上下文用量圆环的浮层（离屏无法悬停，等价派发 Enter）
 demo.exe --tab usage-cal # 用量页 + 展开日期区间浮层（离屏没有真实点击，等价派发一次点击）
 demo.exe --tab theme     # 展开皮肤下拉浮层（核对浮层样式用）
 demo.exe --tab rail      # 展开轮次列表面板（离屏无法悬停，等价派发 Enter）
@@ -245,7 +254,7 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 
    ```c
    QWidget *qtchartwidget_create(void);   // 返回 new gs::ChartWidget()
-   const char *qtchartwidget_version(void); // "2.2.0"
+   const char *qtchartwidget_version(void); // "2.3.0"
    ```
 
 ### 公开 API 分组（include/chartwidget.h）
@@ -259,9 +268,19 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
   交互模式与模型都是**触发器 + 下拉**（`modeTrigger` / `modelTrigger`，外层 `.modelControl`
   框），指针移入即展开、移开 150ms 收起（webui `bindHoverDropdown`），点击仍是开合切换；
   触发器聚焦时 Enter / Space / 方向键也能展开（webui 原生 button + `handleModelKeys`）；
-  正文以 `/` 开头就弹出**斜杠面板**（`#slash-menu`）：根级三组（指令：模型 / 导出对话；技能：不启用技能
-  + 各技能），选「模型」会换成带搜索框的可筛选模型列表。选中技能后走 `skillSelected`，
+  正文以 `/` 开头就弹出**斜杠面板**（`#slash-menu`）：根级是「指令」组（模型 / 导出对话）
+  加按专业分类分组的技能（选具体分类时只列本分类 + common + 不启用技能），
+  选「模型」会换成带搜索框的可筛选模型列表。选中技能后走 `skillSelected`，
   输入框上方出现可清除的技能芯片（`skillChip`）；面板里的「导出对话」发 `sessionExportRequested`
+- 专业分类 / 知识库下拉（webui `#category-select` / `#kb-select`）：`setCategories` /
+  `setCurrentCategory` / `currentCategory` / `syncCategoryFromSession` /
+  `setKnowledgeBases` / `setCurrentKnowledgeBase` / `currentKnowledgeBase`，
+  信号 `categorySelected` / `knowledgeBaseSelected`。知识库下拉自带
+  「不使用知识库」（`__none__`）与「全部知识库」（`*`）两项；
+  **五个浮层（模式 / 模型 / 分类 / 知识库 / 斜杠面板）互斥**，统一收在 `openDropdown()`
+- 上下文用量圆环（webui `#context-ring`）：`setContextUsage(usage)` / `clearContextUsage()`，
+  `usage` 形如 `{max, used, left, percent, estimated, model}`；悬停或聚焦时在上方弹浮层
+  （上限 / 已用 / 剩余 / 进度条 / 「本地估算」小注），无数据时只留灰底环
 - 附件：`addAttachments` / `clearAttachments` / `setVoiceEnabled` / `setVoiceRecording`
   （条目与 webui 同构：`{id, name, size, ext, kind, path, uploading}`；
   `kind=image` 且 `path`/`url` 指向本地文件时芯片显示 22×22 缩略图，其余显示扩展名）
@@ -281,7 +300,31 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 - 轨迹视图：`setTrajectoryEvents` / `appendTrajectoryEvents`
 - 设置中心：`setSettingsDraft` / `setDiscoveredModels` / `setProviderBusy` /
   `setSettingsSkills` / `setMcpTools` / `setUsageStats` / `setUsageLoadFailed` /
-  `openSettings` / `settingsSaved`
+  `setModelMetadata` / `setModelMetadataFailed` / `openSettings` / `settingsSaved`
+  （六个 Tab：模型 / 技能 / MCP 工具 / 记忆 / 知识库 / 用量），信号 `settingsOpened(tab)`
+  会在设置中心被打开时告知当前 Tab（含用户点控件自带设置按钮那一路）
+- 模型信息快照：`setModelMetadata(snapshot)` / `setModelMetadataFailed(kind, error, httpStatus)`，
+  信号 `modelMetadataRefreshRequested()`。注意 `GET /config/model-metadata` 返回的
+  `models`/`providers`/`hosts` 是**计数**，每个模型的上限与能力来自
+  `POST /config/model-metadata/resolve`；宿主把 resolve 结果放进快照的 `limits` 键
+  （或 `models` 数组）就能回填上限与能力（只填空字段、能力只正向勾选）
+- 记忆页：`setMemorySummary` / `setMemoryExperiences` / `setMemoryListFailed` /
+  `setMemoryTools` / `setMemoryStatusText`；信号 `memoryRefreshRequested` /
+  `memoryListRequested(page, filters)` / `memoryConfigPatchRequested` /
+  `memoryActionRequested(id, action)` / `memoryBulkRequested(ids, action)` /
+  `memoryDetailRequested` / `memoryFieldSaveRequested` / `memoryFieldDeleteRequested` /
+  `memoryToolClearRequested` / `memoryToolsClearAllRequested` /
+  `memoryMaintenanceRequested(kind)`
+- 知识库页：`setKbLibraries` / `setKbStatus` / `setKbFolders(folders, tree)` /
+  `setKbDocuments(documents, total)` / `setKbSearchResult` / `setKbStatusText`；
+  信号 `kbRefreshRequested` / `kbFolderChanged` / `kbLibraryCreateRequested` /
+  `kbLibraryRenameRequested` / `kbLibraryDeleteRequested` / `kbFilesImportRequested` /
+  `kbDirImportRequested` / `kbDocumentDeleteRequested` / `kbDocumentReindexRequested` /
+  `kbDocumentMoveRequested` / `kbFolderCreateRequested` / `kbFolderRenameRequested` /
+  `kbFolderDeleteRequested` / `kbSearchRequested`。
+  **目录导入请接 `kbDirImportToFolderRequested(libraryId, dirPath, folderId)`**：
+  它带当前选中的归档目录（空串 = 库根），KbPanel 现在只发这个；旧的
+  `kbDirImportRequested` 保留声明但不再 emit
 - provider 草稿里的 `ssl_verify` 支持三档（与 webui `data-provider-field="ssl_verify"` 同构）：
   `true`（默认，系统证书）/ `false`（跳过验证）/ 字符串（自定义 CA 证书路径，此时右侧多出
   「CA 证书路径」输入行，切回前两档时该行收起并记住上次路径）。
@@ -472,6 +515,147 @@ live 模式下 `/fail`、`/approve`、`/workflow`、`/options`、`/params` 这�
 - 后台续跑 / 断线重连 / 停止时的 `POST /sessions/{id}/cancel`
 - 皮肤持久化：webui 存 localStorage，宿主自行落盘并在启动时 `setTheme`
 - 轨迹：收到 `trajectoryReloadRequested` 后拉 `/trajectory` 并 `setTrajectoryEvents`
+- 专业分类（输入区）：用户改分类发 `categorySelected`，宿主把它存成当前会话的
+  `meta.category` 镜像，并在下一轮 `/chat/stream` 的 body 里带 `selected_category` +
+  `category_explicit=true`（见下面「切会话要推的三样」）。分类目录本身不是接口，
+  webui 是把 `/skills` 的 `category` 去重后拼出来的（demo 的 `categoriesFromSkills`）
+- 知识库（输入区）：`knowledgeBaseSelected` 的值为 `__none__`（不用）/ `*`（跨库）/ 具体库 id，
+  宿主在发起本轮时带上 `kb_library`；**后端用空串表示“不使用知识库”，
+  所以 `__none__` 必须映射成空串再发**，`*` 原样发
+- 切会话要推的三样（webui `loadSession`）：
+  1. **`meta.category`** —— 用 `syncCategoryFromSession(meta.category)` 回填（它无条件覆盖，
+     对应 app.js `syncCategoryFromMeta`），同时清掉宿主自己的“用户显式选过”标记；
+  2. **`meta.kb_library`** —— `setCurrentKnowledgeBase()`，注意把后端的空串映射回 `__none__`
+     （`null`/缺失按 `*` 处理）；
+  3. **上下文用量圆环** —— 从历史里**最后一条**带 `usage.context_used` 的消息恢复
+     `setContextUsage({used, max, left, percent, model})`，一条都没有就 `clearContextUsage()`
+     （对应 app.js `restoreContextRing`）。`max` 取当前模型的 `context_window`
+- 顶栏品牌图标：`launchAppRequested` → 宿主弹确认并 `POST /gridstar/ensure`，
+  成功提示 `正在启动 GridStar…`、已在跑则提示 `GridStar 已在运行`
+- 「结束」类选项：`endTurnRequested(label)` → 宿主 `POST /sessions/{id}/end-turn` 并落一条
+  用户消息；库侧已在本地收尾（关浮层、标停止、藏计划面板、追加用户消息），不开新一轮
+- 记忆页 / 知识库页：共二十多条信号，逐条对照见下面两张表
+- 模型信息快照：`modelMetadataRefreshRequested` → `POST /config/model-metadata/refresh`
+  后回填；失败用 `setModelMetadataFailed("refresh", msg, httpStatus)`。
+  `modelLimitsResolveRequested(provider, model)` → `POST /config/model-metadata/resolve`
+  （body `{models:[{id, base_url}]}`），把返回的 `limits` **并进上一次的快照**再
+  `setModelMetadata`（resolve 只给 `{limits:{...}}`，直接拿去覆盖会把状态行顶掉）。
+  注意：`GET /config/model-metadata` 没有对应信号（“打开设置中心”库不发通知），
+  宿主应在每次自己打开设置前拉一次
+
+#### 记忆页：信号 → 请求对照（`/memory/*`）
+
+| 信号 | 宿主发什么请求 | 回填 |
+| --- | --- | --- |
+| `memoryRefreshRequested()` | 并发 `GET /memory/summary` + `GET /memory/tool-parameters` | `setMemorySummary` / `setMemoryTools` |
+| `memoryListRequested(page, filters)` | `GET /memory/experiences?status=&kind=&scope=&q=&page=&page_size=`（空值不下发；`filters` 里已带 `page_size`） | `setMemoryExperiences`，失败 `setMemoryListFailed` |
+| `memoryConfigPatchRequested(updates)` | `PATCH /memory/config`，body 就是 `updates` | `setMemorySummary`（+ 重新 `GET /config` 记下新 revision） |
+| `memoryActionRequested(id, action)` | `PATCH /memory/experiences/{id}`，body `{action}`（409 = 状态已变） | 重拉列表 + summary |
+| `memoryBulkRequested(ids, action)` | `POST /memory/experiences/bulk`，body `{ids, action}` | 同上 |
+| `memoryDetailRequested(id)` | `GET /memory/experiences/{id}`（demo 直接从列表里的 `payload` 弹框，省一次请求） | 宿主自弹详情 |
+| `memoryFieldSaveRequested(tool, field, value)` | `PATCH /memory/tool-parameters/{tool}/{field}`，body `{value}`（只改值，不新增字段） | 重拉 `GET /memory/tool-parameters` → `setMemoryTools` |
+| `memoryFieldDeleteRequested(tool, field)` | `DELETE /memory/tool-parameters/{tool}/{field}`（204） | 同上 |
+| `memoryToolClearRequested(tool)` | `DELETE /memory/tool-parameters/{tool}`（204） | 同上 |
+| `memoryToolsClearAllRequested()` | `DELETE /memory/tool-parameters` | 同上 |
+| `memoryMaintenanceRequested(kind)` | `POST /memory/maintenance/runs`，body `{kind}`（`extract`/`governance`，返回 202） | 重拉 summary；进度靠面板自己的轮询（它会反复发 `memoryRefreshRequested`） |
+
+#### 知识库页：信号 → 请求对照（`/kb/*`）
+
+| 信号 | 宿主发什么请求 | 回填 |
+| --- | --- | --- |
+| `kbRefreshRequested(libraryId)` | `GET /kb/libraries`，再 `GET /kb/status?library_id=`，最后并发 `GET /kb/folders?library_id=` / `GET /kb/documents?library_id=&folder=` | `setKbLibraries` / `setKbStatus` / `setKbFolders(folders, tree)` / `setKbDocuments(docs, status.documents)` |
+| `kbFolderChanged(libraryId, folderId)` | **只**重拉 `GET /kb/documents?library_id=&folder=` | `setKbDocuments` |
+| `kbLibraryCreateRequested(name)` | `POST /kb/libraries` `{name}` | `setKbLibraries`（响应里的 `library.id` 就是新库，面板会自己选过去） |
+| `kbLibraryRenameRequested(id, name)` | `PATCH /kb/libraries/{id}` `{name}` | `setKbLibraries` |
+| `kbLibraryDeleteRequested(id)` | `DELETE /kb/libraries/{id}` | `setKbLibraries` |
+| `kbFilesImportRequested(paths, lib, folder)` | **逐份** `POST /kb/upload?name=&library_id=&folder_id=`（正文 = 文件字节） | 全部完成后重拉 documents + libraries |
+| `kbDirImportRequested(lib, dir)` | `POST /kb/import`，body `{paths:[dir], recursive:true, mirror_tree:true, library_id}` | 完成后重拉 folders + documents |
+| `kbDocumentDeleteRequested(docId)` | `DELETE /kb/documents/{id}` | 重拉 |
+| `kbDocumentReindexRequested(docId)` | `POST /kb/documents/{id}/reindex` | 重拉 |
+| `kbDocumentMoveRequested(docId, folderId)` | `PATCH /kb/documents/{id}` `{folder_id}`（空串 = 库根） | 重拉 folders + documents |
+| `kbFolderCreateRequested(lib, parent, name)` | `POST /kb/folders` `{library_id, name, parent_id}` | 重拉 folders |
+| `kbFolderRenameRequested(folderId, name)` | `PATCH /kb/folders/{id}` `{name}` | 重拉 folders + documents |
+| `kbFolderDeleteRequested(folderId)` | `DELETE /kb/folders/{id}`（里面的资料上移一层，不删文件） | 重拉，并把当前目录收回 `all` |
+| `kbSearchRequested(lib, q)` | `GET /kb/search?q=&top_k=6&library_id=` | `setKbSearchResult` |
+
+两个容易踩的点：
+
+- **`/kb/import` 与 `/kb/upload` 不是一回事**。`/kb/import` 收的是**后端机器上的本机路径**
+  （JSON 里的 `paths`，后端自己递归扫描 + 建索引），适合目录导入；`/kb/upload` 收的是
+  **文件字节**（`Content-Type: application/octet-stream`，文件名与目标库/目录走 query），
+  适合宿主传本地文件。后端**不支持 multipart 表单**，别按表单发
+- `folder` 参数的三种取值：`all` → **不传** `folder`（后端列全库）；`root` → 传 `folder=`
+  （空串，只列库根）；其余 → 传真实文件夹 id。「全部资料」那行的数字来自 `status.documents`，
+  所以 `setKbDocuments` 的第二个参数要给库级总量，不是当前列表长度
+- 上传进度：`/kb/upload` 是整份 POST，没有分片，宿主只能在状态行上报「第 N/M 份」；
+  单文件上限 64 MB（后端 `KB_MAX_FILE_BYTES`）。demo 就是这样处理的，没做百分比进度条
+
+#### 最小接线：分类 + 知识库 + 上下文圆环
+
+```cpp
+// 宿主侧状态（对应 webui state.selectedCategory / categoryTouched / kbState.selected）
+QString category;            // 空串 = 全部
+bool categoryTouched = false;
+QString kbLibrary = QStringLiteral("*");   // __none__ / * / 具体库 id
+
+// 1) 两个下拉：只记在宿主侧（分类与知识库都没有独立的 meta 写接口）
+connect(chart, &ChartWidget::categorySelected, chart, [&](const QString &id) {
+    category = id;
+    categoryTouched = true;   // 用户自己点的，等价 webui categoryTouched
+});
+connect(chart, &ChartWidget::knowledgeBaseSelected, chart, [&](const QString &id) {
+    kbLibrary = id;
+});
+
+// 2) 发消息时带出去（POST /chat/stream 的 body）
+QJsonObject body;
+body.insert(QStringLiteral("selected_category"), category);
+body.insert(QStringLiteral("category_explicit"), categoryTouched);
+body.insert(QStringLiteral("kb_library"),
+            kbLibrary == QLatin1String("__none__") ? QString() : kbLibrary);
+
+// 3) 切会话：三样一起回填（meta / messages 来自 GET /sessions/{id}）
+categoryTouched = false;
+category = meta.value(QStringLiteral("category")).toString();
+chart->syncCategoryFromSession(category);          // 无条件覆盖
+const QString kb = meta.value(QStringLiteral("kb_library")).toString();
+kbLibrary = kb.isEmpty() ? QStringLiteral("__none__") : kb;   // 后端空串 = 不使用
+chart->setCurrentKnowledgeBase(kbLibrary);
+
+// 4) 圆环恢复：历史里最后一条带 usage.context_used 的消息，一条都没有就清空
+double used = 0.0;
+for (int i = messages.size() - 1; i >= 0; --i) {
+    const QVariantMap usage = messages.at(i).toMap().value("usage").toMap();
+    if (usage.value("context_used").toDouble() > 0.0) {
+        used = usage.value("context_used").toDouble();
+        break;
+    }
+}
+if (used <= 0.0) {
+    chart->clearContextUsage();
+} else {
+    const qint64 window = 32768;            // 当前模型配置的 context_window
+    chart->setContextUsage(QVariantMap{
+        { QStringLiteral("max"), window },
+        { QStringLiteral("used"), qint64(used) },
+        { QStringLiteral("left"), qMax<qint64>(0, window - qint64(used)) },
+        { QStringLiteral("percent"), int(qRound(used / double(window) * 100.0)) },
+        { QStringLiteral("estimated"), false },
+        { QStringLiteral("model"), chart->currentModel() },
+    });
+}
+```
+
+一轮聊完之后同理：`done` / `token_usage` 事件里就带着 `context_used`（最近一次请求实际
+送出的 input，**含缓存读**，不是本轮累计）、`context_window`、`context_estimated`，直接拿它们
+组装上面那个 map 调 `setContextUsage` 即可（demo 的 `applyContextUsage` 就是这三行）。
+
+#### 接线现状
+
+上面两张表里所有信号都已经打通：`include/chartwidget.h` 声明 → `SettingsDialog` emit →
+`ChartWidget` 转发，三段齐全（记忆页 11 个、知识库页 14 个，共 24 条 `connect`）。
+如果你在更早的 2.3.0 构建上看到记忆页 / 知识库页點刷新没反应，那是转发还没补的时候；
+重新构建一次即可。
 
 ### 线程模型
 
@@ -524,7 +708,7 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 测试进程自行设置 `QT_QPA_PLATFORM=offscreen`，不需要显示器；也不需要把 Qt 的 `bin`
 加进 PATH（`QtChartWidget.dll` 与测试同目录）。
 
-覆盖范围（55 项，含 init/cleanup）：
+覆盖范围（72 项，含 init/cleanup）：
 
 | 分组 | 用例 |
 | --- | --- |
@@ -539,7 +723,12 @@ bin\qtchartwidget_tests.exe -o report.txt,txt     # 报告写文件（CI 用）
 | 工具项与口径 | `toolArgsTableAndResultFormat`（参数表、JSON 美化、失败判定、限高滚动容器）、`askUserToolCallIsNotRendered`（询问类调用不落成工具条目）、`usageModelLabelMapping`（用量弹层自动映射供应商名称） |
 | 嵌入作用域 | `escScopedToOwnWidget`（宿主窗口的 Esc 不被吞、也不误关浮层）、`zoomShortcutScopedToWidget`（快捷键限定 WidgetWithChildren） |
 | 窄宿主 / 浮层布局 | `overlayGeometryMatchesWebui`（浮层几何与 webui 对齐）、`choiceOverlayFitsNarrowWindow` / `choiceOverlayShowsAboveComposer`、`openOptionsOverlay`、`settingsDialogCompactLayout` / `confirmDialogFitsNarrowSettings`（设置中心窄屏单列、确认框不越界）、`usagePopupsFitNarrowHost`、`sessionPanelReflowsWhileOpen`、`attachChipFitsNarrowWindow` / `bubbleAttachmentThumbFitsNarrowWindow`、`bubbleDetailPopupFitsNarrowHost` / `bubbleDetailPopupAnchoring`、`toastFitsWrappedText`、`markdownTableSizesToContent` |
-| 可达性 / 线程 | `keyboardReachability`（图标按钮可 Tab + `accessibleName` 取 toolTip、过程行 Enter 展开、`.session-select` 键盘选中）、`guiThreadGuard`（非 GUI 线程推送被丢弃，仅发布构建有效） |
+| 可行超 / 线程 | `keyboardReachability`（图标按钮可 Tab + `accessibleName` 取 toolTip、过程行 Enter 展开、`.session-select` 键盘选中）、`guiThreadGuard`（非 GUI 线程推送被丢弃，仅发布构建有效） |
+| 输入区新件 | `contextRingUsage`（圆环与浮层：百分比 / 上限 / 已用 / 剩余 / 本地估算，空态全变「—」）、`categoryDropdown`（选中发信号；`syncCategoryFromSession` 无条件覆盖）、`knowledgeBaseDropdown`（内置「不使用 / 全部」与各库编号）、`dropdownsMutuallyExclusive`（模式→模型、分类→知识库两组互斥）、`brandMarkLaunchesApp`（品牌图标是按钮、点击发 `launchAppRequested`） |
+| 记忆页 | `memoryPanelStatus`（正常 / 降级 / 关闭三态的文案与 tone，notice 追加）、`memoryPanelSwitchesAndFilters`（三开关联动禁用、工具栏变化回 page=1 且空值键不下发、搜索 300ms 去抖）、`memoryPanelBulkAndCards`（批量条只在有 candidate 时出现、本页全选、卡片动作穿二次确认、加载更多）、`memoryPanelToolsEditing`（字段编辑、类型校验：原值布尔填 `abc` 不发信号且标 invalid） |
+| 知识库页 | `kbPanelTreeAndDocs`（归档树层级与选中态、切目录发 `kbFolderChanged`、资料行重建 / 删除）、`kbPanelSearch`（回车发请求、参数命中与文本命中两块） |
+| 审批与结束语义 | `jsonTableEditor`（参数旁的「表格」按钮 → 对话框 → 改单元格 → 回写可解析的 JSON）、`endTurnOptionChosen`（命中收尾措辞只发 `endTurnRequested`；含「继续」一票否决）、`historyResumeSuppressesAsk`（`setHistory(msg, true)` 不弹已答询问） |
+| 模型元数据 | `modelMetadataSignals`（「更新模型信息」发刷新；新增模型发 `modelLimitsResolveRequested` 并带对 provider / id）、`settingsOpenedNotified`（打开设置中心告知当前 Tab）、`kbDirImportCarriesFolder`（目录导入带当前归档目录） |
 | 性能 | `renderPerformance`（长会话下的流式分片 / 轨迹首次建账本 / 增量追加 / 逐字搜索 / 滚一屏 / 选中一行：数字打日志，断言拦「退回全量重建」）、`trajectoryLedgerVirtualization`（控件数与记录数解耦、滚动换行、选中态跨窗口保留、滚动到底仍能命中） |
 
 约定：新增公开 API 或改动其可观察行为时，同步补/改用例；测试断言的是**行为**（信号、文本、

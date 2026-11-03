@@ -4,39 +4,42 @@
 #include "popups.h"
 #include "theme.h"
 #include "usagepanel.h"
+#include "memorypanel.h"
+#include "kbpanel.h"
 
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
 #include <QDesktopWidget>
+#include <QElapsedTimer>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QIntValidator>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QLocale>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QSet>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QSpacerItem>
 #include <QStackedWidget>
 #include <QUrl>
 #include <QVBoxLayout>
+#include <QVariantAnimation>
+
+#include <functional>
 
 namespace gs {
 
 namespace {
-
-const char *const kCapabilities[5][2] = {
-    {"tools", "Tools"},
-    {"parallel_tools", "Parallel tools"},
-    {"reasoning", "Reasoning"},
-    {"vision", "Vision"},
-    {"stream_usage", "Stream usage"},
-};
 
 QWidget *styledWidget(const QString &cls, QWidget *parent = nullptr)
 {
@@ -206,7 +209,661 @@ QLabel *emptyHint(const QString &text)
     return label;
 }
 
+// ---- 模型页：能力项 / 数值预设 / 格式化 --------------------------------------
+// 规格以 webui/app.js 的 HEAD 为准（CAPABILITIES / formatTokens / applyModelLimits /
+// numberField / renderModelCard 一带），不要按旧提交的记忆改。
+
+struct CapabilityDef
+{
+    const char *key;   // model.capabilities 里的键
+    const char *label; // 界面文案
+    const char *icon;  // :/icons/<icon>.svg
+};
+
+// app.js CAPABILITIES：界面只摆这四项中文
+const CapabilityDef kModelCapabilities[4] = {
+    {"vision", "视觉", "cap-vision"},
+    {"video", "视频", "cap-video"},
+    {"audio", "音频", "cap-audio"},
+    {"reasoning", "推理", "cap-reasoning"},
+};
+
+// 后端 schema 里的旧键：界面不展示，但新模型对象里仍要摆上 false，兼容存量 config.json
+const char *const kLegacyCapabilityKeys[] = {"tools", "parallel_tools", "stream_usage"};
+
+// 数值字段的预设档位：(原值, 档位名)
+typedef QList<QPair<int, QString> > NumPresets;
+
+// app.js CONTEXT_PRESETS / OUTPUT_PRESETS。档位名是约定叫法（64K 对应 65536，
+// 不是 formatTokens 算出来的 65.5K），所以写死配对。
+NumPresets contextPresets()
+{
+    NumPresets list;
+    list << qMakePair(65536, QStringLiteral("64K"))
+         << qMakePair(131072, QStringLiteral("128K"))
+         << qMakePair(200000, QStringLiteral("200K"))
+         << qMakePair(262144, QStringLiteral("256K"))
+         << qMakePair(1048576, QStringLiteral("1M"));
+    return list;
+}
+
+NumPresets outputPresets()
+{
+    NumPresets list;
+    list << qMakePair(8192, QStringLiteral("8K"))
+         << qMakePair(16384, QStringLiteral("16K"))
+         << qMakePair(32768, QStringLiteral("32K"))
+         << qMakePair(65536, QStringLiteral("64K"))
+         << qMakePair(131072, QStringLiteral("128K"))
+         << qMakePair(262144, QStringLiteral("256K"));
+    return list;
+}
+
+// app.js formatTokens：32K / 1M。按十进制量级切档，1,000,000 就是 1M；
+// 拿 1024 进制去切会把 1M 窗口显示成 976.6K。
+QString formatTokens(qint64 value)
+{
+    if (value >= 1000000)
+        return QStringLiteral("%1M").arg(QString::number(qRound(value / 100000.0) / 10.0));
+    if (value >= 1000)
+        return QStringLiteral("%1K").arg(QString::number(qRound(value / 100.0) / 10.0));
+    return QString::number(value);
+}
+
+// Number(value).toLocaleString("en-US")
+QString formatCount(qint64 value)
+{
+    return QLocale(QLocale::English, QLocale::UnitedStates).toString(value);
+}
+
+// app.js formatMetaDate：2026-10-30 → 2026年10月30日
+QString formatMetaDate(const QString &value)
+{
+    const QStringList parts = value.split(QLatin1Char('-'));
+    if (parts.size() != 3)
+        return value;
+    return QStringLiteral("%1年%2月%3日")
+        .arg(parts.at(0))
+        .arg(parts.at(1).toInt())
+        .arg(parts.at(2).toInt());
+}
+
+// 「provider/id」：能力项的「用户改过」记忆按它记
+QString capKeyOf(const QVariantMap &model)
+{
+    return model.value(QStringLiteral("provider")).toString() + QLatin1Char('/')
+        + model.value(QStringLiteral("id")).toString();
+}
+
+// webui 把「用户改过哪些模型的能力项」记在 localStorage：
+// 否则用户取消勾选后，下次打开设置又会被元数据自动勾回去。这里进程内记一份。
+QSet<QString> &capsTouchedSet()
+{
+    static QSet<QString> touched;
+    return touched;
+}
+
+// app.js applyModelCapabilities：只把数据里说支持的勾上，从不反向取消；
+// 用户手动改过的模型不碰。
+bool applyModelCapabilities(QVariantMap &model, const QVariantMap &caps)
+{
+    if (caps.isEmpty())
+        return false;
+    if (capsTouchedSet().contains(capKeyOf(model)))
+        return false;
+    QVariantMap capabilities = model.value(QStringLiteral("capabilities")).toMap();
+    bool changed = false;
+    for (int i = 0; i < 4; ++i) {
+        const QString key = QLatin1String(kModelCapabilities[i].key);
+        if (caps.value(key).toBool() && !capabilities.value(key).toBool()) {
+            capabilities.insert(key, true);
+            changed = true;
+        }
+    }
+    if (changed)
+        model.insert(QStringLiteral("capabilities"), capabilities);
+    return changed;
+}
+
+// app.js applyModelLimits：上限只填空字段；最大输出不得超过上下文窗口。
+bool applyModelLimits(QVariantMap &model, const QVariantMap &limits)
+{
+    if (limits.isEmpty())
+        return false;
+    bool changed = false;
+    const int context = limits.value(QStringLiteral("context_window")).toInt();
+    const int output = limits.value(QStringLiteral("max_output_tokens")).toInt();
+    if (model.value(QStringLiteral("context_window")).toInt() <= 0 && context > 0) {
+        model.insert(QStringLiteral("context_window"), context);
+        changed = true;
+    }
+    if (model.value(QStringLiteral("max_output_tokens")).toInt() <= 0 && output > 0) {
+        const int own = model.value(QStringLiteral("context_window")).toInt();
+        const int window = own > 0 ? own : context;
+        if (window > 0) {
+            model.insert(QStringLiteral("max_output_tokens"), qMin(output, window));
+            changed = true;
+        }
+    }
+    if (applyModelCapabilities(model, limits.value(QStringLiteral("capabilities")).toMap()))
+        changed = true;
+    return changed;
+}
+
+// app.js autoLimit：数值框的占位文案
+QString autoLimitText(const QVariantMap &limits, const QString &field)
+{
+    const int value = limits.value(field).toInt();
+    return value > 0 ? QStringLiteral("自动 · %1").arg(formatTokens(value))
+                     : QStringLiteral("保存时自动识别");
+}
+
+void unrestrictWidth(QWidget *w)
+{
+    w->setMinimumWidth(0);
+    w->setMaximumWidth(QWIDGETSIZE_MAX);
+}
+
+// .settings-field：左列标签（主标题 + 一行小字说明），右列控件；
+// @media(max-width:640px) 时改成上下叠（标签在上、控件在下）
+class SettingsField : public QWidget
+{
+public:
+    SettingsField(const QString &label, const QString &hint, QWidget *control,
+                  QWidget *parent = nullptr)
+        : QWidget(parent), m_control(control)
+    {
+        m_grid = new QGridLayout(this);
+        m_grid->setContentsMargins(0, 0, 0, 0);
+        m_grid->setHorizontalSpacing(gs::scaledPx(14));
+        m_grid->setVerticalSpacing(gs::scaledPx(6));
+
+        m_text = new QWidget(this);
+        auto *box = new QVBoxLayout(m_text);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setSpacing(gs::scaledPx(3));
+        if (!label.isEmpty())
+            box->addWidget(plainLabel(QStringLiteral("fieldLabel"), label));
+        if (!hint.isEmpty()) {
+            QLabel *hintLabel = plainLabel(QStringLiteral("fieldHint"), hint);
+            hintLabel->setWordWrap(true);
+            box->addWidget(hintLabel);
+        }
+
+        control->setParent(this);
+        control->setMaximumWidth(gs::scaledPx(460)); // .settings-field>input{max-width:460px}
+        place(false);
+    }
+
+    void setCompact(bool compact)
+    {
+        if (m_compact == compact)
+            return;
+        place(compact);
+    }
+
+private:
+    void place(bool compact)
+    {
+        m_compact = compact;
+        if (m_grid->indexOf(m_text) >= 0)
+            m_grid->removeWidget(m_text);
+        if (m_grid->indexOf(m_control) >= 0)
+            m_grid->removeWidget(m_control);
+        if (compact) {
+            unrestrictWidth(m_text);
+            unrestrictWidth(m_control);
+            m_grid->addWidget(m_text, 0, 0, 1, 2);
+            m_grid->addWidget(m_control, 1, 0, 1, 2);
+            m_grid->setColumnStretch(0, 1);
+            m_grid->setColumnStretch(1, 0);
+        } else {
+            // .settings-field{grid-template-columns:minmax(96px,104px) minmax(0,1fr)}
+            m_text->setFixedWidth(gs::scaledPx(104));
+            m_control->setMaximumWidth(gs::scaledPx(460));
+            m_grid->addWidget(m_text, 0, 0, 1, 1, Qt::AlignVCenter);
+            m_grid->addWidget(m_control, 0, 1, 1, 1, Qt::AlignVCenter);
+            m_grid->setColumnStretch(0, 0);
+            m_grid->setColumnStretch(1, 1);
+        }
+    }
+
+    QGridLayout *m_grid = nullptr;
+    QWidget *m_text = nullptr;
+    QWidget *m_control = nullptr;
+    bool m_compact = false;
+};
+
+// .settings-toggle 里的开关：34×20 胶囊 + 14px 圆钮（checked 时青底白钮）
+class SwitchToggle : public QWidget
+{
+public:
+    explicit SwitchToggle(QWidget *parent = nullptr) : QWidget(parent)
+    {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::TabFocus);
+        setFixedSize(sizeHint());
+        m_anim = new QVariantAnimation(this);
+        m_anim->setDuration(160); // transition:background .16s ease
+        connect(m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &value) {
+            m_offset = value.toReal();
+            update();
+        });
+    }
+
+    // 只回填外观，不触发 onToggled
+    void setChecked(bool checked)
+    {
+        m_checked = checked;
+        m_offset = checked ? 1.0 : 0.0;
+        update();
+    }
+
+    bool isChecked() const { return m_checked; }
+
+    std::function<void(bool)> onToggled;
+
+    QSize sizeHint() const override
+    {
+        return QSize(gs::scaledPx(34), gs::scaledPx(20));
+    }
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const Palette &p = gs::palette();
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const qreal radius = height() / 2.0;
+        const QRectF track = QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5);
+        const QColor border = m_checked ? p.cyan : (m_hover ? p.muted : p.lineStrong);
+        painter.setPen(QPen(border, 1.0));
+        painter.setBrush(m_checked ? p.cyan : p.surface3);
+        painter.drawRoundedRect(track, radius, radius);
+
+        const qreal knob = qMax<qreal>(gs::scaledPx(10), track.height() - gs::scaledPx(6));
+        const qreal inset = (track.height() - knob) / 2.0;
+        const qreal travel = track.width() - knob - inset * 2.0;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(m_checked ? QColor(Qt::white) : p.muted);
+        painter.drawEllipse(QRectF(track.left() + inset + travel * m_offset,
+                                   track.top() + inset, knob, knob));
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        if (rect().contains(event->pos()))
+            toggle();
+    }
+
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Space || event->key() == Qt::Key_Return
+            || event->key() == Qt::Key_Enter) {
+            toggle();
+            return;
+        }
+        QWidget::keyPressEvent(event);
+    }
+
+    void enterEvent(QEvent *event) override
+    {
+        m_hover = true;
+        update();
+        QWidget::enterEvent(event);
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        m_hover = false;
+        update();
+        QWidget::leaveEvent(event);
+    }
+
+private:
+    void toggle()
+    {
+        m_checked = !m_checked;
+        m_anim->stop();
+        m_anim->setStartValue(m_offset);
+        m_anim->setEndValue(m_checked ? 1.0 : 0.0);
+        m_anim->start();
+        if (onToggled)
+            onToggled(m_checked);
+    }
+
+    QVariantAnimation *m_anim = nullptr;
+    bool m_checked = false;
+    bool m_hover = false;
+    qreal m_offset = 0.0;
+};
+
+// .num-listbox：预设档位面板。用 Qt::Popup 弹出：点外面自动收起，也不被滚动区裁掉
+class NumPanel : public QFrame
+{
+public:
+    explicit NumPanel(QWidget *parent) : QFrame(parent, Qt::Popup)
+    {
+        setClass(this, QStringLiteral("numListbox"));
+        setAttribute(Qt::WA_StyledBackground, true);
+        m_layout = new QVBoxLayout(this);
+        m_layout->setContentsMargins(5, 5, 5, 5);
+        m_layout->setSpacing(0);
+    }
+
+    void setPresets(const NumPresets &presets)
+    {
+        while (QLayoutItem *item = m_layout->takeAt(0)) {
+            if (QWidget *widget = item->widget())
+                widget->deleteLater();
+            delete item;
+        }
+        m_options.clear();
+        for (int i = 0; i < presets.size(); ++i) {
+            const int value = presets.at(i).first;
+            auto *button = new QPushButton(this);
+            setClass(button, QStringLiteral("numOption"));
+            button->setProperty("value", value);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setFocusPolicy(Qt::TabFocus);
+            button->setMinimumWidth(gs::scaledPx(180));
+            auto *box = new QHBoxLayout(button);
+            box->setContentsMargins(gs::scaledPx(8), gs::scaledPx(7), gs::scaledPx(8),
+                                    gs::scaledPx(7));
+            box->setSpacing(gs::scaledPx(16));
+            auto *name = plainLabel(QStringLiteral("numOptionText"), presets.at(i).second);
+            auto *count = plainLabel(QStringLiteral("numOptionValue"), formatCount(value));
+            count->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+            box->addWidget(name, 1);
+            box->addWidget(count, 0);
+            connect(button, &QPushButton::clicked, this, [this, value] {
+                hide();
+                if (onChosen)
+                    onChosen(value);
+            });
+            m_layout->addWidget(button);
+            m_options.append(button);
+        }
+    }
+
+    // 当前值等于某预设时该项选中
+    void setCurrent(int value)
+    {
+        for (int i = 0; i < m_options.size(); ++i) {
+            QPushButton *button = m_options.at(i);
+            const bool selected = button->property("value").toInt() == value;
+            if (button->property("selected").toBool() == selected)
+                continue;
+            button->setProperty("selected", selected);
+            gs::restyle(button);
+            const QList<QLabel *> labels = button->findChildren<QLabel *>();
+            for (QLabel *label : labels) {
+                const bool isName = label->property("class").toString()
+                                        == QLatin1String("numOptionText");
+                if (isName)
+                    label->setStyleSheet(QStringLiteral("color:%1;")
+                                             .arg(gs::cssColor(selected
+                                                                   ? gs::palette().cyan
+                                                                   : gs::palette().text)));
+            }
+        }
+    }
+
+    std::function<void(int)> onChosen;
+    std::function<void()> onClosed;
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        if (event->key() == Qt::Key_Escape) {
+            hide();
+            return;
+        }
+        QFrame::keyPressEvent(event);
+    }
+
+    void hideEvent(QHideEvent *event) override
+    {
+        QFrame::hideEvent(event);
+        if (onClosed)
+            onClosed();
+    }
+
+private:
+    QVBoxLayout *m_layout = nullptr;
+    QList<QPushButton *> m_options;
+};
+
+// .num-combobox：可手填的数值框 + 右侧 chevron 预设面板
+class NumField : public QWidget
+{
+public:
+    explicit NumField(const NumPresets &presets, QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setClass(this, QStringLiteral("numCombo"));
+        setAttribute(Qt::WA_StyledBackground, true);
+        setFixedHeight(gs::scaledPx(34));
+
+        auto *box = new QHBoxLayout(this);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setSpacing(0);
+
+        m_input = new QLineEdit(this);
+        setClass(m_input, QStringLiteral("numComboInput"));
+        m_input->setValidator(new QIntValidator(1, 100000000, m_input));
+        m_input->setFrame(false);
+        m_input->installEventFilter(this);
+        box->addWidget(m_input, 1);
+
+        m_toggle = new IconPushButton(this);
+        setClass(m_toggle, QStringLiteral("numToggle"));
+        m_toggle->setFixedWidth(gs::scaledPx(34));
+        m_toggle->setCursor(Qt::PointingHandCursor);
+        m_toggle->setFocusPolicy(Qt::TabFocus);
+        m_toggle->setIconColors(gs::palette().muted2, gs::palette().cyan);
+        m_toggle->setIconName(QStringLiteral("chevron-down"), 12);
+        box->addWidget(m_toggle, 0);
+
+        m_panel = new NumPanel(this);
+        m_panel->setPresets(presets);
+        // 面板是独立的弹出窗口，不保险能拿到设置窗口那张局部样式表，这里再给它一份
+        // （配色仍取 gs::palette()；卡片每次重渲染都会重建，不会留旧皮肤的色）
+        const Palette &pal = gs::palette();
+        m_panel->setStyleSheet(
+            QStringLiteral("QFrame.numListbox { border: 1px solid %1; border-radius: 4px;"
+                           " background: %2; }"
+                           "QPushButton.numOption { border: 1px solid transparent;"
+                           " border-radius: 4px; background: transparent; }"
+                           "QPushButton.numOption:hover { border-color: %3; background: %4; }"
+                           "QPushButton.numOption[selected=\"true\"] { border-color: %3; }"
+                           "QLabel.numOptionText { color: %5; font-size: %6px; background: transparent; }"
+                           "QLabel.numOptionValue { color: %7; font-size: %8px; font-family: %9;"
+                           " background: transparent; }")
+                .arg(gs::cssColor(pal.lineStrong), gs::cssColor(pal.inset),
+                     gs::cssColor(pal.cyanMid), gs::cssColor(pal.accentTint),
+                     gs::cssColor(pal.text))
+                .arg(gs::scaledPx(12))
+                .arg(gs::cssColor(pal.muted2))
+                .arg(gs::scaledPx(10))
+                .arg(gs::monoFont()));
+        m_panel->onChosen = [this](int value) { choose(value); };
+        m_panel->onClosed = [this] {
+            m_closeTimer.restart();
+            m_toggle->setProperty("open", false);
+            gs::restyle(m_toggle);
+        };
+
+        connect(m_toggle, &QPushButton::clicked, this, [this] { togglePanel(); });
+        connect(m_input, &QLineEdit::textChanged, this, [this](const QString &) {
+            m_panel->setCurrent(value());
+        });
+    }
+
+    QLineEdit *input() const { return m_input; }
+    int value() const { return m_input->text().trimmed().toInt(); }
+
+    void setValue(int value)
+    {
+        m_input->setText(value > 0 ? QString::number(value) : QString());
+        m_panel->setCurrent(value);
+    }
+
+    void setPlaceholder(const QString &text) { m_input->setPlaceholderText(text); }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (watched == m_input) {
+            if (event->type() == QEvent::KeyPress) {
+                auto *key = static_cast<QKeyEvent *>(event);
+                if (key->key() == Qt::Key_Down) {
+                    if (!m_panel->isVisible())
+                        showPanel();
+                    return true;
+                }
+                if (key->key() == Qt::Key_Escape && m_panel->isVisible()) {
+                    m_panel->hide();
+                    return true;
+                }
+            } else if (event->type() == QEvent::FocusIn || event->type() == QEvent::FocusOut) {
+                setProperty("focus", event->type() == QEvent::FocusIn);
+                gs::restyle(this);
+            }
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+private:
+    // 选档 = 手填：写回输入框，让原有的 textChanged 接线拾到
+    void choose(int value)
+    {
+        m_input->setText(QString::number(value));
+        m_input->setFocus();
+    }
+
+    void togglePanel()
+    {
+        if (m_panel->isVisible()) {
+            m_panel->hide();
+            return;
+        }
+        // 刚被「点外面」收起来的那一下不再重新展开
+        if (m_closeTimer.isValid() && m_closeTimer.elapsed() < 180)
+            return;
+        showPanel();
+    }
+
+    void showPanel()
+    {
+        m_panel->setCurrent(value());
+        const QSize hint = m_panel->sizeHint();
+        const int width = qMax(m_input->width() + m_toggle->width(), hint.width());
+        m_panel->setFixedWidth(width);
+
+        // 可用范围：最近的滚动区视口（行式表单在 .provider-editor 里滚动）
+        QRect area;
+        for (QWidget *widget = parentWidget(); widget; widget = widget->parentWidget()) {
+            if (auto *scroll = qobject_cast<QScrollArea *>(widget)) {
+                area = QRect(scroll->viewport()->mapToGlobal(QPoint(0, 0)),
+                             scroll->viewport()->size());
+                break;
+            }
+        }
+        if (!area.isValid()) {
+            QWidget *host = window();
+            area = QRect(host->mapToGlobal(QPoint(0, 0)), host->size());
+        }
+
+        const QPoint topLeft = m_input->mapToGlobal(QPoint(0, 0));
+        const int panelHeight = m_panel->sizeHint().height();
+        // 就在面板底边时朝上展开，否则会被滚动区裁掉
+        const bool dropUp = topLeft.y() + height() + 5 + panelHeight > area.bottom()
+            && topLeft.y() - 5 - panelHeight > area.top();
+        const int y = dropUp ? topLeft.y() - panelHeight - 5 : topLeft.y() + height() + 5;
+        m_panel->move(topLeft.x(), y);
+        m_panel->show();
+        m_panel->raise();
+        // 样式表要等 show() 之后才 polish，隐藏状态下量到的高度偏小，按定稿高度再贴一次
+        if (m_panel->height() != panelHeight)
+            m_panel->move(topLeft.x(), dropUp ? topLeft.y() - m_panel->height() - 5
+                                              : topLeft.y() + height() + 5);
+        m_closeTimer.invalidate();
+        m_toggle->setProperty("open", true);
+        gs::restyle(m_toggle);
+    }
+
+    QLineEdit *m_input = nullptr;
+    IconPushButton *m_toggle = nullptr;
+    NumPanel *m_panel = nullptr;
+    QElapsedTimer m_closeTimer;
+};
+
 } // namespace
+
+// ------------------------------------------------------------ ModelRow
+
+// .srow / .srow-2：行式表单的一行。宽屏时左右分列，紧凑模式下并作单列。
+// 行间的分割线由 QSS 的 QFrame.srow{border-bottom} 负责（局部样式表在
+// SettingsDialog::applyModelStyle 里按当前调色板生成）
+class ModelRow : public QFrame
+{
+public:
+    explicit ModelRow(QWidget *parent = nullptr) : QFrame(parent)
+    {
+        setClass(this, QStringLiteral("srow"));
+        setAttribute(Qt::WA_StyledBackground, true);
+        setFrameShape(QFrame::NoFrame);
+        setMinimumHeight(gs::scaledPx(52)); // .settings-field{min-height:52px}
+        m_grid = new QGridLayout(this);
+        m_grid->setContentsMargins(0, 0, 0, 0);
+        m_grid->setHorizontalSpacing(gs::scaledPx(24)); // column-gap:24px
+        m_grid->setVerticalSpacing(gs::scaledPx(6));
+    }
+
+    SettingsField *addField(const QString &label, const QString &hint, QWidget *control)
+    {
+        auto *field = new SettingsField(label, hint, control, this);
+        field->setCompact(m_compact);
+        m_fields.append(field);
+        place();
+        return field;
+    }
+
+    void setCompact(bool compact)
+    {
+        if (m_compact == compact)
+            return;
+        m_compact = compact;
+        setMinimumHeight(compact ? 0 : gs::scaledPx(52));
+        for (int i = 0; i < m_fields.size(); ++i)
+            m_fields.at(i)->setCompact(compact);
+        place();
+    }
+
+private:
+    void place()
+    {
+        int slot = 0;
+        for (int i = 0; i < m_fields.size(); ++i) {
+            SettingsField *field = m_fields.at(i);
+            if (m_grid->indexOf(field) >= 0)
+                m_grid->removeWidget(field);
+            if (m_compact)
+                m_grid->addWidget(field, slot, 0, 1, 2);
+            else
+                m_grid->addWidget(field, 0, slot, 1, 1);
+            ++slot;
+        }
+        m_grid->setColumnStretch(0, 1);
+        m_grid->setColumnStretch(1, (!m_compact && m_fields.size() > 1) ? 1 : 0);
+    }
+
+    QGridLayout *m_grid = nullptr;
+    QList<SettingsField *> m_fields;
+    bool m_compact = false;
+};
 
 // ------------------------------------------------------------ ExpandCard
 
@@ -250,6 +907,10 @@ void ExpandCard::setOpen(bool open)
         return;
     m_open = open;
     m_body->setVisible(open);
+    // QSS 里的展开态（.settings-model[open="true"]{background:var(--band-3)}）
+    setProperty("open", open);
+    gs::restyle(this);
+    emit openChanged(open);
 }
 
 bool ExpandCard::eventFilter(QObject *watched, QEvent *event)
@@ -299,7 +960,7 @@ void SettingsDialog::buildUi()
     auto *titleBox = new QVBoxLayout;
     titleBox->setContentsMargins(0, 0, 0, 0);
     titleBox->setSpacing(2);
-    QLabel *eyebrow = plainLabel(QStringLiteral("eyebrow"), QStringLiteral("CONFIGURATION"));
+    QLabel *eyebrow = plainLabel(QStringLiteral("eyebrow"), QStringLiteral("配置"));
     // .eyebrow 是行内 span，占的是所在行盒（13px 基础字体的 18px），不是 9px 的字形高；
     // .settings-head h2 是 18px 字体 / 行盒 24。QSS 没有 line-height，按 webui 量到的行盒补足，
     // 表头 67 → 76（webui 920 宽视口实测 75）
@@ -331,10 +992,12 @@ void SettingsDialog::buildUi()
     tl->setContentsMargins(18, 0, 18, 0);
     tl->setSpacing(0);
     m_tabsLayout = tl;
-    const QString tabNames[4] = {QStringLiteral("模型"), QStringLiteral("技能"),
-                                 QStringLiteral("MCP 工具"), QStringLiteral("用量")};
-    QPushButton **tabPtrs[4] = {&m_tabModels, &m_tabSkills, &m_tabMcp, &m_tabUsage};
-    for (int i = 0; i < 4; ++i) {
+    const QString tabNames[6] = {QStringLiteral("模型"), QStringLiteral("技能"),
+                                 QStringLiteral("MCP 工具"), QStringLiteral("记忆"),
+                                 QStringLiteral("知识库"), QStringLiteral("用量")};
+    QPushButton **tabPtrs[6] = {&m_tabModels, &m_tabSkills, &m_tabMcp,
+                                &m_tabMemory, &m_tabKb, &m_tabUsage};
+    for (int i = 0; i < 6; ++i) {
         auto *button = new QPushButton(tabNames[i], tabs);
         setClass(button, QStringLiteral("settingsTab"));
         button->setFixedHeight(42);
@@ -351,6 +1014,9 @@ void SettingsDialog::buildUi()
     connect(m_tabSkills, &QPushButton::clicked, this,
             [this] { switchTab(QStringLiteral("skills")); });
     connect(m_tabMcp, &QPushButton::clicked, this, [this] { switchTab(QStringLiteral("mcp")); });
+    connect(m_tabMemory, &QPushButton::clicked, this,
+            [this] { switchTab(QStringLiteral("memory")); });
+    connect(m_tabKb, &QPushButton::clicked, this, [this] { switchTab(QStringLiteral("kb")); });
     connect(m_tabUsage, &QPushButton::clicked, this, [this] { switchTab(QStringLiteral("usage")); });
 
     // ---- .settings-content ----
@@ -359,6 +1025,8 @@ void SettingsDialog::buildUi()
     m_stack->addWidget(buildModelsPage());
     m_stack->addWidget(buildSkillsPage());
     m_stack->addWidget(buildMcpPage());
+    m_stack->addWidget(buildMemoryPage());
+    m_stack->addWidget(buildKbPage());
     m_stack->addWidget(buildUsagePage());
     root->addWidget(m_stack, 1);
 
@@ -390,6 +1058,91 @@ void SettingsDialog::buildUi()
         m_saveButton->setEnabled(false);
         emit saveRequested(draft(), m_revision);
     });
+
+    // 模型页的局部 QSS（行式表单 / 能力开关 / 数值预设面板 / 模型信息状态行）
+    applyModelStyle();
+}
+
+// 行式表单与预设面板的样式：theme.cpp 里没有这些 class，先在这里按当前调色板生成；
+// 需要主题化时把这张表整体搬进 theme.cpp 即可（class 清单见报告中）。
+void SettingsDialog::applyModelStyle()
+{
+    const Palette &p = gs::palette();
+    QString qss = QStringLiteral(
+        /* 模型行：webui 把它从圆角卡片改成带下分割线的平铺行 */
+        "QFrame.settingsModel { border: 0; border-bottom: 1px solid %LINE%;"
+        " border-radius: 0; background: transparent; }\n"
+        "QFrame.settingsModel[open=\"true\"] { background: %BAND3%; }\n"
+        "QFrame.srow { border: 0; border-bottom: 1px solid %LINE%; background: transparent; }\n"
+        "QLabel.fieldLabel { color: %MUTED%; font-size: %F12%px; background: transparent; }\n"
+        "QLabel.fieldHint { color: %MUTED2%; font-size: %F10%px; background: transparent; }\n"
+        "QLabel.modelId { color: %MUTED2%; font-size: %F11%px; font-family: %MONO%;"
+        " background: transparent; }\n"
+        "QLabel.modelCtx { color: %MUTED2%; font-size: %F9%px; font-family: %MONO%;"
+        " background: %SURFACE2%; border: 0; border-radius: %R9%px; padding: 1px 7px; }\n"
+        "QLabel.modelCtxFallback { background: transparent; border: 1px dashed %LINESTRONG%; }\n"
+        "QWidget.settingsToggle { border: 0; border-bottom: 1px solid %LINE%;"
+        " background: transparent; }\n"
+        "QWidget.settingsToggleLast { border: 0; background: transparent; }\n"
+        "QLabel.toggleLabel { color: %TEXT%; font-size: %F12%px; background: transparent; }\n"
+        /* num-combobox */
+        "QWidget.numCombo { border: 1px solid %LINE%; border-radius: %R4%px;"
+        " background: %INSET%; }\n"
+        "QWidget.numCombo[focus=\"true\"] { border-color: %CYAN%; }\n"
+        "QLineEdit.numComboInput { border: 0; background: transparent; color: %TEXT%;"
+        " padding: 0 8px; selection-background-color: %CYANDARK%; }\n"
+        "QPushButton.numToggle { border: 0; border-left: 1px solid %LINE%;"
+        " background: transparent; }\n"
+        "QPushButton.numToggle:hover { background: %SURFACE2%; }\n"
+        "QFrame.numListbox { border: 1px solid %LINESTRONG%; border-radius: %R4%px;"
+        " background: %INSET%; }\n"
+        "QPushButton.numOption { border: 1px solid transparent; border-radius: %R4%px;"
+        " background: transparent; }\n"
+        "QPushButton.numOption:hover { border-color: %CYANMID%; background: %ACCENTTINT%; }\n"
+        "QPushButton.numOption[selected=\"true\"] { border-color: %CYANMID%; }\n"
+        "QLabel.numOptionText { color: %TEXT%; font-size: %F12%px; background: transparent; }\n"
+        "QLabel.numOptionValue { color: %MUTED2%; font-size: %F10%px; font-family: %MONO%;"
+        " background: transparent; }\n"
+        /* 模型信息状态行 / 链接按钮 / 候选行上限 */
+        "QPushButton.linkButton { border: 0; background: transparent; color: %CYAN%;"
+        " font-size: %F12%px; padding: 2px 4px; }\n"
+        "QPushButton.linkButton:hover { color: %TEXTBRIGHT%; }\n"
+        /* 只补一条禁用态：否则读取中 / 更新中的文字链跟可点时长得一模一样 */
+        "QPushButton.linkButton:disabled { color: %MUTED2%; }\n"
+        "QLabel.modelsMetaTitle { color: %TEXTBRIGHT%; font-size: %F13%px; background: transparent; }\n"
+        "QLabel.modelsMetaText { color: %MUTED%; font-size: %F11%px; background: transparent; }\n"
+        "QLabel.candidateLimit { color: %CYAN%; font-size: %F9%px; font-family: %MONO%;"
+        " background: transparent; }\n");
+
+    qss.replace(QStringLiteral("%LINE%"), cssColor(p.line));
+    qss.replace(QStringLiteral("%LINESTRONG%"), cssColor(p.lineStrong));
+    qss.replace(QStringLiteral("%MUTED2%"), cssColor(p.muted2));
+    qss.replace(QStringLiteral("%MUTED%"), cssColor(p.muted));
+    qss.replace(QStringLiteral("%TEXTBRIGHT%"), cssColor(p.textBright));
+    qss.replace(QStringLiteral("%TEXT%"), cssColor(p.text));
+    qss.replace(QStringLiteral("%CYANDARK%"), cssColor(p.cyanDark));
+    qss.replace(QStringLiteral("%CYANMID%"), cssColor(p.cyanMid));
+    qss.replace(QStringLiteral("%CYAN%"), cssColor(p.cyan));
+    qss.replace(QStringLiteral("%ACCENTTINT%"), cssColor(p.accentTint));
+    qss.replace(QStringLiteral("%SURFACE2%"), cssColor(p.surface2));
+    qss.replace(QStringLiteral("%BAND3%"), cssColor(p.band3));
+    qss.replace(QStringLiteral("%INSET%"), cssColor(p.inset));
+    qss.replace(QStringLiteral("%MONO%"), gs::monoFont());
+    qss.replace(QStringLiteral("%F9%"), QString::number(gs::scaledPx(9)));
+    qss.replace(QStringLiteral("%F10%"), QString::number(gs::scaledPx(10)));
+    qss.replace(QStringLiteral("%F11%"), QString::number(gs::scaledPx(11)));
+    qss.replace(QStringLiteral("%F12%"), QString::number(gs::scaledPx(12)));
+    qss.replace(QStringLiteral("%F13%"), QString::number(gs::scaledPx(13)));
+    qss.replace(QStringLiteral("%R4%"), QString::number(gs::scaledPx(4)));
+    qss.replace(QStringLiteral("%R9%"), QString::number(gs::scaledPx(9)));
+    setStyleSheet(qss);
+}
+
+void SettingsDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+    // 皮肤可能在关闭期间换过：局部样式表按当前调色板重建
+    applyModelStyle();
 }
 
 // style.css @media(max-width:640px)：
@@ -416,8 +1169,8 @@ void SettingsDialog::applyCompactMode(bool compact)
     }
     if (m_tabsLayout) {
         m_tabsLayout->setContentsMargins(compact ? 0 : 18, 0, compact ? 0 : 18, 0);
-        QPushButton *tabs[4] = {m_tabModels, m_tabSkills, m_tabMcp, m_tabUsage};
-        for (int i = 0; i < 4; ++i) {
+        QPushButton *tabs[6] = {m_tabModels, m_tabSkills, m_tabMcp, m_tabMemory, m_tabKb, m_tabUsage};
+        for (int i = 0; i < 6; ++i) {
             if (!tabs[i])
                 continue;
             tabs[i]->setSizePolicy(compact ? QSizePolicy::Expanding : QSizePolicy::Minimum,
@@ -445,8 +1198,17 @@ void SettingsDialog::applyCompactMode(bool compact)
     }
     if (m_providerGrid)
         placeFormFields(m_providerGrid, m_providerFields, compact);
-    for (int i = 0; i < m_modelGrids.size() && i < m_modelGridFields.size(); ++i)
-        placeFormFields(m_modelGrids.at(i), m_modelGridFields.at(i), compact);
+    // 模型卡的行式表单：.srow-2 的两列并作单列；.model-caps 窄屏整段隐藏
+    for (int i = 0; i < m_modelRows.size(); ++i) {
+        ModelRow *row = m_modelRows.at(i);
+        if (row)
+            row->setCompact(compact);
+    }
+    for (int i = 0; i < m_modelCapsRows.size(); ++i) {
+        QWidget *caps = m_modelCapsRows.at(i);
+        if (caps)
+            caps->setVisible(!compact && caps->property("hasCaps").toBool());
+    }
     if (m_providerActions) {
         m_providerActions->setDirection(compact ? QBoxLayout::TopToBottom
                                                 : QBoxLayout::LeftToRight);
@@ -725,6 +1487,9 @@ QWidget *SettingsDialog::buildProviderEditor()
         provider.insert(QStringLiteral("default_api"), comboData(m_defaultApiCombo));
         m_providers[index] = provider;
         markDirty();
+        // 左栅分组看的就是 default_api：改了就重新分一次组（webui 每个 provider
+        // 字段变更后都 renderProviderList，只是其它字段不影响分组）
+        renderProviderList();
     });
     connect(m_sslCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this](int) {
         if (m_updating)
@@ -787,7 +1552,7 @@ QWidget *SettingsDialog::buildProviderEditor()
     auto *headBox = new QVBoxLayout;
     headBox->setContentsMargins(0, 0, 0, 0);
     headBox->setSpacing(2);
-    headBox->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("MODELS")));
+    headBox->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("模型")));
     auto *titleLine = new QHBoxLayout;
     titleLine->setContentsMargins(0, 0, 0, 0);
     titleLine->setSpacing(6);
@@ -798,7 +1563,11 @@ QWidget *SettingsDialog::buildProviderEditor()
     titleLine->addStretch(1);
     headBox->addLayout(titleLine);
     headRow->addLayout(headBox, 1);
-    m_readButton = styledButton(QStringLiteral("读取模型"), QStringLiteral("secondary"));
+    m_readButton = new QPushButton(QStringLiteral("读取模型"), m_sectionModels);
+    // webui HEAD 把它降成文字链（.link-button），与「更新模型信息」同一套
+    setClass(m_readButton, QStringLiteral("linkButton"));
+    m_readButton->setCursor(Qt::PointingHandCursor);
+    m_readButton->setFocusPolicy(Qt::TabFocus);
     headRow->addWidget(m_readButton, 0, Qt::AlignVCenter);
     ml->addLayout(headRow);
     ml->addSpacing(14);
@@ -813,7 +1582,8 @@ QWidget *SettingsDialog::buildProviderEditor()
     auto *listHost = new QWidget(m_sectionModels);
     m_modelListLayout = new QVBoxLayout(listHost);
     m_modelListLayout->setContentsMargins(0, 0, 0, 0);
-    m_modelListLayout->setSpacing(7);
+    // 模型行现在是平铺行（.settings-model{border-bottom}），行间不再留缝隙
+    m_modelListLayout->setSpacing(0);
     ml->addWidget(listHost);
 
     // .add-model
@@ -851,6 +1621,39 @@ QWidget *SettingsDialog::buildProviderEditor()
     ml->addSpacing(12);
     ml->addWidget(addBox);
     el->addWidget(m_sectionModels);
+
+    // ===== provider-section：模型信息（.models-meta） =====
+    // /config/model-metadata 的快照状态：缓存时间 / 来源 / 错误 + 手动刷新
+    m_sectionMeta = styledFrame(QStringLiteral("providerSection"));
+    m_sectionMeta->setObjectName(QStringLiteral("modelsMetaSection"));
+    auto *metaLayout = new QHBoxLayout(m_sectionMeta);
+    metaLayout->setContentsMargins(15, 14, 15, 14);
+    metaLayout->setSpacing(16);
+    auto *metaBox = new QVBoxLayout;
+    metaBox->setContentsMargins(0, 0, 0, 0);
+    metaBox->setSpacing(5);
+    m_metaTitle = plainLabel(QStringLiteral("modelsMetaTitle"), QStringLiteral("模型信息"));
+    m_metaText = plainLabel(QStringLiteral("modelsMetaText"), QString());
+    m_metaText->setWordWrap(true);
+    m_metaText->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    metaBox->addWidget(m_metaTitle);
+    metaBox->addWidget(m_metaText);
+    metaLayout->addLayout(metaBox, 1);
+    m_metaButton = new QPushButton(QStringLiteral("更新模型信息"), m_sectionMeta);
+    setClass(m_metaButton, QStringLiteral("linkButton"));
+    m_metaButton->setCursor(Qt::PointingHandCursor);
+    m_metaButton->setFocusPolicy(Qt::TabFocus);
+    metaLayout->addWidget(m_metaButton, 0, Qt::AlignVCenter);
+    el->addWidget(m_sectionMeta);
+    connect(m_metaButton, &QPushButton::clicked, this, [this] {
+        if (m_metaRefreshing)
+            return;
+        m_metaRefreshing = true;
+        renderModelMeta();
+        emit modelMetadataRefreshRequested();
+    });
+    renderModelMeta();
+
     el->addStretch(1);
 
     connect(m_candidateSearch, &QLineEdit::textChanged, this,
@@ -881,7 +1684,7 @@ QWidget *SettingsDialog::buildSkillsPage()
     auto *box = new QVBoxLayout;
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(2);
-    box->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("SKILLS")));
+    box->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("技能库")));
     auto *line = new QHBoxLayout;
     line->setContentsMargins(0, 0, 0, 0);
     line->setSpacing(6);
@@ -930,7 +1733,7 @@ QWidget *SettingsDialog::buildMcpPage()
     auto *box = new QVBoxLayout;
     box->setContentsMargins(0, 0, 0, 0);
     box->setSpacing(2);
-    box->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("MCP TOOLS")));
+    box->addWidget(plainLabel(QStringLiteral("eyebrow"), QStringLiteral("MCP 工具")));
     auto *line = new QHBoxLayout;
     line->setContentsMargins(0, 0, 0, 0);
     line->setSpacing(6);
@@ -973,6 +1776,140 @@ QWidget *SettingsDialog::buildUsagePage()
     return plainScroll(m_usagePanel, QString(), QStringLiteral("usagePanelScroll"));
 }
 
+QWidget *SettingsDialog::buildMemoryPage()
+{
+    // #panel-memory：.memory-panel 自身纵向滚动，内容由 MemoryPanel 渲染
+    m_memoryPanel = new MemoryPanel;
+    connect(m_memoryPanel, &MemoryPanel::refreshRequested,
+            this, &SettingsDialog::memoryRefreshRequested);
+    connect(m_memoryPanel, &MemoryPanel::listRequested,
+            this, &SettingsDialog::memoryListRequested);
+    connect(m_memoryPanel, &MemoryPanel::configPatchRequested,
+            this, &SettingsDialog::memoryConfigPatchRequested);
+    connect(m_memoryPanel, &MemoryPanel::actionRequested,
+            this, &SettingsDialog::memoryActionRequested);
+    connect(m_memoryPanel, &MemoryPanel::bulkRequested,
+            this, &SettingsDialog::memoryBulkRequested);
+    connect(m_memoryPanel, &MemoryPanel::detailRequested,
+            this, &SettingsDialog::memoryDetailRequested);
+    connect(m_memoryPanel, &MemoryPanel::fieldSaveRequested,
+            this, &SettingsDialog::memoryFieldSaveRequested);
+    connect(m_memoryPanel, &MemoryPanel::fieldDeleteRequested,
+            this, &SettingsDialog::memoryFieldDeleteRequested);
+    connect(m_memoryPanel, &MemoryPanel::toolClearRequested,
+            this, &SettingsDialog::memoryToolClearRequested);
+    connect(m_memoryPanel, &MemoryPanel::toolsClearAllRequested,
+            this, &SettingsDialog::memoryToolsClearAllRequested);
+    connect(m_memoryPanel, &MemoryPanel::maintenanceRequested,
+            this, &SettingsDialog::memoryMaintenanceRequested);
+    // .memory-panel 自身就是纵向滚动容器，外层不再套一层
+    return m_memoryPanel;
+}
+
+QWidget *SettingsDialog::buildKbPage()
+{
+    // #panel-kb：.kb-panel 自身纵向滚动，内容由 KbPanel 渲染
+    m_kbPanel = new KbPanel;
+    connect(m_kbPanel, &KbPanel::refreshRequested, this, &SettingsDialog::kbRefreshRequested);
+    connect(m_kbPanel, &KbPanel::libraryChanged, this, &SettingsDialog::kbRefreshRequested);
+    connect(m_kbPanel, &KbPanel::folderChanged, this, &SettingsDialog::kbFolderChanged);
+    connect(m_kbPanel, &KbPanel::libraryCreateRequested,
+            this, &SettingsDialog::kbLibraryCreateRequested);
+    connect(m_kbPanel, &KbPanel::libraryRenameRequested,
+            this, &SettingsDialog::kbLibraryRenameRequested);
+    connect(m_kbPanel, &KbPanel::libraryDeleteRequested,
+            this, &SettingsDialog::kbLibraryDeleteRequested);
+    connect(m_kbPanel, &KbPanel::filesImportRequested,
+            this, &SettingsDialog::kbFilesImportRequested);
+    connect(m_kbPanel, &KbPanel::dirImportRequested,
+            this, &SettingsDialog::kbDirImportRequested);
+    connect(m_kbPanel, &KbPanel::dirImportToFolderRequested,
+            this, &SettingsDialog::kbDirImportToFolderRequested);
+    connect(m_kbPanel, &KbPanel::documentDeleteRequested,
+            this, &SettingsDialog::kbDocumentDeleteRequested);
+    connect(m_kbPanel, &KbPanel::documentReindexRequested,
+            this, &SettingsDialog::kbDocumentReindexRequested);
+    connect(m_kbPanel, &KbPanel::documentMoveRequested,
+            this, &SettingsDialog::kbDocumentMoveRequested);
+    connect(m_kbPanel, &KbPanel::folderCreateRequested,
+            this, &SettingsDialog::kbFolderCreateRequested);
+    connect(m_kbPanel, &KbPanel::folderRenameRequested,
+            this, &SettingsDialog::kbFolderRenameRequested);
+    connect(m_kbPanel, &KbPanel::folderDeleteRequested,
+            this, &SettingsDialog::kbFolderDeleteRequested);
+    connect(m_kbPanel, &KbPanel::searchRequested, this, &SettingsDialog::kbSearchRequested);
+    // .kb-panel 自身就是纵向滚动容器，外层不再套一层
+    return m_kbPanel;
+}
+
+// ---- 记忆 / 知识库页的数据转发 ----
+
+void SettingsDialog::setMemorySummary(const QVariantMap &summary)
+{
+    if (m_memoryPanel)
+        m_memoryPanel->setSummary(summary);
+}
+
+void SettingsDialog::setMemoryExperiences(const QVariantMap &listing)
+{
+    if (m_memoryPanel)
+        m_memoryPanel->setListing(listing);
+}
+
+void SettingsDialog::setMemoryListFailed(const QString &error)
+{
+    if (m_memoryPanel)
+        m_memoryPanel->setListFailed(error);
+}
+
+void SettingsDialog::setMemoryTools(const QVariantMap &payload)
+{
+    if (m_memoryPanel)
+        m_memoryPanel->setTools(payload);
+}
+
+void SettingsDialog::setMemoryStatusText(const QString &text)
+{
+    if (m_memoryPanel)
+        m_memoryPanel->setStatusText(text);
+}
+
+void SettingsDialog::setKbLibraries(const QVariantList &libraries)
+{
+    if (m_kbPanel)
+        m_kbPanel->setLibraries(libraries);
+}
+
+void SettingsDialog::setKbStatus(const QVariantMap &status)
+{
+    if (m_kbPanel)
+        m_kbPanel->setStatus(status);
+}
+
+void SettingsDialog::setKbFolders(const QVariantList &folders, const QVariantMap &tree)
+{
+    if (m_kbPanel)
+        m_kbPanel->setFolders(folders, tree);
+}
+
+void SettingsDialog::setKbDocuments(const QVariantList &documents, int total)
+{
+    if (m_kbPanel)
+        m_kbPanel->setDocuments(documents, total);
+}
+
+void SettingsDialog::setKbSearchResult(const QVariantMap &result)
+{
+    if (m_kbPanel)
+        m_kbPanel->setSearchResult(result);
+}
+
+void SettingsDialog::setKbStatusText(const QString &text)
+{
+    if (m_kbPanel)
+        m_kbPanel->setStatusText(text);
+}
+
 // ------------------------------------------------------------ 数据接口
 
 void SettingsDialog::loadConfig(const QVariantMap &config, const QVariant &revision)
@@ -991,13 +1928,18 @@ void SettingsDialog::loadConfig(const QVariantMap &config, const QVariant &revis
         m_providers.isEmpty() ? QString() : m_providers.first().toMap().value(QStringLiteral("id")).toString();
     m_dirty = false;
     m_discovered.clear();
+    m_openModelKeys.clear(); // 新草稿：展开态不跟上一次的同一 provider/id 串上
     m_testing = false;
     m_reading = false;
     m_candidateSearch->clear();
     m_manualId->clear();
     m_saveButton->setEnabled(true);
     setStatus(QString());
-    switchTab(QStringLiteral("models"));
+    // 快照 / 候选里已有的上限先补上（只填空字段，不标 dirty）
+    applyStoredModelLimits();
+    // 重载草稿不应该把用户踢回模型页：live 模式下配置比开页晚到，
+    // 硬切 "models" 会让 --tab kb / memory / usage 全部失效（看到的总是模型页）
+    switchTab(m_tab);
     renderSettings();
 }
 
@@ -1013,8 +1955,167 @@ QVariantMap SettingsDialog::draft() const
 void SettingsDialog::setDiscoveredModels(const QString &providerId, const QVariantList &models)
 {
     m_discovered.insert(providerId, models);
+    // webui readProviderModels：候选里带了上限就顺手补进草稿（只填空字段）
+    if (applyStoredModelLimits())
+        markDirty();
     if (providerId == m_activeProviderId)
         renderProviderEditor();
+}
+
+// 快照里的 models / providers / hosts 既可能是计数（后端真实响应），
+// 也可能是宿主另行喂进来的数组（模型 ID -> 上限），按类型分别取数
+static int metaEntryCount(const QVariantMap &meta, const QString &key)
+{
+    const QVariant value = meta.value(key);
+    if (value.type() == QVariant::List)
+        return value.toList().size();
+    if (value.type() == QVariant::Map)
+        return value.toMap().size();
+    return value.toInt();
+}
+
+void SettingsDialog::setModelMetadata(const QVariantMap &snapshot)
+{
+    m_meta = snapshot;
+    m_metaError.clear();
+    m_metaErrorKind.clear();
+    m_metaStatus = 0;
+    m_metaRefreshing = false;
+    // 上限只填空字段、能力只勾「数据里说支持」的（applyModelLimits 口径）。
+    // 刻意不标 dirty：打开设置只看一眼，不该面对「放弃未保存的修改」
+    applyStoredModelLimits();
+    renderProviderEditor();
+}
+
+void SettingsDialog::setModelMetadataFailed(const QString &kind, const QString &error,
+                                            int httpStatus)
+{
+    m_metaError = error.isEmpty() ? QStringLiteral("未知错误") : error;
+    m_metaErrorKind = kind;
+    m_metaStatus = httpStatus;
+    m_metaRefreshing = false;
+    renderProviderEditor();
+}
+
+void SettingsDialog::renderModelMeta()
+{
+    if (!m_metaText || !m_metaButton)
+        return;
+    m_metaText->setText(metaStatusText());
+    if (m_metaTitle)
+        m_metaTitle->setToolTip(metaTitleText());
+    m_metaButton->setText(m_metaRefreshing ? QStringLiteral("更新中…")
+                                           : QStringLiteral("更新模型信息"));
+    m_metaButton->setEnabled(!m_metaRefreshing);
+}
+
+// app.js metaStatusText：缓存时间 / 来源 / 错误（404 时说清是接口未注册）
+QString SettingsDialog::metaStatusText() const
+{
+    if (!m_metaError.isEmpty()) {
+        const QString verb = m_metaErrorKind == QLatin1String("refresh")
+                                 ? QStringLiteral("更新失败")
+                                 : QStringLiteral("读取失败");
+        const QString status = m_metaStatus > 0
+                                   ? QStringLiteral("（HTTP %1）").arg(m_metaStatus)
+                                   : QString();
+        const QString hint = m_metaStatus == 404
+                                 ? QStringLiteral("，该接口未注册，重启后端服务后再试")
+                                 : QString();
+        return QStringLiteral("%1：%2%3%4").arg(verb, m_metaError, status, hint);
+    }
+    if (m_meta.isEmpty())
+        return QStringLiteral("正在读取模型信息…");
+    const int count = metaEntryCount(m_meta, QStringLiteral("models"));
+    const bool available = m_meta.contains(QStringLiteral("available"))
+                               ? m_meta.value(QStringLiteral("available")).toBool()
+                               : count > 0;
+    if (!available)
+        return QStringLiteral("还没有模型信息快照，点右侧更新一次即可。");
+    const QString fileDay = m_meta.value(QStringLiteral("file_time")).toString().left(10);
+    QStringList parts;
+    parts << QStringLiteral("模型信息更新于 %1")
+                 .arg(fileDay.isEmpty() ? QStringLiteral("未知时间") : formatMetaDate(fileDay));
+    // 文件写入时间与数据抓取日期不一致时把后者也带上（快照可能被手工替换或随仓库签出）
+    const QString fetchedAt = m_meta.value(QStringLiteral("fetched_at")).toString();
+    if (!fetchedAt.isEmpty() && fetchedAt != fileDay)
+        parts << QStringLiteral("数据抓取于 %1").arg(formatMetaDate(fetchedAt));
+    parts << QStringLiteral("收录 %1 个模型").arg(count);
+    return parts.join(QStringLiteral(" · "));
+}
+
+// app.js metaTitleText：状态行的 tooltip
+QString SettingsDialog::metaTitleText() const
+{
+    if (m_meta.isEmpty())
+        return QString();
+    QStringList bits;
+    bits << QStringLiteral("快照来源 %1")
+                .arg(m_meta.value(QStringLiteral("source")).toString());
+    const QString fileTime = m_meta.value(QStringLiteral("file_time")).toString();
+    if (!fileTime.isEmpty())
+        bits << QStringLiteral("文件写入 %1").arg(fileTime);
+    const QString fetchedAt = m_meta.value(QStringLiteral("fetched_at")).toString();
+    if (!fetchedAt.isEmpty())
+        bits << QStringLiteral("数据抓取于 %1").arg(fetchedAt);
+    bits << QStringLiteral("收录 %1 个模型 / %2 家供应商")
+                .arg(metaEntryCount(m_meta, QStringLiteral("models")))
+                .arg(metaEntryCount(m_meta, QStringLiteral("providers")));
+    const int hosts = metaEntryCount(m_meta, QStringLiteral("hosts"));
+    if (hosts > 0)
+        bits << QStringLiteral("%1 个主机映射").arg(hosts);
+    return bits.join(QStringLiteral(" · "));
+}
+
+// 模型 ID -> 上限与能力项：先看「读取模型」拿到的候选，再看模型信息快照
+QVariantMap SettingsDialog::modelLimits(const QString &providerId, const QString &modelId) const
+{
+    if (modelId.isEmpty())
+        return QVariantMap();
+    const QVariantList candidates = m_discovered.value(providerId).toList();
+    for (int i = 0; i < candidates.size(); ++i) {
+        const QVariantMap item = candidates.at(i).toMap();
+        QString id = item.value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            id = item.value(QStringLiteral("model_id")).toString();
+        if (id == modelId)
+            return item;
+    }
+    return metaLimitsFor(modelId);
+}
+
+QVariantMap SettingsDialog::metaLimitsFor(const QString &modelId) const
+{
+    if (modelId.isEmpty() || m_meta.isEmpty())
+        return QVariantMap();
+    // 状态接口给的是计数；按模型的上限由宿主另行喂进 "limits"
+    // （模型 ID -> {context_window, max_output_tokens, capabilities}），
+    // 或直接给一份 "models" 数组
+    const QVariantMap limits = m_meta.value(QStringLiteral("limits")).toMap();
+    if (limits.contains(modelId))
+        return limits.value(modelId).toMap();
+    const QVariantList items = m_meta.value(QStringLiteral("models")).toList();
+    for (int i = 0; i < items.size(); ++i) {
+        const QVariantMap item = items.at(i).toMap();
+        if (item.value(QStringLiteral("id")).toString() == modelId)
+            return item;
+    }
+    return QVariantMap();
+}
+
+bool SettingsDialog::applyStoredModelLimits()
+{
+    bool changed = false;
+    for (int i = 0; i < m_models.size(); ++i) {
+        QVariantMap item = m_models.at(i).toMap();
+        const QVariantMap limits = modelLimits(item.value(QStringLiteral("provider")).toString(),
+                                               item.value(QStringLiteral("id")).toString());
+        if (applyModelLimits(item, limits)) {
+            m_models[i] = item;
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 void SettingsDialog::setProviderBusy(bool testing, bool reading)
@@ -1052,16 +2153,33 @@ void SettingsDialog::switchTab(const QString &tab)
     m_tabModels->setProperty("active", tab == QLatin1String("models"));
     m_tabSkills->setProperty("active", tab == QLatin1String("skills"));
     m_tabMcp->setProperty("active", tab == QLatin1String("mcp"));
+    m_tabMemory->setProperty("active", tab == QLatin1String("memory"));
+    m_tabKb->setProperty("active", tab == QLatin1String("kb"));
     m_tabUsage->setProperty("active", tab == QLatin1String("usage"));
     restyle(m_tabModels);
     restyle(m_tabSkills);
     restyle(m_tabMcp);
+    restyle(m_tabMemory);
+    restyle(m_tabKb);
     restyle(m_tabUsage);
-    m_stack->setCurrentIndex(tab == QLatin1String("skills")
-                                 ? 1
-                                 : (tab == QLatin1String("mcp")
-                                        ? 2
-                                        : (tab == QLatin1String("usage") ? 3 : 0)));
+    // 页序：0 模型 / 1 技能 / 2 MCP / 3 记忆 / 4 知识库 / 5 用量
+    int index = 0;
+    if (tab == QLatin1String("skills"))
+        index = 1;
+    else if (tab == QLatin1String("mcp"))
+        index = 2;
+    else if (tab == QLatin1String("memory"))
+        index = 3;
+    else if (tab == QLatin1String("kb"))
+        index = 4;
+    else if (tab == QLatin1String("usage"))
+        index = 5;
+    m_stack->setCurrentIndex(index);
+
+    // webui switchSettingsTab：离开记忆页就停轮询
+    if (m_memoryPanel && tab != QLatin1String("memory"))
+        m_memoryPanel->leaveTab();
+
     m_saveButton->setVisible(tab == QLatin1String("models"));
     if (tab == QLatin1String("mcp"))
         emit refreshMcpRequested();
@@ -1069,6 +2187,10 @@ void SettingsDialog::switchTab(const QString &tab)
         renderSkills();
     else if (tab == QLatin1String("usage") && m_usagePanel)
         m_usagePanel->enterTab(); // 首次进入懒加载（与 MCP Tab 的既有做法一致）
+    else if (tab == QLatin1String("memory") && m_memoryPanel)
+        m_memoryPanel->enterTab();
+    else if (tab == QLatin1String("kb") && m_kbPanel)
+        m_kbPanel->enterTab();
 }
 
 void SettingsDialog::setUsageCatalog(const QVariantList &models)
@@ -1115,12 +2237,49 @@ void SettingsDialog::renderSettings()
     renderProviderEditor();
 }
 
+// ------------------------------------------------------------ 供应商侧栏分组
+// app.js PROVIDER_GROUPS / providerGroupKey：配置里唯一的分类轴是 default_api，
+// 就按它归组，不另造一个供应商类型字段；前缀判定用 startsWith（对应 indexOf(...) === 0）
+struct ProviderGroupDef
+{
+    const char *key;
+    const char *label;
+};
+
+static const ProviderGroupDef kProviderGroups[] = {
+    {"openai", "OpenAI 协议"},
+    {"anthropic", "Anthropic 协议"},
+    {"other", "其它协议"},
+};
+
+static QString providerGroupKey(const QVariantMap &provider)
+{
+    const QString api = provider.value(QStringLiteral("default_api")).toString();
+    if (api.startsWith(QLatin1String("anthropic")))
+        return QStringLiteral("anthropic");
+    if (api.startsWith(QLatin1String("openai")))
+        return QStringLiteral("openai");
+    return QStringLiteral("other");
+}
+
 void SettingsDialog::renderProviderList()
 {
     clearLayout(m_providerNavLayout);
-    for (int i = 0; i < m_providers.size(); ++i) {
-        const QVariantMap provider = m_providers.at(i).toMap();
-        const QString id = provider.value(QStringLiteral("id")).toString();
+    // .provider-group-label{padding:0 8px 6px;color:var(--muted-2);font-size:9px;font-weight:700}
+    // 样式集中化那条线只管模型页，侧栏分组还没进它，先在本地按当前调色板生成
+    // （只落在这一批标签上，不碰 applyModelStyle 的模型页局部表；
+    // 每次 renderProviderList 重算一遍，换肤后重开设置即跟着变）
+    QString labelStyle = QStringLiteral(
+        "QLabel.providerGroupLabel { color: %1; font-size: %2px; font-weight: 700;"
+        " background: transparent; padding: 0 %3px %4px %5px; }");
+    labelStyle = labelStyle.arg(cssColor(gs::palette().muted2))
+                     .arg(gs::scaledPx(9))
+                     .arg(gs::scaledPx(8))
+                     .arg(gs::scaledPx(6))
+                     .arg(gs::scaledPx(8));
+
+    // 一项：名称 + ID + 模型数，点一下切当前供应商（与分组前一致）
+    auto makeItem = [this](const QString &id, const QVariantMap &provider) {
         auto *item = new QWidget;
         setClass(item, QStringLiteral("providerNavItem"));
         item->setAttribute(Qt::WA_StyledBackground, true);
@@ -1144,7 +2303,40 @@ void SettingsDialog::renderProviderList()
         il->addWidget(count, 0, Qt::AlignVCenter);
         if (id == m_activeProviderId)
             item->setProperty("active", true);
-        m_providerNavLayout->addWidget(item);
+        return item;
+    };
+
+    int shown = 0;
+    for (const ProviderGroupDef &group : kProviderGroups) {
+        const QString key = QLatin1String(group.key);
+        // 组内顺序 = 配置里的 providers 顺序（webui 的 filter 不改序），
+        // 组间顺序 = kProviderGroups，与 default_api 无关
+        QStringList ids;
+        QList<QVariantMap> items;
+        for (int i = 0; i < m_providers.size(); ++i) {
+            const QVariantMap provider = m_providers.at(i).toMap();
+            if (providerGroupKey(provider) != key)
+                continue;
+            ids.append(provider.value(QStringLiteral("id")).toString());
+            items.append(provider);
+        }
+        if (ids.isEmpty())
+            continue; // 空组不显示
+
+        auto *box = new QWidget;
+        setClass(box, QStringLiteral("providerGroup"));
+        auto *gl = new QVBoxLayout(box);
+        // .provider-group+.provider-group{margin-top:16px}
+        gl->setContentsMargins(0, shown == 0 ? 0 : gs::scaledPx(16), 0, 0);
+        gl->setSpacing(0);
+        QLabel *label = plainLabel(QStringLiteral("providerGroupLabel"),
+                                   QString::fromUtf8(group.label));
+        label->setStyleSheet(labelStyle);
+        gl->addWidget(label);
+        for (int i = 0; i < ids.size(); ++i)
+            gl->addWidget(makeItem(ids.at(i), items.at(i)));
+        m_providerNavLayout->addWidget(box);
+        ++shown;
     }
     m_providerNavLayout->addStretch(1);
 }
@@ -1156,6 +2348,9 @@ void SettingsDialog::renderProviderEditor()
     m_placeholder->setVisible(!hasProvider);
     m_sectionProvider->setVisible(hasProvider);
     m_sectionModels->setVisible(hasProvider);
+    if (m_sectionMeta)
+        m_sectionMeta->setVisible(hasProvider);
+    renderModelMeta();
     if (!hasProvider)
         return;
 
@@ -1213,8 +2408,8 @@ void SettingsDialog::renderProviderEditor()
     m_updating = false;
 
     clearLayout(m_modelListLayout);
-    m_modelGrids.clear();
-    m_modelGridFields.clear();
+    m_modelRows.clear();
+    m_modelCapsRows.clear();
     for (int i = 0; i < models.size(); ++i)
         renderModelCard(models.at(i).toMap());
     renderCandidates();
@@ -1228,11 +2423,18 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
     const QString displayName = model.value(QStringLiteral("name")).toString().isEmpty()
                                     ? id
                                     : model.value(QStringLiteral("name")).toString();
+    const QVariantMap capabilities = model.value(QStringLiteral("capabilities")).toMap();
+    const QVariantMap limits = modelLimits(provider, id);
+    const int ownContext = model.value(QStringLiteral("context_window")).toInt();
+    const int contextLimit = limits.value(QStringLiteral("context_window")).toInt();
+    // 上下文 chip：优先用配置里的 context_window，没有就用快照 / 候选里的值（弱化样式）
+    const int chipValue = ownContext > 0 ? ownContext : contextLimit;
 
     auto *card = new ExpandCard(QStringLiteral("settingsModel"),
                                 QStringLiteral("settingsModelSummary"),
                                 QStringLiteral("modelAdvanced"));
 
+    // ---- summary：名称/ID → 能力图标 → 上下文 chip → API 协议 → 删除 ----
     auto *summary = new QHBoxLayout;
     summary->setContentsMargins(10, 9, 10, 9);
     summary->setSpacing(10);
@@ -1242,10 +2444,37 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
     textBox->addWidget(plainLabel(QStringLiteral("settingsModelName"), displayName));
     textBox->addWidget(plainLabel(QStringLiteral("settingsModelId"), id));
     summary->addLayout(textBox, 1);
+
+    // 能力小图标：只画已开启的，一项都没开就整段不出现。
+    // webui 用内联 SVG；Qt 侧走 resources/icons 里的 cap-*，13px 单色描边
+    auto *capsRow = new QWidget(card->summary());
+    auto *capsLayout = new QHBoxLayout(capsRow);
+    capsLayout->setContentsMargins(0, 0, 0, 0);
+    capsLayout->setSpacing(gs::scaledPx(7));
+    capsRow->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    summary->addWidget(capsRow, 0, Qt::AlignVCenter);
+    m_modelCapsRows.append(capsRow);
+
+    QLabel *chipLabel = nullptr;
+    if (chipValue > 0) {
+        chipLabel = plainLabel(ownContext > 0 ? QStringLiteral("modelCtx")
+                                             : QStringLiteral("modelCtx modelCtxFallback"),
+                               formatTokens(chipValue));
+        if (ownContext <= 0)
+            chipLabel->setToolTip(QStringLiteral("来自模型信息，尚未写入配置"));
+        summary->addWidget(chipLabel, 0, Qt::AlignVCenter);
+    }
+    const QPointer<QLabel> chip(chipLabel);
+
     const QString api = model.value(QStringLiteral("api")).toString();
     summary->addWidget(plainLabel(QStringLiteral("settingsModelApi"),
                                   api.isEmpty() ? QStringLiteral("继承供应商") : api),
                        0, Qt::AlignVCenter);
+    // 行尾折叠箭头（webui `.settings-model>summary::after`）：收起朝右、展开朝下。
+    // 箭头不自己记状态，只镜像 ExpandCard 的开合，避免两处状态走偏
+    auto *chevron = new Chevron(card->summary());
+    summary->addWidget(chevron, 0, Qt::AlignVCenter);
+    connect(card, &ExpandCard::openChanged, chevron, &Chevron::setOpen);
     auto *remove = new IconPushButton(card->summary());
     setClass(remove, QStringLiteral("modelDelete"));
     remove->setFixedSize(22, 22);
@@ -1258,56 +2487,130 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
     card->summaryLayout()->addLayout(summary);
 
     auto *body = card->bodyLayout();
-    body->setContentsMargins(12, 12, 12, 12);
+    body->setContentsMargins(12, 0, 12, 12);
     body->setSpacing(0);
-    auto *grid = new QGridLayout;
-    grid->setObjectName(QStringLiteral("modelFormGrid"));
-    grid->setContentsMargins(0, 0, 0, 0);
-    grid->setHorizontalSpacing(12);
-    grid->setVerticalSpacing(12);
 
+    // 能力图标随开关实时重建（webui 只在整块重渲染时刷新，这里做得更跟手）
+    auto refreshCaps = [this, capsRow, capsLayout, key] {
+        while (QLayoutItem *item = capsLayout->takeAt(0)) {
+            if (QWidget *widget = item->widget())
+                widget->deleteLater();
+            delete item;
+        }
+        const int index = modelIndex(key);
+        const QVariantMap caps = index >= 0
+                                     ? m_models.at(index).toMap()
+                                           .value(QStringLiteral("capabilities"))
+                                           .toMap()
+                                     : QVariantMap();
+        QStringList labels;
+        for (int i = 0; i < 4; ++i) {
+            const QString capKey = QLatin1String(kModelCapabilities[i].key);
+            if (!caps.value(capKey).toBool())
+                continue;
+            auto *icon = plainLabel(QString(), QString());
+            icon->setPixmap(iconPixmap(QLatin1String(kModelCapabilities[i].icon),
+                                       gs::palette().muted, gs::scaledPx(13)));
+            icon->setFixedSize(gs::scaledPx(13), gs::scaledPx(13));
+            capsLayout->addWidget(icon);
+            labels << QString::fromUtf8(kModelCapabilities[i].label);
+        }
+        capsRow->setProperty("hasCaps", !labels.isEmpty());
+        capsRow->setToolTip(labels.isEmpty()
+                                ? QString()
+                                : QStringLiteral("已启用：%1").arg(labels.join(QStringLiteral(" · "))));
+        capsRow->setVisible(!labels.isEmpty() && !m_compact);
+    };
+    refreshCaps();
+
+    // 行序与 webui 一致：ID → 显示名称 → API 协议 → 上下文/输出（两列）
+    //                     → 思考强度 → 四个能力开关
+    auto *idRow = new ModelRow(card->body());
+    auto *idText = plainLabel(QStringLiteral("modelId"), id);
+    idText->setWordWrap(true);
+    idText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    idText->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    idRow->addField(QStringLiteral("ID"), QString(), idText);
+    body->addWidget(idRow);
+    m_modelRows.append(idRow);
+
+    auto *nameRow = new ModelRow(card->body());
     auto *nameEdit = settingsInput(QString());
     nameEdit->setText(model.value(QStringLiteral("name")).toString());
-    auto *contextEdit = settingsInput(QString());
-    contextEdit->setValidator(new QIntValidator(1, 100000000, contextEdit));
-    contextEdit->setText(QString::number(model.value(QStringLiteral("context_window")).toInt()
-                                             ? model.value(QStringLiteral("context_window")).toInt()
-                                             : 32768));
-    auto *outputEdit = settingsInput(QString());
-    outputEdit->setValidator(new QIntValidator(1, 100000000, outputEdit));
-    outputEdit->setText(QString::number(model.value(QStringLiteral("max_output_tokens")).toInt()
-                                            ? model.value(QStringLiteral("max_output_tokens")).toInt()
-                                            : 4096));
+    nameRow->addField(QStringLiteral("显示名称"), QString(), nameEdit);
+    body->addWidget(nameRow);
+    m_modelRows.append(nameRow);
+
+    auto *apiRow = new ModelRow(card->body());
     auto *apiCombo = settingsCombo();
-    apiCombo->addItem(QStringLiteral("继承供应商"), QString());
+    apiCombo->addItem(QStringLiteral("自动（供应商默认）"), QString());
     apiCombo->addItem(QStringLiteral("OpenAI Chat"), QStringLiteral("openai-chat"));
     apiCombo->addItem(QStringLiteral("OpenAI Responses"), QStringLiteral("openai-responses"));
     apiCombo->addItem(QStringLiteral("Anthropic Messages"),
                       QStringLiteral("anthropic-messages"));
-    selectComboData(apiCombo, model.value(QStringLiteral("api")).toString());
+    selectComboData(apiCombo, api);
+    apiRow->addField(QStringLiteral("API 协议"),
+                     QStringLiteral("仅覆盖此模型的 API 协议；自动模式沿用供应商默认值。"),
+                     apiCombo);
+    body->addWidget(apiRow);
+    m_modelRows.append(apiRow);
 
-    QList<QWidget *> fields = {
-        fieldRow(QStringLiteral("显示名称"), nameEdit),
-        fieldRow(QStringLiteral("Context window"), contextEdit),
-        fieldRow(QStringLiteral("Max output tokens"), outputEdit),
-        fieldRow(QStringLiteral("API 协议覆盖"), apiCombo),
-    };
-    placeFormFields(grid, fields, m_compact);
-    m_modelGrids.append(grid);
-    m_modelGridFields.append(fields);
-    body->addLayout(grid);
+    auto *limitRow = new ModelRow(card->body());
+    // 双列行（.srow-2）：宽屏两字段并排，窄屏并单列。测试按名字取它验重排
+    limitRow->setObjectName(QStringLiteral("modelLimitRow"));
+    auto *contextField = new NumField(contextPresets());
+    contextField->setValue(ownContext);
+    contextField->setPlaceholder(autoLimitText(limits, QStringLiteral("context_window")));
+    auto *outputField = new NumField(outputPresets());
+    outputField->setValue(model.value(QStringLiteral("max_output_tokens")).toInt());
+    outputField->setPlaceholder(autoLimitText(limits, QStringLiteral("max_output_tokens")));
+    limitRow->addField(QStringLiteral("上下文长度"), QString(), contextField);
+    limitRow->addField(QStringLiteral("最大输出"), QString(), outputField);
+    body->addWidget(limitRow);
+    m_modelRows.append(limitRow);
 
-    auto *caps = new QWidget(card->body());
-    auto *flow = new FlowLayout(caps, 0, 18, 8);
-    flow->setContentsMargins(0, 12, 0, 0);
-    const QVariantMap capabilities = model.value(QStringLiteral("capabilities")).toMap();
-    for (int i = 0; i < 5; ++i) {
-        const QString capKey = QLatin1String(kCapabilities[i][0]);
-        auto *check = new QCheckBox(QLatin1String(kCapabilities[i][1]), caps);
-        setClass(check, QStringLiteral("settingsCheck"));
-        check->setCursor(Qt::PointingHandCursor);
-        check->setChecked(capabilities.value(capKey).toBool());
-        connect(check, &QCheckBox::toggled, this, [this, key, capKey](bool on) {
+    auto *thinkRow = new ModelRow(card->body());
+    auto *thinkCombo = settingsCombo();
+    thinkCombo->addItem(QStringLiteral("默认（不干预）"), QString());
+    thinkCombo->addItem(QStringLiteral("关闭思考"), QStringLiteral("off"));
+    thinkCombo->addItem(QStringLiteral("最小"), QStringLiteral("minimal"));
+    thinkCombo->addItem(QStringLiteral("低"), QStringLiteral("low"));
+    thinkCombo->addItem(QStringLiteral("中"), QStringLiteral("medium"));
+    thinkCombo->addItem(QStringLiteral("高"), QStringLiteral("high"));
+    // app.js：compat.thinking == "disabled" 显示「关闭思考」，否则用 compat.reasoning_effort
+    const QVariantMap compat = model.value(QStringLiteral("compat")).toMap();
+    QString thinkingMode = compat.value(QStringLiteral("thinking")).toString()
+                                   == QLatin1String("disabled")
+                               ? QStringLiteral("off")
+                               : compat.value(QStringLiteral("reasoning_effort")).toString();
+    const QStringList thinkingValues = {QString(), QStringLiteral("off"), QStringLiteral("minimal"),
+                                       QStringLiteral("low"), QStringLiteral("medium"),
+                                       QStringLiteral("high")};
+    if (!thinkingValues.contains(thinkingMode))
+        thinkingMode.clear();
+    selectComboData(thinkCombo, thinkingMode);
+    thinkRow->addField(QStringLiteral("思考强度"),
+                       QStringLiteral("控制该模型的推理档位；默认不干预。"), thinkCombo);
+    body->addWidget(thinkRow);
+    m_modelRows.append(thinkRow);
+
+    // .settings-toggle：四项能力开关（视觉 / 视频 / 音频 / 推理）
+    for (int i = 0; i < 4; ++i) {
+        const QString capKey = QLatin1String(kModelCapabilities[i].key);
+        auto *row = new QWidget(card->body());
+        setClass(row, i == 3 ? QStringLiteral("settingsToggle settingsToggleLast")
+                             : QStringLiteral("settingsToggle"));
+        row->setAttribute(Qt::WA_StyledBackground, true);
+        row->setMinimumHeight(gs::scaledPx(50));
+        auto *box = new QHBoxLayout(row);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setSpacing(gs::scaledPx(14));
+        box->addWidget(plainLabel(QStringLiteral("toggleLabel"),
+                                  QString::fromUtf8(kModelCapabilities[i].label)),
+                       1);
+        auto *toggle = new SwitchToggle(row);
+        toggle->setChecked(capabilities.value(capKey).toBool());
+        toggle->onToggled = [this, key, capKey, refreshCaps](bool on) {
             const int index = modelIndex(key);
             if (index < 0)
                 return;
@@ -1316,11 +2619,36 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
             caps.insert(capKey, on);
             item.insert(QStringLiteral("capabilities"), caps);
             m_models[index] = item;
+            // 用户改过能力项：之后不再让快照自动勾回（webui markCapsTouched）
+            capsTouchedSet().insert(key);
             markDirty();
-        });
-        flow->addWidget(check);
+            refreshCaps();
+        };
+        box->addWidget(toggle, 0, Qt::AlignVCenter);
+        body->addWidget(row);
     }
-    body->addWidget(caps);
+
+    // 数值框统一走这里：空即删键（webui 的 `delete model[name]`）
+    auto writeNumber = [this, key, chip](const QString &field, const QString &text) {
+        const int index = modelIndex(key);
+        if (index < 0)
+            return;
+        QVariantMap item = m_models.at(index).toMap();
+        const int value = text.trimmed().toInt();
+        if (value > 0)
+            item.insert(field, value);
+        else
+            item.remove(field);
+        m_models[index] = item;
+        markDirty();
+        // 折叠行上的 chip 跟着新值走（没有整块重渲染，那一格不会自己更新）
+        if (chip && field == QLatin1String("context_window") && value > 0) {
+            chip->setText(formatTokens(value));
+            setClass(chip.data(), QStringLiteral("modelCtx"));
+            chip->setToolTip(QString());
+            gs::restyle(chip.data());
+        }
+    };
 
     auto writeField = [this, key](const QString &field, const QVariant &value) {
         const int index = modelIndex(key);
@@ -1332,18 +2660,40 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
         markDirty();
     };
     connect(nameEdit, &QLineEdit::textChanged, this, [writeField](const QString &text) {
-        writeField(QStringLiteral("name"), text);
+        writeField(QStringLiteral("name"), text.isEmpty() ? QVariant() : QVariant(text));
     });
-    connect(contextEdit, &QLineEdit::textChanged, this, [writeField](const QString &text) {
-        writeField(QStringLiteral("context_window"), text.toInt());
+    connect(contextField->input(), &QLineEdit::textChanged, this,
+            [writeNumber](const QString &text) {
+        writeNumber(QStringLiteral("context_window"), text);
     });
-    connect(outputEdit, &QLineEdit::textChanged, this, [writeField](const QString &text) {
-        writeField(QStringLiteral("max_output_tokens"), text.toInt());
+    connect(outputField->input(), &QLineEdit::textChanged, this,
+            [writeNumber](const QString &text) {
+        writeNumber(QStringLiteral("max_output_tokens"), text);
     });
     connect(apiCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
             [writeField, apiCombo](int) {
         const QString value = comboData(apiCombo);
         writeField(QStringLiteral("api"), value.isEmpty() ? QVariant() : QVariant(value));
+    });
+    // 思考强度：off → compat.thinking="disabled"；其余写 compat.reasoning_effort；
+    // 空档位两个键都删掉（webui 原样）
+    connect(thinkCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+            [this, key, thinkCombo](int) {
+        const int index = modelIndex(key);
+        if (index < 0)
+            return;
+        QVariantMap item = m_models.at(index).toMap();
+        QVariantMap compat = item.value(QStringLiteral("compat")).toMap();
+        compat.remove(QStringLiteral("thinking"));
+        compat.remove(QStringLiteral("reasoning_effort"));
+        const QString value = comboData(thinkCombo);
+        if (value == QLatin1String("off"))
+            compat.insert(QStringLiteral("thinking"), QStringLiteral("disabled"));
+        else if (!value.isEmpty())
+            compat.insert(QStringLiteral("reasoning_effort"), value);
+        item.insert(QStringLiteral("compat"), compat);
+        m_models[index] = item;
+        markDirty();
     });
     connect(remove, &QPushButton::clicked, this, [this, key] {
         const int index = modelIndex(key);
@@ -1363,8 +2713,21 @@ void SettingsDialog::renderModelCard(const QVariantMap &model)
             }
         }
         markDirty();
+        m_openModelKeys.remove(key);
         renderSettings();
     });
+
+    // 重渲染后恢复展开态：宿主回填 limits（setModelMetadata → renderProviderEditor）
+    // 走的就是重建这条路，不记着的话用户刚展开的那张会自己收回去，
+    // 数值框占位文案（autoLimitText）的新值也就看不到了
+    connect(card, &ExpandCard::openChanged, this, [this, key](bool open) {
+        if (open)
+            m_openModelKeys.insert(key);
+        else
+            m_openModelKeys.remove(key);
+    });
+    if (m_openModelKeys.contains(key))
+        card->setOpen(true);
 
     m_modelListLayout->addWidget(card);
 }
@@ -1391,6 +2754,14 @@ void SettingsDialog::renderCandidates()
         QString name = item.value(QStringLiteral("name")).toString();
         if (name.isEmpty())
             name = id;
+        // 行内「输入/输出上限」（webui renderCandidates 的 limits）
+        QStringList limits;
+        const int contextWindow = item.value(QStringLiteral("context_window")).toInt();
+        const int maxOutput = item.value(QStringLiteral("max_output_tokens")).toInt();
+        if (contextWindow > 0)
+            limits << QStringLiteral("%1 输入").arg(formatTokens(contextWindow));
+        if (maxOutput > 0)
+            limits << QStringLiteral("%1 输出").arg(formatTokens(maxOutput));
 
         auto *button = new QPushButton;
         setClass(button, QStringLiteral("candidateItem"));
@@ -1403,12 +2774,22 @@ void SettingsDialog::renderCandidates()
         auto *mark = plainLabel(QStringLiteral("candidateName"), QString());
         mark->setFixedWidth(18);
         mark->setAlignment(Qt::AlignCenter);
-        mark->setPixmap(iconPixmap(exists ? QStringLiteral("check")
-                                          : QStringLiteral("plus"),
-                                   QColor(QStringLiteral("#d7e2e8")), 11));
+        mark->setPixmap(iconPixmap(exists ? QStringLiteral("check") : QStringLiteral("plus"),
+                                   gs::palette().cyan, 11));
         bl->addWidget(mark);
         bl->addWidget(plainLabel(QStringLiteral("candidateName"), name), 1);
-        bl->addWidget(plainLabel(QStringLiteral("candidateId"), id));
+        auto *right = new QWidget(button);
+        auto *rightLayout = new QHBoxLayout(right);
+        rightLayout->setContentsMargins(0, 0, 0, 0);
+        rightLayout->setSpacing(8);
+        rightLayout->addWidget(plainLabel(QStringLiteral("candidateId"), id), 0,
+                               Qt::AlignVCenter);
+        if (!limits.isEmpty()) {
+            rightLayout->addWidget(plainLabel(QStringLiteral("candidateLimit"),
+                                             limits.join(QStringLiteral(" · "))),
+                                   0, Qt::AlignVCenter);
+        }
+        bl->addWidget(right, 0, Qt::AlignVCenter);
         connect(button, &QPushButton::clicked, this, [this, id, name] { addModel(id, name); });
         m_candidateLayout->addWidget(button);
         ++shown;
@@ -1718,8 +3099,12 @@ void SettingsDialog::addModel(const QString &rawId, const QString &name)
         }
     }
     QVariantMap capabilities;
-    for (int i = 0; i < 5; ++i)
-        capabilities.insert(QLatin1String(kCapabilities[i][0]), false);
+    // webui HEAD 的 addModel：界面四项；后端 schema 里的旧键照样摆上 false，
+    // 兼容存量 config.json（tools / parallel_tools / stream_usage）
+    for (int i = 0; i < 4; ++i)
+        capabilities.insert(QLatin1String(kModelCapabilities[i].key), false);
+    for (const char *legacy : kLegacyCapabilityKeys)
+        capabilities.insert(QLatin1String(legacy), false);
 
     QVariantMap model;
     model.insert(QStringLiteral("id"), id);
@@ -1727,15 +3112,23 @@ void SettingsDialog::addModel(const QString &rawId, const QString &name)
     model.insert(QStringLiteral("api"), QVariant());
     model.insert(QStringLiteral("name"), name.isEmpty() ? id : name);
     model.insert(QStringLiteral("enabled"), true);
-    model.insert(QStringLiteral("context_window"), 32768);
-    model.insert(QStringLiteral("max_output_tokens"), 4096);
     model.insert(QStringLiteral("capabilities"), capabilities);
     model.insert(QStringLiteral("compat"), QVariantMap());
+    // webui 不再写 32768/4096 这类保守默认值：上限留空，由候选 / 快照当场填好
+    // （fillModelLimits）；实在查不到就留空，保存时后端再做一次兜底
+    // 上限 / 能力项：候选或快照里有就当场填好（applyModelLimits 只填空字段）
+    const QVariantMap known = modelLimits(m_activeProviderId, id);
+    applyModelLimits(model, known);
     m_models.append(model);
     if (m_defaultModel.isEmpty())
         m_defaultModel = m_activeProviderId + QLatin1Char('/') + id;
     markDirty();
     renderSettings();
+    // webui fillModelLimits：候选 / 快照里连能力项都没有时，再问一次解析接口把缺的补齐。
+    // 必须在 model 已进 m_models 之后发——宿主回填走 applyStoredModelLimits，
+    // 草稿里没这一条就只能丢掉
+    if (!known.contains(QStringLiteral("capabilities")))
+        emit modelLimitsResolveRequested(m_activeProviderId, id);
 }
 
 bool SettingsDialog::validateSettings()

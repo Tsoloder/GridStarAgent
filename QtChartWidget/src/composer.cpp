@@ -9,6 +9,7 @@
 #include <QCursor>
 #include <QEvent>
 #include <QFocusEvent>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QKeyEvent>
@@ -131,13 +132,36 @@ Composer::Composer(QWidget *parent)
     };
     buildControl(QString::fromUtf8("交互模式"), &m_modeTrigger, &m_modeControl);
     buildControl(QString::fromUtf8("模型"), &m_modelTrigger, &m_modelControl);
+    // webui 顺序：模式 / 模型 / 专业分类 / 知识库 / 上下文圆环 / 技能芯片
+    buildControl(QString::fromUtf8("专业分类"), &m_categoryTrigger, &m_categoryControl);
+    buildControl(QString::fromUtf8("知识库"), &m_kbTrigger, &m_kbControl);
     m_modeTrigger->setText(QString::fromUtf8("手动"));
+    // 分类与知识库的触发器要能被 demo/测试按名字找到
+    m_categoryTrigger->setObjectName(QStringLiteral("categoryTrigger"));
+    m_kbTrigger->setObjectName(QStringLiteral("kbTrigger"));
+    m_categoryTrigger->setText(QString::fromUtf8("全部"));
+    m_kbTrigger->setText(QString::fromUtf8("全部知识库"));
+    // webui #kb-trigger{max-width:160px}：触发器太宽时文本自己省略
+    if (m_kbTrigger)
+        m_kbTrigger->setMaximumWidth(160);
+    if (m_kbControl)
+        m_kbControl->setMaximumWidth(200);
 
-    // webui bindHoverDropdown：模型 / 模式两个控件都是「悬停展开、点击开合」
+    // 上下文用量圆环（#context-ring）：30×30 悬停区里画 22×22 的环，紧跟在知识库之后
+    m_ring = new ContextRing(m_leftControls);
+    m_ring->setObjectName(QStringLiteral("contextRing"));
+    m_ring->installEventFilter(this);
+    leftFlow->addWidget(m_ring);
+
+    // webui bindHoverDropdown：四个下拉控件都是「悬停展开、点击开合」
     for (QWidget *hoverTarget : { static_cast<QWidget *>(m_modeControl),
                                   static_cast<QWidget *>(m_modeTrigger),
                                   static_cast<QWidget *>(m_modelControl),
-                                  static_cast<QWidget *>(m_modelTrigger) }) {
+                                  static_cast<QWidget *>(m_modelTrigger),
+                                  static_cast<QWidget *>(m_categoryControl),
+                                  static_cast<QWidget *>(m_categoryTrigger),
+                                  static_cast<QWidget *>(m_kbControl),
+                                  static_cast<QWidget *>(m_kbTrigger) }) {
         hoverTarget->setAttribute(Qt::WA_Hover, true);
         hoverTarget->installEventFilter(this);
     }
@@ -225,6 +249,19 @@ Composer::Composer(QWidget *parent)
     m_modelList->setProperty("role", QStringLiteral("model"));
     m_modeList = new ListBoxPopup(this);
     m_modeList->setProperty("role", QStringLiteral("mode"));
+    // 分类 / 知识库用同一个 ListBoxPopup 平铺渲染。objectName 改成契约要求的
+    // categoryList / kbList，#listbox 那条 QSS 就匹配不上了，样式在 applyLocalStyles()
+    // 里用局部 QSS 补齐（见报告里的主题化清单）
+    m_categoryList = new ListBoxPopup(this);
+    m_categoryList->setObjectName(QStringLiteral("categoryList"));
+    m_categoryList->setProperty("role", QStringLiteral("category"));
+    m_kbList = new ListBoxPopup(this);
+    m_kbList->setObjectName(QStringLiteral("kbList"));
+    m_kbList->setProperty("role", QStringLiteral("knowledgeBase"));
+    // 上下文浮层与 selection overlay 同一套挂载方式：浮在圆环上方，不入布局
+    m_contextPop = new ContextPop(overlayParent);
+    m_contextPop->setVisible(false);
+    connect(m_contextPop, &QObject::destroyed, this, [this] { m_contextPop = nullptr; });
     // 斜杠面板与选择浮层同一套挂载方式：浮在输入框上方，不入布局
     m_slash = new SlashPanel(overlayParent);
     m_slash->setVisible(false);
@@ -269,6 +306,22 @@ Composer::Composer(QWidget *parent)
     connect(m_modeList, &ListBoxPopup::chosen, this, [this](const QString &value) {
         selectMode(value);
     });
+    // 专业分类下拉（webui #category-trigger / #category-listbox）
+    connect(m_categoryTrigger, &ComboTrigger::clicked, this, [this] {
+        if (categoryListOpen())
+            closeCategoryList();
+        else
+            openCategoryList();
+    });
+    connect(m_categoryList, &ListBoxPopup::chosen, this, &Composer::selectCategory);
+    // 知识库下拉（webui #kb-trigger / #kb-listbox）
+    connect(m_kbTrigger, &ComboTrigger::clicked, this, [this] {
+        if (kbListOpen())
+            closeKbList();
+        else
+            openKbList();
+    });
+    connect(m_kbList, &ListBoxPopup::chosen, this, &Composer::selectKnowledgeBase);
     connect(m_skillChip, &QPushButton::clicked, this, [this] {
         // 点标签即清除技能，焦点还给输入框（webui：selectSkill("") 后 input.focus()）
         selectSkill(QString());
@@ -277,6 +330,8 @@ Composer::Composer(QWidget *parent)
     connect(m_slash, &SlashPanel::itemChosen, this, &Composer::runSlashItem);
     m_modelList->installEventFilter(this);
     m_modeList->installEventFilter(this);
+    m_categoryList->installEventFilter(this);
+    m_kbList->installEventFilter(this);
     // 悬停开合的游标轮询：只在浮层由悬停（光标在控件上）打开时启用，
     // 每 tick 检查光标是否还留在 [控件 ∪ 浮层] 里（75ms × 2 = webui 的 150ms 延迟）
     m_hoverPoll = new QTimer(this);
@@ -289,7 +344,18 @@ Composer::Composer(QWidget *parent)
         updateSendState();
     });
 
-    connect(m_choice, &ChoiceOverlay::optionChosen, this, &Composer::optionChosen);
+    // 选项提交要等模型真的空闲：上一轮还在收尾（done 事件到了但 SSE 还没排完）时
+    // 宿主的 sendMessage 会把这次选择默默丢掉，而卡片此刻已经锁死，用户再点也没反应
+    // （webui 5948605 的 retry 机制）。这里做简化：忙的时候不锁卡，直接提示等一等。
+    connect(m_choice, &ChoiceOverlay::optionChosen, this,
+            [this](const QString &value, const QString &label) {
+                if (inputBusy()) {
+                    m_choice->resetSubmitted();
+                    emit toastRequested(QStringLiteral("上一轮还在收尾，略等片刻再选"));
+                    return;
+                }
+                emit optionChosen(value, label);
+            });
     connect(m_choice, &ChoiceOverlay::approvalDecided, this, &Composer::approvalDecided);
     connect(m_choice, &ChoiceOverlay::sendRequested, this,
             [this](const QString &payload, const QString &display) {
@@ -307,6 +373,9 @@ Composer::Composer(QWidget *parent)
         layoutChoiceOverlay();
         emit choiceResized();
     });
+
+    // 分类/知识库浮层与上下文浮层的局部样式（配色取当前皮肤）
+    applyLocalStyles();
 }
 
 Composer::~Composer()
@@ -314,6 +383,20 @@ Composer::~Composer()
     // 浮层通常挂在宿主窗口下，Composer 被单独销毁时不能把它遗留在界面上。
     delete m_choice;
     delete m_slash;
+    delete m_contextPop;
+}
+
+void Composer::changeEvent(QEvent *event)
+{
+    QWidget::changeEvent(event);
+    // 皮肤切换会重设全局 QSS，Composer 子树收到 StyleChange：
+    // 两枚新下拉的局部 QSS 和上下文浮层得按新配色重建，圆环是自绘只需重画
+    if (event->type() == QEvent::StyleChange) {
+        applyLocalStyles();
+        if (m_ring)
+            m_ring->update();
+        layoutContextPop();
+    }
 }
 
 void Composer::hideEvent(QHideEvent *event)
@@ -321,6 +404,8 @@ void Composer::hideEvent(QHideEvent *event)
     if (m_choice)
         m_choice->hide();
     closeSlashMenu();
+    closeAllDropdowns();
+    hideContextPop();
     QWidget::hideEvent(event);
 }
 
@@ -329,6 +414,7 @@ void Composer::moveEvent(QMoveEvent *event)
     QWidget::moveEvent(event);
     layoutChoiceOverlay();
     layoutSlashPanel();
+    layoutContextPop();
 }
 
 void Composer::resizeEvent(QResizeEvent *event)
@@ -340,6 +426,7 @@ void Composer::resizeEvent(QResizeEvent *event)
     applyAttachmentCompact();
     layoutChoiceOverlay();
     layoutSlashPanel();
+    layoutContextPop();
 }
 
 void Composer::showEvent(QShowEvent *event)
@@ -349,6 +436,7 @@ void Composer::showEvent(QShowEvent *event)
         m_choice->show();
     layoutChoiceOverlay();
     layoutSlashPanel();
+    layoutContextPop();
     if (m_choiceOpen)
         emit choiceResized();
 }
@@ -464,23 +552,58 @@ bool Composer::eventFilter(QObject *watched, QEvent *event)
         m_modelTrigger->setOpen(false);
     } else if (watched == m_modeList && event->type() == QEvent::Hide) {
         m_modeTrigger->setOpen(false);
-    } else if (watched == m_modeControl || watched == m_modeTrigger
-               || watched == m_modelControl || watched == m_modelTrigger) {
-        const bool modeControl = watched == m_modeControl || watched == m_modeTrigger;
-        if (event->type() == QEvent::HoverEnter) {
-            hoverEnterControl(modeControl);
-        } else if (event->type() == QEvent::KeyPress
-                   && (watched == m_modeTrigger || watched == m_modelTrigger)) {
+    } else if (watched == m_categoryList && event->type() == QEvent::Hide) {
+        m_categoryTrigger->setOpen(false);
+    } else if (watched == m_kbList && event->type() == QEvent::Hide) {
+        m_kbTrigger->setOpen(false);
+    } else if (watched == m_ring) {
+        // webui .context-ring:hover / :focus-visible 露出 .context-pop
+        switch (event->type()) {
+        case QEvent::Enter:
+        case QEvent::FocusIn:
+            showContextPop();
+            break;
+        case QEvent::Leave:
+        case QEvent::FocusOut:
+            hideContextPop();
+            break;
+        case QEvent::KeyPress: {
             const int key = static_cast<QKeyEvent *>(event)->key();
-            if (key == Qt::Key_Down || key == Qt::Key_Up) {
-                // webui handleModelKeys / handleModeKeys：闭着时方向键也能展开
-                if (modeControl) {
-                    if (!modeListOpen())
-                        openModeList();
-                } else if (!(m_modelList && m_modelList->isVisible())) {
-                    openModelList();
-                }
+            if (key == Qt::Key_Escape) {
+                hideContextPop();
                 return true;
+            }
+            // 焦点在圆环上时方向键/回车/空格也能展开（webui 是纯 hover/focus 的 CSS 行为）
+            if (key == Qt::Key_Down || key == Qt::Key_Up || key == Qt::Key_Return
+                || key == Qt::Key_Enter || key == Qt::Key_Space) {
+                showContextPop();
+                return true;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    } else {
+        // 四个下拉的控件体与触发器共用这一支：悬停展开、方向键展开、Esc 收起
+        const Dropdown which = dropdownFor(watched);
+        if (which != Dropdown::None) {
+            const bool isTrigger = watched == triggerFor(which);
+            if (event->type() == QEvent::HoverEnter) {
+                hoverEnterControl(which);
+            } else if (event->type() == QEvent::KeyPress && isTrigger) {
+                const int key = static_cast<QKeyEvent *>(event)->key();
+                if (key == Qt::Key_Down || key == Qt::Key_Up) {
+                    // webui handleModelKeys / handleModeKeys / handleCategoryKeys：
+                    // 闭着时方向键也能展开
+                    if (!dropdownOpen(which))
+                        openDropdown(which);
+                    return true;
+                }
+                if (key == Qt::Key_Escape && dropdownOpen(which)) {
+                    closeDropdown(which);
+                    return true;
+                }
             }
         }
     }
@@ -503,41 +626,199 @@ void Composer::selectMode(const QString &value)
     setMode(value);
 }
 
+// ------------------------------------------------------------ 四个下拉的开合与互斥
+
+ListBoxPopup *Composer::popupFor(Dropdown which) const
+{
+    switch (which) {
+    case Dropdown::Mode:
+        return m_modeList;
+    case Dropdown::Model:
+        return m_modelList;
+    case Dropdown::Category:
+        return m_categoryList;
+    case Dropdown::KnowledgeBase:
+        return m_kbList;
+    case Dropdown::None:
+        break;
+    }
+    return nullptr;
+}
+
+ComboTrigger *Composer::triggerFor(Dropdown which) const
+{
+    switch (which) {
+    case Dropdown::Mode:
+        return m_modeTrigger;
+    case Dropdown::Model:
+        return m_modelTrigger;
+    case Dropdown::Category:
+        return m_categoryTrigger;
+    case Dropdown::KnowledgeBase:
+        return m_kbTrigger;
+    case Dropdown::None:
+        break;
+    }
+    return nullptr;
+}
+
+QWidget *Composer::controlFor(Dropdown which) const
+{
+    switch (which) {
+    case Dropdown::Mode:
+        return m_modeControl;
+    case Dropdown::Model:
+        return m_modelControl;
+    case Dropdown::Category:
+        return m_categoryControl;
+    case Dropdown::KnowledgeBase:
+        return m_kbControl;
+    case Dropdown::None:
+        break;
+    }
+    return nullptr;
+}
+
+Composer::Dropdown Composer::dropdownFor(const QObject *watched) const
+{
+    for (Dropdown which : { Dropdown::Mode, Dropdown::Model, Dropdown::Category,
+                            Dropdown::KnowledgeBase }) {
+        if (watched == controlFor(which) || watched == triggerFor(which))
+            return which;
+    }
+    return Dropdown::None;
+}
+
+void Composer::openDropdown(Dropdown which)
+{
+    if (which == Dropdown::None)
+        return;
+    // 互斥：同一个位置只放得下一个面板，先关其它三个和斜杠面板
+    for (Dropdown other : { Dropdown::Mode, Dropdown::Model, Dropdown::Category,
+                            Dropdown::KnowledgeBase }) {
+        if (other != which)
+            closeDropdown(other);
+    }
+    closeSlashMenu();
+    hideContextPop();
+
+    ListBoxPopup *popup = popupFor(which);
+    ComboTrigger *trigger = triggerFor(which);
+    if (!popup || !trigger)
+        return;
+    switch (which) {
+    case Dropdown::Mode:
+        popup->setModeOptions(m_mode);
+        break;
+    case Dropdown::Model:
+        popup->setModelOptions(m_models, m_model);
+        break;
+    case Dropdown::Category:
+        popup->setPlainOptions(categoryRows(), m_category);
+        break;
+    case Dropdown::KnowledgeBase:
+        popup->setPlainOptions(kbRows(), m_kb);
+        break;
+    case Dropdown::None:
+        return;
+    }
+    trigger->setOpen(true);
+    // webui 下拉贴在外层 .model-control 左缘（openAbove 会再把越界的那截往回收）
+    QWidget *anchor = controlFor(which) ? controlFor(which) : static_cast<QWidget *>(trigger);
+    popup->openAbove(anchor);
+    // 光标在控件上才计入悬停管辖：程序化/键盘打开的下拉不该被悬停逻辑收走
+    const bool cursorOn = cursorIn(controlFor(which)) || cursorIn(trigger);
+    m_hoverManaged = cursorOn ? which : Dropdown::None;
+    updateHoverPoll();
+}
+
+void Composer::closeDropdown(Dropdown which)
+{
+    if (which == Dropdown::None)
+        return;
+    if (ListBoxPopup *popup = popupFor(which))
+        popup->hide();
+    if (ComboTrigger *trigger = triggerFor(which))
+        trigger->setOpen(false);
+    if (m_hoverManaged == which)
+        m_hoverManaged = Dropdown::None;
+    updateHoverPoll();
+}
+
+bool Composer::dropdownOpen(Dropdown which) const
+{
+    ListBoxPopup *popup = popupFor(which);
+    return popup && popup->isVisible();
+}
+
+void Composer::closeAllDropdowns()
+{
+    for (Dropdown which : { Dropdown::Mode, Dropdown::Model, Dropdown::Category,
+                            Dropdown::KnowledgeBase })
+        closeDropdown(which);
+}
+
+void Composer::openModelList()
+{
+    openDropdown(Dropdown::Model);
+}
+
+void Composer::closeModelList()
+{
+    closeDropdown(Dropdown::Model);
+}
+
 void Composer::openModeList()
 {
-    closeModelList();
-    closeSlashMenu();
-    m_modeList->setModeOptions(m_mode);
-    m_modeTrigger->setOpen(true);
-    m_modeList->openAbove(m_modeControl ? m_modeControl : m_modeTrigger);
-    // 光标在控件上才计入悬停管辖：程序化/键盘打开的下拉不该被悬停逻辑收走
-    m_hoverManagedMode = cursorIn(m_modeControl) || cursorIn(m_modeTrigger);
-    updateHoverPoll();
+    openDropdown(Dropdown::Mode);
 }
 
 void Composer::closeModeList()
 {
-    if (m_modeList)
-        m_modeList->hide();
-    m_modeTrigger->setOpen(false);
-    m_hoverManagedMode = false;
-    updateHoverPoll();
+    closeDropdown(Dropdown::Mode);
 }
 
 bool Composer::modeListOpen() const
 {
-    return m_modeList && m_modeList->isVisible();
+    return dropdownOpen(Dropdown::Mode);
 }
 
-// webui bindHoverDropdown：指针进入 .model-control / .mode-control 即展开
-void Composer::hoverEnterControl(bool modeControl)
+void Composer::openCategoryList()
 {
-    if (modeControl) {
-        if (!modeListOpen())
-            openModeList();
-    } else if (!(m_modelList && m_modelList->isVisible())) {
-        openModelList();
-    }
+    openDropdown(Dropdown::Category);
+}
+
+void Composer::closeCategoryList()
+{
+    closeDropdown(Dropdown::Category);
+}
+
+bool Composer::categoryListOpen() const
+{
+    return dropdownOpen(Dropdown::Category);
+}
+
+void Composer::openKbList()
+{
+    openDropdown(Dropdown::KnowledgeBase);
+}
+
+void Composer::closeKbList()
+{
+    closeDropdown(Dropdown::KnowledgeBase);
+}
+
+bool Composer::kbListOpen() const
+{
+    return dropdownOpen(Dropdown::KnowledgeBase);
+}
+
+// webui bindHoverDropdown：指针进入控件即展开
+void Composer::hoverEnterControl(Dropdown which)
+{
+    if (which == Dropdown::None || dropdownOpen(which))
+        return;
+    openDropdown(which);
 }
 
 bool Composer::cursorIn(QWidget *widget) const
@@ -551,8 +832,7 @@ void Composer::updateHoverPoll()
 {
     if (!m_hoverPoll)
         return;
-    const bool managed = (m_modeList && m_modeList->isVisible() && m_hoverManagedMode)
-                         || (m_modelList && m_modelList->isVisible() && m_hoverManagedModel);
+    const bool managed = m_hoverManaged != Dropdown::None && dropdownOpen(m_hoverManaged);
     if (managed) {
         if (!m_hoverPoll->isActive())
             m_hoverPoll->start();
@@ -564,16 +844,15 @@ void Composer::updateHoverPoll()
 
 void Composer::hoverPollTick()
 {
-    const bool modeVisible = m_modeList && m_modeList->isVisible() && m_hoverManagedMode;
-    const bool modelVisible = m_modelList && m_modelList->isVisible() && m_hoverManagedModel;
-    if (!modeVisible && !modelVisible) {
+    if (!m_hoverPoll)
+        return;
+    if (m_hoverManaged == Dropdown::None || !dropdownOpen(m_hoverManaged)) {
         m_hoverPoll->stop();
         m_hoverOutside = 0;
         return;
     }
-    QWidget *control = modeVisible ? m_modeControl : m_modelControl;
-    QWidget *popup = modeVisible ? static_cast<QWidget *>(m_modeList)
-                                 : static_cast<QWidget *>(m_modelList);
+    QWidget *control = controlFor(m_hoverManaged);
+    QWidget *popup = static_cast<QWidget *>(popupFor(m_hoverManaged));
     // 触发器到浮层之间有 7px 缝隙，走过缝隙时也不该算离开（webui 用 150ms 延迟跨过它）
     if (cursorIn(control) || cursorIn(popup)) {
         m_hoverOutside = 0;
@@ -581,10 +860,7 @@ void Composer::hoverPollTick()
     }
     if (++m_hoverOutside >= 2) {
         m_hoverOutside = 0;
-        if (modeVisible)
-            closeModeList();
-        else
-            closeModelList();
+        closeDropdown(m_hoverManaged);
     }
 }
 
@@ -592,6 +868,11 @@ void Composer::hoverPollTick()
 void Composer::refreshZoom()
 {
     updateSkillChipWidth();
+    // 两枚新下拉与上下文浮层用的是 Composer 局部 QSS（字号、最小宽都烘焙在里面）
+    applyLocalStyles();
+    if (m_contextPop && m_ring)
+        m_contextPop->setUsage(m_contextUsage); // 重新量宽高
+    layoutContextPop();
 }
 
 void Composer::updateSkillChipWidth()
@@ -646,6 +927,11 @@ QString Composer::slashQuery() const
 
 void Composer::openSlashRoot()
 {
+    // 互斥：斜杠面板展开前先关掉四个下拉（webui openSlashMenu）
+    closeAllDropdowns();
+    hideContextPop();
+    // 技能怎么分组由当前分类决定（webui slashGroups）
+    m_slash->setSkillCategory(m_category);
     m_slash->setRootOptions(m_skills, m_skill, m_model);
     m_slash->setQuery(slashQuery());
     m_slash->setVisible(true);
@@ -830,27 +1116,262 @@ void Composer::setCurrentSkill(const QString &id)
     renderSkillChip();
 }
 
-void Composer::openModelList()
+// ---------------------------------------------------------------------------
+// 专业分类（webui #category-select）
+// ---------------------------------------------------------------------------
+
+QString Composer::categoryLabel(const QString &id) const
 {
-    closeModeList();
-    closeSlashMenu();
-    m_modelList->setModelOptions(m_models, m_model);
-    m_modelTrigger->setOpen(true);
-    // webui 下拉贴在外层 .model-control 左缘，而不是内部按钮
-    m_modelList->openAbove(m_modelControl ? m_modelControl : m_modelTrigger);
-    m_hoverManagedModel = cursorIn(m_modelControl) || cursorIn(m_modelTrigger);
-    updateHoverPoll();
+    if (id.isEmpty())
+        return QStringLiteral("全部");
+    for (const QVariant &v : m_categories) {
+        const QVariantMap item = v.toMap();
+        if (item.value(QStringLiteral("id")).toString() != id)
+            continue;
+        const QString name = item.value(QStringLiteral("name")).toString();
+        if (!name.isEmpty())
+            return name;
+        break;
+    }
+    // app.js：value.charAt(0).toUpperCase() + value.slice(1)
+    return id.left(1).toUpper() + id.mid(1);
 }
 
-void Composer::closeModelList()
+QVariantList Composer::categoryRows() const
 {
-    if (m_modelList)
-        m_modelList->hide();
-    m_modelTrigger->setOpen(false);
-    m_hoverManagedModel = false;
-    updateHoverPoll();
+    QVariantList rows;
+    const auto push = [&rows](const QString &value, const QString &name) {
+        QVariantMap row;
+        row.insert(QStringLiteral("value"), value);
+        row.insert(QStringLiteral("name"), name);
+        row.insert(QStringLiteral("sub"), QString());
+        rows.append(row);
+    };
+    // 首项固定「全部」（id 为空串），其余来自 setCategories 的 [{id, name}]
+    push(QString(), QStringLiteral("全部"));
+    for (const QVariant &v : m_categories) {
+        const QVariantMap item = v.toMap();
+        const QString id = item.value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            continue; // 宿主若把「全部」也发过来，不要重复
+        push(id, categoryLabel(id));
+    }
+    return rows;
 }
 
+void Composer::setCategories(const QVariantList &categories)
+{
+    m_categories = categories;
+    // 目录换了名字，触发器文本要按新目录重算
+    m_categoryTrigger->setText(categoryLabel(m_category));
+}
+
+void Composer::setCurrentCategory(const QString &id)
+{
+    // 只管值：这是宿主推下来的程序化路径（等价 app.js selectCategory(value)），
+    // 不算「用户选过」，所以不置 m_categoryTouched，会话 meta 回填仍然盖得上
+    m_category = id;
+    m_categoryTrigger->setText(categoryLabel(id));
+    refreshSlashSkills();
+}
+
+void Composer::syncCategoryFromSession(const QString &category)
+{
+    // app.js syncCategoryFromMeta：会话 meta 里的分类是权威值，**无条件同步**。
+    // 早先版本用「用户显式选过就跳过」的守卫，但 webui 的 categoryTouched 只记账、
+    // 不参与判定；切会话与后端 session_meta 事件都会直接覆盖下拉。
+    if (m_category == category)
+        return;
+    m_category = category;
+    m_categoryTrigger->setText(categoryLabel(category));
+    refreshSlashSkills();
+}
+
+void Composer::selectCategory(const QString &id)
+{
+    closeCategoryList();
+    m_category = id;
+    // 用户自己点过下拉框才算「显式选择」（webui category_explicit）
+    m_categoryTouched = true;
+    m_categoryTrigger->setText(categoryLabel(id));
+    refreshSlashSkills();
+    emit categorySelected(id);
+}
+
+// 斜杠根面板的技能分组跟着分类走（webui selectCategory 末尾的 renderSlashMenu）
+void Composer::refreshSlashSkills()
+{
+    if (!m_slash || !m_slashOpen)
+        return;
+    if (m_slash->mode() != QLatin1String("root"))
+        return; // 模型面板不跟分类联动
+    m_slash->setSkillCategory(m_category);
+    m_slash->setRootOptions(m_skills, m_skill, m_model);
+    // 重建行之后把当前的 "/xx" 过滤词重新套上（焦点与可见性都由它重算）
+    m_slash->setQuery(slashQuery());
+    layoutSlashPanel();
+}
+
+// ---------------------------------------------------------------------------
+// 知识库（webui #kb-select / .kb-control）
+// ---------------------------------------------------------------------------
+
+QString Composer::kbLabel(const QString &id) const
+{
+    if (id == QLatin1String("*"))
+        return QStringLiteral("全部知识库");
+    if (id.isEmpty() || id == QLatin1String("__none__"))
+        return QStringLiteral("不使用知识库");
+    for (const QVariant &v : m_kbs) {
+        const QVariantMap item = v.toMap();
+        if (item.value(QStringLiteral("id")).toString() != id)
+            continue;
+        const QString name = item.value(QStringLiteral("name")).toString();
+        return name.isEmpty() ? id : name;
+    }
+    // 库被删了：不能继续显示旧名字（webui kbLibraryName 的「未知知识库」兜底）
+    return QStringLiteral("未知知识库");
+}
+
+QVariantList Composer::kbRows() const
+{
+    QVariantList rows;
+    const auto push = [&rows](const QString &value, const QString &name, const QString &sub) {
+        QVariantMap row;
+        row.insert(QStringLiteral("value"), value);
+        row.insert(QStringLiteral("name"), name);
+        row.insert(QStringLiteral("sub"), sub);
+        rows.append(row);
+    };
+    // webui renderKbListbox：先「不使用」、「全部」，再接各库
+    push(QStringLiteral("__none__"), QStringLiteral("不使用知识库"),
+         QStringLiteral("本轮不去查资料"));
+    push(QStringLiteral("*"), QStringLiteral("全部知识库"), QStringLiteral("跨库检索"));
+    for (const QVariant &v : m_kbs) {
+        const QVariantMap item = v.toMap();
+        const QString id = item.value(QStringLiteral("id")).toString();
+        if (id.isEmpty())
+            continue;
+        QString name = item.value(QStringLiteral("name")).toString();
+        if (name.isEmpty())
+            name = id;
+        // webui：`${item.documents} 份 · ${item.chunks} 块`
+        const int documents = item.value(QStringLiteral("documents")).toInt();
+        const int chunks = item.value(QStringLiteral("chunks")).toInt();
+        push(id, name, QStringLiteral("%1 份 · %2 块").arg(documents).arg(chunks));
+    }
+    return rows;
+}
+
+void Composer::setKnowledgeBases(const QVariantList &libraries)
+{
+    m_kbs = libraries;
+    m_kbTrigger->setText(kbLabel(m_kb));
+}
+
+void Composer::setCurrentKnowledgeBase(const QString &id)
+{
+    m_kb = id;
+    m_kbTrigger->setText(kbLabel(id));
+}
+
+void Composer::selectKnowledgeBase(const QString &id)
+{
+    closeKbList();
+    setCurrentKnowledgeBase(id);
+    emit knowledgeBaseSelected(id);
+}
+
+// ---------------------------------------------------------------------------
+// 上下文用量圆环 / 浮层（webui #context-ring / .context-pop）
+// ---------------------------------------------------------------------------
+
+void Composer::setContextUsage(const QVariantMap &usage)
+{
+    m_contextUsage = usage;
+    if (m_ring)
+        m_ring->setUsage(usage);
+    if (m_contextPop)
+        m_contextPop->setUsage(usage);
+    layoutContextPop();
+}
+
+void Composer::clearContextUsage()
+{
+    m_contextUsage.clear();
+    if (m_ring)
+        m_ring->clearUsage();
+    if (m_contextPop)
+        m_contextPop->setUsage(QVariantMap());
+    layoutContextPop();
+}
+
+void Composer::showContextPop()
+{
+    if (!m_contextPop || !m_ring)
+        return;
+    m_contextPopOpen = true;
+    m_contextPop->setUsage(m_contextUsage);
+    m_contextPop->setVisible(true);
+    layoutContextPop();
+    m_contextPop->raise();
+}
+
+void Composer::hideContextPop()
+{
+    m_contextPopOpen = false;
+    if (m_contextPop)
+        m_contextPop->hide();
+}
+
+void Composer::layoutContextPop()
+{
+    if (!m_contextPop || !m_contextPopOpen || !m_ring)
+        return;
+    QWidget *host = m_contextPop->parentWidget();
+    if (!host)
+        return;
+    m_contextPop->adjustSize();
+    const int popWidth = m_contextPop->width();
+    const int popHeight = m_contextPop->height();
+    if (popWidth <= 0 || popHeight <= 0)
+        return;
+    // .context-pop{left:50%;bottom:calc(100% + 8px);transform:translate(-50%,0)}
+    const QPoint anchor = m_ring->mapTo(host, QPoint(0, 0));
+    const QRect hostRect = host->rect();
+    const int pad = 8;
+    const int minX = hostRect.left() + pad;
+    const int maxX = qMax(minX, hostRect.right() + 1 - pad - popWidth);
+    int x = qBound(minX, anchor.x() + (m_ring->width() - popWidth) / 2, maxX);
+    // 底边贴在圆环上方 8px；上方塞不下就翻到下方，最后再夹一次不越出窗口
+    int y = anchor.y() - 8 - popHeight;
+    if (y < hostRect.top() + pad)
+        y = anchor.y() + m_ring->height() + 8;
+    const int minY = hostRect.top() + pad;
+    const int maxY = qMax(minY, hostRect.bottom() + 1 - pad - popHeight);
+    y = qBound(minY, y, maxY);
+    m_contextPop->setGeometry(QRect(QPoint(x, y), QSize(popWidth, popHeight)));
+    m_contextPop->raise();
+}
+
+// 分类 / 知识库浮层的 objectName 是契约要求的 categoryList / kbList，
+// 撞不上全局 QSS 的 #listbox，这里按 .model-listbox 的观感补一份局部样式；
+// 上下文浮层的配色也在这里重建（皮肤切换 / 缩放变化都会调到这里）
+void Composer::applyLocalStyles()
+{
+    // 分类 / 知识库下拉的 QSS 已进 theme.cpp（#categoryList / #kbList），
+    // 但两个浮层的父级是 Composer 的宿主（兄弟而非后代），换肤重建全局 QSS 带不到，
+    // 所以这里主动把上下文浮层重烤一份
+    if (m_contextPop)
+        m_contextPop->applyTheme();
+    if (m_ring)
+        m_ring->update();
+}
+
+void Composer::refreshTheme()
+{
+    applyLocalStyles();
+}
 void Composer::addAttachments(const QVariantList &items)
 {
     for (const QVariant &v : items) {

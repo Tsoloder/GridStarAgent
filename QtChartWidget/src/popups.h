@@ -9,6 +9,7 @@
 
 QT_BEGIN_NAMESPACE
 class QLineEdit;
+class QPaintEvent;
 class QScrollArea;
 class QTimer;
 class QVBoxLayout;
@@ -121,6 +122,10 @@ public:
     void setSkillOptions(const QVariantList &skills, const QString &selectedId);
     // 交互模式（renderModeList）：手动 / 自动两项，勾在选中项右侧
     void setModeOptions(const QString &selectedMode);
+    // 平铺选项（专业分类 / 知识库）：rows 每项 {value, name, sub}，勾在选中项右侧。
+    // preferredWidth 对应 webui .model-listbox 的 330px 上限，实际还会被宿主窗口宽度削
+    void setPlainOptions(const QVariantList &rows, const QString &selectedValue,
+                         int preferredWidth = 330);
     void openAbove(QWidget *anchor);
 
 signals:
@@ -150,6 +155,79 @@ private:
     QTimer *m_typeTimer = nullptr;
 };
 
+// 上下文用量浮层里的进度条（.pop-bar）：轨道 + 百分比填充
+class ContextBar : public QWidget
+{
+public:
+    explicit ContextBar(QWidget *parent = nullptr);
+    void setPercent(int percent);
+    int percent() const { return m_percent; }
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    int m_percent = 0;
+};
+
+// 上下文用量圆环（#context-ring）：webui 里是 22×22 的 SVG（viewBox 36、r=15.5、
+// stroke 4、rotate(-90)），这里用 QPainter 等比复刻：底环 .context-ring-track +
+// 进度弧 .context-ring-arc（圆头线帽、从 12 点方向顺时针）。
+// 控件本体是 30×30 的悬停区（.context-ring 有 hover 底色与描边），环面按 22×22 居中。
+class ContextRing : public QWidget
+{
+    Q_OBJECT
+public:
+    explicit ContextRing(QWidget *parent = nullptr);
+    // usage: {max, used, left, percent, estimated, model}
+    void setUsage(const QVariantMap &usage);
+    void clearUsage();
+    bool hasData() const { return m_ratio >= 0.0; }
+    // 无数据时返回 -1（与 webui 的空态一致，浮层显示「—」）
+    int percent() const { return m_percent; }
+    // 环面边长（22px）：浮层与测试按它对齐
+    static int ringBoxPx();
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+    void enterEvent(QEvent *event) override;
+    void leaveEvent(QEvent *event) override;
+
+private:
+    QVariantMap m_usage;
+    // < 0 表示无数据（空态只留底环）
+    qreal m_ratio = -1.0;
+    int m_percent = -1;
+    bool m_hover = false;
+};
+
+// 上下文用量浮层（#context-pop）：标题「上下文用量 百分比」+ 三行数值 + 一条进度条 +
+// 估算小注。由 Composer 定位（与 ChoiceOverlay 同一套挂载方式），
+// 并且鼠标穿透（webui .context-pop{pointer-events:none}）。
+class ContextPop : public QFrame
+{
+    Q_OBJECT
+public:
+    explicit ContextPop(QWidget *parent = nullptr);
+    void setUsage(const QVariantMap &usage);
+    // 按当前皮肤与界面缩放重设文字色与字号（配色取 gs::palette()，字号取 gs::scaledPx()）
+    void applyTheme();
+
+protected:
+    void paintEvent(QPaintEvent *event) override;
+
+private:
+    QLabel *m_pct = nullptr;
+    QLabel *m_max = nullptr;
+    QLabel *m_used = nullptr;
+    QLabel *m_left = nullptr;
+    QLabel *m_note = nullptr;
+    ContextBar *m_bar = nullptr;
+    QWidget *m_noteGap = nullptr;
+};
+
 // 斜杠面板（#slash-menu）：输入框里敲 "/" 唤起，浮在输入框上方。
 // 根面板是指令 + 技能，选「模型」指令后切到可搜索的模型列表。
 // 面板不入宿主布局，由 Composer 定位（与 ChoiceOverlay 同一套挂载方式）。
@@ -162,6 +240,11 @@ public:
     // 根面板：指令在前（模型 / 导出对话），技能在后
     void setRootOptions(const QVariantList &skills, const QString &selectedSkill,
                         const QString &selectedModel);
+    // 专业分类（webui slashGroups）：空串 = 「全部」，技能按各自 category 分组；
+    // 非空时只留该分类 + common 的技能，并带上固定的「不启用技能」。
+    // 需在 setRootOptions 之前设置；面板开着时改了要重新 setRootOptions。
+    void setSkillCategory(const QString &category);
+    QString skillCategory() const { return m_skillCategory; }
     // 模型面板：顶部多一个过滤输入框
     void setModelOptions(const QVariantList &models, const QString &selectedModel);
     // 过滤词来自正文（根面板）或顶部输入框（模型面板）
@@ -208,6 +291,8 @@ private:
 
     QString m_mode = QStringLiteral("root");
     QString m_query;
+    // 当前专业分类（空串 = 全部）：决定技能行的分组
+    QString m_skillCategory;
     QLineEdit *m_search = nullptr;
     QScrollArea *m_scroll = nullptr;
     QWidget *m_inner = nullptr;

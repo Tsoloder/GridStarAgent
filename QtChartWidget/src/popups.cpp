@@ -5,16 +5,21 @@
 
 #include <QApplication>
 #include <QDesktopWidget>
+#include <QEvent>
 #include <QHash>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QMap>
 #include <QMouseEvent>
+#include <QPaintEvent>
+#include <QFile>
+#include <QPainter>
 #include <QPushButton>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSet>
+#include <QSizePolicy>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -486,6 +491,36 @@ void ListBoxPopup::setModeOptions(const QString &selectedMode)
     applyFocus();
 }
 
+void ListBoxPopup::setPlainOptions(const QVariantList &rows, const QString &selectedValue,
+                                   int preferredWidth)
+{
+    // 与 setModelOptions 同一个 ListBoxPopup 换脸：.model-listbox 默认 330px 上限
+    m_preferredWidth = preferredWidth;
+    setClass(this, QStringLiteral("listbox"));
+    reset();
+    for (const QVariant &v : rows) {
+        const QVariantMap row = v.toMap();
+        const QString value = row.value(QStringLiteral("value")).toString();
+        const QString name = row.value(QStringLiteral("name")).toString();
+        addRow(value, name.isEmpty() ? value : name, row.value(QStringLiteral("sub")).toString(),
+               value == selectedValue, row.value(QStringLiteral("tooltip")).toString());
+    }
+    if (m_rows.isEmpty()) {
+        QLabel *empty = makeLabel(QStringLiteral("listboxEmpty"), QStringLiteral("没有可选项"),
+                                  m_inner);
+        empty->setAlignment(Qt::AlignCenter);
+        m_innerLayout->addWidget(empty);
+    }
+    m_focusIndex = 0;
+    for (int i = 0; i < m_rows.size(); ++i) {
+        if (m_rows.at(i)->value() == selectedValue) {
+            m_focusIndex = i;
+            break;
+        }
+    }
+    applyFocus();
+}
+
 void ListBoxPopup::applyFocus()
 {
     for (int i = 0; i < m_modeRows.size(); ++i)
@@ -602,6 +637,388 @@ void ListBoxPopup::keyPressEvent(QKeyEvent *event)
     QFrame::keyPressEvent(event);
 }
 
+// ------------------------------------------------------------ 上下文用量圆环 / 浮层
+
+namespace {
+
+// app.js formatTokens：紧凑 token 数，按十进制量级切档（1,000,000 → 1M）。
+// 拿 1024 进制去切会把 1M 窗口显示成 976.6K，所以这里跟 webui 一致：
+//   value >= 1e6 → Math.round(value/100000)/10 + "M"
+//   value >= 1e3 → Math.round(value/100)/10 + "K"
+// 也就是「保留一位小数」，小数为 0 时 JS 的字符串化不带 .0，这里同样去掉。
+QString formatContextTokens(double value)
+{
+    const auto plain = [](double v) {
+        const int tenths = qRound(v * 10.0);
+        if (tenths % 10 == 0)
+            return QString::number(tenths / 10);
+        return QString::number(tenths / 10.0, 'f', 1);
+    };
+    if (value >= 1000000.0)
+        return plain(value / 1000000.0) + QLatin1Char('M');
+    if (value >= 1000.0)
+        return plain(value / 1000.0) + QLatin1Char('K');
+    return plain(value);
+}
+
+// renderContextRing 的取数口径：used 与 window 都拿得到才能算比率，
+// percent 只在缺 max 时兜底（宿主算过了就用它）。
+struct RingState
+{
+    bool hasData = false;
+    qreal ratio = -1.0;
+    int percent = -1;
+    double window = 0.0;
+    double used = 0.0;
+    double left = 0.0;
+    bool estimated = false;
+};
+
+RingState readRingState(const QVariantMap &usage)
+{
+    RingState state;
+    state.estimated = usage.value(QStringLiteral("estimated")).toBool();
+    // max 是宿主的主字段名，window 是 webui 事件里的叫法，两个都认
+    double window = usage.value(QStringLiteral("max")).toDouble();
+    if (window <= 0.0)
+        window = usage.value(QStringLiteral("window")).toDouble();
+    const double used = usage.value(QStringLiteral("used")).toDouble();
+    const double leftRaw = usage.value(QStringLiteral("left")).toDouble();
+    const QVariant pct = usage.value(QStringLiteral("percent"));
+    const bool hasPercent = pct.isValid() && !pct.isNull();
+
+    state.window = window > 0.0 ? window : 0.0;
+    state.used = used > 0.0 ? used : 0.0;
+    if (state.window > 0.0 && state.used > 0.0) {
+        state.ratio = qBound(0.0, state.used / state.window, 1.0);
+        state.percent = qRound(state.ratio * 100.0);
+        state.hasData = true;
+    } else if (state.used > 0.0 && hasPercent) {
+        // 窗口上限未知但宿主给了百分比：弧按百分比画，上限那行显示「—」
+        const qreal p = qBound(0.0, pct.toDouble(), 100.0);
+        state.ratio = p / 100.0;
+        state.percent = qRound(p);
+        state.hasData = true;
+    } else if (state.window > 0.0) {
+        // 只知道上限：空环 + 上限数值（webui 的空态同样是 dashoffset 满圈）
+        state.ratio = 0.0;
+        state.percent = 0;
+        state.hasData = true;
+    }
+    if (state.hasData) {
+        state.left = leftRaw > 0.0 ? leftRaw : qMax(0.0, state.window - state.used);
+    }
+    return state;
+}
+
+} // namespace
+
+// ------------------------------------------------------------ ContextBar
+
+ContextBar::ContextBar(QWidget *parent) : QWidget(parent)
+{
+    setObjectName(QStringLiteral("contextBar"));
+    setFixedHeight(qMax(3, gs::scaledPx(4)));
+    setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    setAttribute(Qt::WA_TransparentForMouseEvents, true);
+}
+
+void ContextBar::setPercent(int percent)
+{
+    const int clamped = qBound(0, percent, 100);
+    if (m_percent == clamped)
+        return;
+    m_percent = clamped;
+    update();
+}
+
+QSize ContextBar::sizeHint() const
+{
+    return QSize(gs::scaledPx(80), qMax(3, gs::scaledPx(4)));
+}
+
+QSize ContextBar::minimumSizeHint() const
+{
+    return QSize(gs::scaledPx(40), qMax(3, gs::scaledPx(4)));
+}
+
+void ContextBar::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+    const gs::Palette &pal = gs::palette();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    const qreal radius = height() / 2.0;
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(pal.surface3);
+    painter.drawRoundedRect(QRectF(rect()), radius, radius);
+    if (m_percent <= 0)
+        return;
+    const qreal filled = width() * m_percent / 100.0;
+    if (filled <= 0.5)
+        return;
+    painter.setBrush(pal.cyan);
+    painter.drawRoundedRect(QRectF(0, 0, filled, height()), radius, radius);
+}
+
+// ------------------------------------------------------------ ContextRing
+
+int ContextRing::ringBoxPx()
+{
+    // webui：<svg width=22 height=22> 放在 30×30 的 .context-ring 里
+    return 22;
+}
+
+ContextRing::ContextRing(QWidget *parent) : QWidget(parent)
+{
+    setObjectName(QStringLiteral("contextRing"));
+    // 与控件行里其它控件同高（30px），环面（22px）居中
+    setFixedSize(30, 30);
+    // webui 是 <div tabindex=0>：点击/悬停都该能看到浮层，所以给 StrongFocus
+    setFocusPolicy(Qt::StrongFocus);
+    setCursor(Qt::PointingHandCursor);
+    setAttribute(Qt::WA_Hover, true);
+    setToolTip(QStringLiteral("上下文用量"));
+}
+
+void ContextRing::setUsage(const QVariantMap &usage)
+{
+    m_usage = usage;
+    const RingState state = readRingState(usage);
+    m_ratio = state.hasData ? state.ratio : -1.0;
+    m_percent = state.hasData ? state.percent : -1;
+    update();
+}
+
+void ContextRing::clearUsage()
+{
+    m_usage.clear();
+    m_ratio = -1.0;
+    m_percent = -1;
+    update();
+}
+
+void ContextRing::enterEvent(QEvent *event)
+{
+    m_hover = true;
+    update();
+    QWidget::enterEvent(event);
+}
+
+void ContextRing::leaveEvent(QEvent *event)
+{
+    m_hover = false;
+    update();
+    QWidget::leaveEvent(event);
+}
+
+void ContextRing::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+    const gs::Palette &pal = gs::palette();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // .context-ring:hover / :focus-visible { border-color:line-strong; background:surface-2 }
+    if (m_hover || hasFocus()) {
+        painter.setPen(QPen(pal.lineStrong, 1));
+        painter.setBrush(pal.surface2);
+        const qreal radius = gs::scaledPx(4);
+        painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), radius, radius);
+    }
+
+    // SVG viewBox 0 0 36 36 等比缩到 22×22：r=15.5、stroke-width=4
+    const qreal box = qMin<qreal>(ringBoxPx(), qMin(width(), height()));
+    const qreal scale = box / 36.0;
+    const qreal radius = 15.5 * scale;
+    const qreal stroke = qMax<qreal>(1.0, 4.0 * scale);
+    const QPointF center((width() - box) / 2.0 + box / 2.0, (height() - box) / 2.0 + box / 2.0);
+    const QRectF circle(center.x() - radius, center.y() - radius, radius * 2.0, radius * 2.0);
+
+    // 底环 .context-ring-track{stroke:var(--line)}；空态整体弱化（.unknown 的 opacity:.55）
+    QColor trackColor = pal.line;
+    if (m_ratio < 0.0) {
+        trackColor = pal.muted2;
+        trackColor.setAlphaF(0.55);
+    }
+    QPen trackPen(trackColor);
+    trackPen.setWidthF(stroke);
+    trackPen.setCapStyle(Qt::FlatCap);
+    painter.setPen(trackPen);
+    painter.setBrush(Qt::NoBrush);
+    painter.drawEllipse(circle);
+
+    // 空态不画弧（webui 把 stroke-dashoffset 设满一整圈，弧就看不见了）
+    if (m_ratio < 0.0)
+        return;
+    QColor arcColor = pal.cyan;
+    if (m_ratio >= 0.9)
+        arcColor = pal.red; // .context-ring.danger
+    else if (m_ratio >= 0.7)
+        arcColor = pal.orange; // .context-ring.warn
+    QPen arcPen(arcColor);
+    arcPen.setWidthF(stroke);
+    arcPen.setCapStyle(Qt::RoundCap);
+    painter.setPen(arcPen);
+    // rotate(-90 18 18) 让 0° 落在 12 点方向；Qt 的正角是逆时针，所以跨度取负
+    const int startAngle = 90 * 16;
+    const int spanAngle = -qRound(m_ratio * 360.0 * 16.0);
+    if (spanAngle != 0)
+        painter.drawArc(circle, startAngle, spanAngle);
+}
+
+// ------------------------------------------------------------ ContextPop
+
+ContextPop::ContextPop(QWidget *parent) : QFrame(parent)
+{
+    setObjectName(QStringLiteral("contextPop"));
+    setAttribute(Qt::WA_StyledBackground, true);
+    // .context-pop{pointer-events:none}：浮层不吃鼠标，否则一碰就丢 hover
+    setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    setFocusPolicy(Qt::NoFocus);
+
+    auto *outer = new QVBoxLayout(this);
+    // .context-pop{padding:10px 12px}
+    outer->setContentsMargins(gs::scaledPx(12), gs::scaledPx(10), gs::scaledPx(12),
+                              gs::scaledPx(10));
+    outer->setSpacing(0);
+
+    // 标题行：上下文用量 + 百分比（.pop-title，下边框一条线）
+    auto *head = new QWidget(this);
+    head->setObjectName(QStringLiteral("contextPopHead"));
+    head->setAttribute(Qt::WA_StyledBackground, true);
+    auto *headLayout = new QHBoxLayout(head);
+    headLayout->setContentsMargins(0, 0, 0, gs::scaledPx(7));
+    headLayout->setSpacing(6);
+    QLabel *title = makeLabel(QStringLiteral("popTitle"), QString::fromUtf8("上下文用量"), head);
+    title->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_pct = makeLabel(QStringLiteral("popTotal"), QString::fromUtf8("—"), head);
+    m_pct->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_pct->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    headLayout->addWidget(title, 1);
+    headLayout->addWidget(m_pct, 0);
+    outer->addWidget(head);
+    outer->addSpacing(gs::scaledPx(6));
+
+    // 三行「窗口上限 / 已用 / 剩余」（.pop-row）
+    const auto addRow = [&](const QString &label, QLabel **valueOut) {
+        auto *row = new QWidget(this);
+        auto *rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, gs::scaledPx(3), 0, gs::scaledPx(3));
+        rowLayout->setSpacing(gs::scaledPx(18));
+        QLabel *name = makeLabel(QStringLiteral("popLabel"), label, row);
+        name->setTextInteractionFlags(Qt::NoTextInteraction);
+        QLabel *value = makeLabel(QStringLiteral("popValue"), QString::fromUtf8("—"), row);
+        value->setTextInteractionFlags(Qt::NoTextInteraction);
+        value->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        rowLayout->addWidget(name, 1);
+        rowLayout->addWidget(value, 0);
+        outer->addWidget(row);
+        *valueOut = value;
+    };
+    addRow(QString::fromUtf8("窗口上限"), &m_max);
+    addRow(QString::fromUtf8("已用"), &m_used);
+    addRow(QString::fromUtf8("剩余"), &m_left);
+
+    m_bar = new ContextBar(this);
+    outer->addSpacing(gs::scaledPx(7));
+    outer->addWidget(m_bar);
+
+    // .pop-note{"本地估算"}：只有 estimated 为真才露出来
+    m_noteGap = new QWidget(this);
+    m_noteGap->setFixedHeight(gs::scaledPx(6));
+    m_noteGap->setVisible(false);
+    outer->addWidget(m_noteGap);
+    m_note = makeLabel(QStringLiteral("popNote"), QString::fromUtf8("本地估算"), this);
+    m_note->setTextInteractionFlags(Qt::NoTextInteraction);
+    m_note->setVisible(false);
+    outer->addWidget(m_note);
+
+    applyTheme();
+}
+
+void ContextPop::applyTheme()
+{
+    const gs::Palette &pal = gs::palette();
+    // webui .context-pop{min-width:216px}
+    setMinimumWidth(gs::scaledPx(216));
+
+    // 注意：这个浮层挂在 Composer 的**宿主**上（是 Composer 的兄弟，不是后代），
+    // 而自己又带一份局部表，会盖住祖先的全局 QSS。早先的写法是把整张局部 QSS 重建，
+    // 但只要换肤那次没能调到 applyTheme，浮层就会长期停在旧配色。
+    // 这里改成：背景自绘（paintEvent 读 palette），文字直接写进控件调色板与字号，
+    // 不依赖任何选择器匹配。
+    const QList<QLabel *> labels = findChildren<QLabel *>();
+    for (QLabel *label : labels) {
+        const QString cls = label->property("class").toString();
+        QColor color = pal.text;
+        int px = 11;
+        bool bold = false;
+        bool mono = false;
+        if (cls.contains(QLatin1String("popTitle"))) {
+            color = pal.text;
+            bold = true;
+        } else if (cls.contains(QLatin1String("popTotal"))) {
+            color = pal.text;
+            mono = true;
+        } else if (cls.contains(QLatin1String("popLabel"))) {
+            color = pal.muted;
+        } else if (cls.contains(QLatin1String("popValue"))) {
+            color = pal.textBright;
+            mono = true;
+        } else if (cls.contains(QLatin1String("popNote"))) {
+            color = pal.muted2;
+            px = 9;
+        }
+        QFont font = label->font();
+        font.setPixelSize(gs::scaledPx(px));
+        font.setBold(bold);
+        if (mono)
+            font.setFamily(gs::monoFont());
+        label->setFont(font);
+        QPalette p = label->palette();
+        p.setColor(QPalette::WindowText, color);
+        p.setColor(QPalette::Text, color);
+        label->setPalette(p);
+    }
+    update();
+}
+
+void ContextPop::paintEvent(QPaintEvent *event)
+{
+    Q_UNUSED(event)
+    const gs::Palette &pal = gs::palette();
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setPen(QPen(pal.line, 1));
+    painter.setBrush(pal.band2);
+    painter.drawRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), 8, 8);
+}
+
+void ContextPop::setUsage(const QVariantMap &usage)
+{
+    const RingState state = readRingState(usage);
+    if (!state.hasData) {
+        m_pct->setText(QString::fromUtf8("—"));
+        m_max->setText(state.window > 0.0 ? formatContextTokens(state.window)
+                                          : QString::fromUtf8("—"));
+        m_used->setText(QString::fromUtf8("—"));
+        m_left->setText(QString::fromUtf8("—"));
+        m_bar->setPercent(0);
+        m_note->setVisible(false);
+        m_noteGap->setVisible(false);
+        return;
+    }
+    m_pct->setText(QStringLiteral("%1%").arg(state.percent));
+    m_max->setText(state.window > 0.0 ? formatContextTokens(state.window)
+                                      : QString::fromUtf8("—"));
+    m_used->setText(formatContextTokens(state.used));
+    m_left->setText(formatContextTokens(state.left));
+    m_bar->setPercent(state.percent);
+    m_note->setVisible(state.estimated);
+    m_noteGap->setVisible(state.estimated);
+}
+
 // ------------------------------------------------------------ SlashPanel
 
 SlashPanel::SlashPanel(QWidget *parent)
@@ -648,6 +1065,9 @@ void SlashPanel::clearRows()
         if (QWidget *w = item->widget()) {
             if (w == m_empty)
                 continue;
+            // deleteLater 要等回到事件循环才真删：重建发生在面板开着的时候，
+            // 先藏起来，否则旧行会在这一帧里与新行叠在一起
+            w->hide();
             w->deleteLater();
         }
         delete item;
@@ -707,6 +1127,11 @@ SlashRow *SlashPanel::addRow(const QString &groupLabel, const QString &kind, con
     return row;
 }
 
+void SlashPanel::setSkillCategory(const QString &category)
+{
+    m_skillCategory = category;
+}
+
 void SlashPanel::setRootOptions(const QVariantList &skills, const QString &selectedSkill,
                                 const QString &selectedModel)
 {
@@ -721,16 +1146,56 @@ void SlashPanel::setRootOptions(const QVariantList &skills, const QString &selec
     addRow(QStringLiteral("指令"), QStringLiteral("command"), QStringLiteral("export"),
            QStringLiteral("导出对话"), QStringLiteral("export"),
            QStringLiteral("把当前会话导出为 Markdown 文件"), false);
-    addRow(QStringLiteral("技能"), QStringLiteral("skill"), QString(), QStringLiteral("不启用技能"),
-           QStringLiteral("—"), QStringLiteral("默认：按消息内容自动匹配技能"), false);
-    for (const QVariant &v : skills) {
-        const QVariantMap item = v.toMap();
-        const QString id = item.value(QStringLiteral("id")).toString();
-        addRow(QStringLiteral("技能"), QStringLiteral("skill"), id,
-               item.value(QStringLiteral("name")).toString().isEmpty()
-                   ? id
-                   : item.value(QStringLiteral("name")).toString(),
-               id, item.value(QStringLiteral("description")).toString(), false);
+
+    // webui slashGroups()：分类决定技能怎么摆
+    //   全部  → 技能按各自 category 分组，组名首字母大写（缺省「通用」），组名排序；
+    //           「不启用技能」这一项不出现
+    //   具体分类 → 只留 category == 分类 或 common 的技能，整组标题用分类名，
+    //           组内第一项是固定的「不启用技能」
+    const auto groupName = [](const QString &raw) {
+        const QString trimmed = raw.trimmed();
+        const QString value = trimmed.isEmpty() ? QStringLiteral("通用") : trimmed;
+        return value.left(1).toUpper() + value.mid(1);
+    };
+    const auto skillName = [](const QVariantMap &item, const QString &id) {
+        const QString name = item.value(QStringLiteral("name")).toString();
+        return name.isEmpty() ? id : name;
+    };
+    const QString category = m_skillCategory.trimmed();
+    if (category.isEmpty()) {
+        // QMap 按 key 升序，与 webui 的 Object.keys(byCat).sort() 同序
+        QMap<QString, QVariantList> groups;
+        for (const QVariant &v : skills) {
+            const QVariantMap item = v.toMap();
+            groups[groupName(item.value(QStringLiteral("category")).toString())].append(item);
+        }
+        for (auto it = groups.constBegin(); it != groups.constEnd(); ++it) {
+            for (const QVariant &v : it.value()) {
+                const QVariantMap item = v.toMap();
+                const QString id = item.value(QStringLiteral("id")).toString();
+                addRow(it.key(), QStringLiteral("skill"), id, skillName(item, id),
+                       id.isEmpty() ? QStringLiteral("—") : id,
+                       item.value(QStringLiteral("description")).toString(), false);
+            }
+        }
+    } else {
+        const QString label = groupName(category);
+        const QString wanted = category.toLower();
+        addRow(label, QStringLiteral("skill"), QString(), QStringLiteral("不启用技能"),
+               QStringLiteral("—"), QStringLiteral("默认：按消息内容自动匹配技能"), false);
+        for (const QVariant &v : skills) {
+            const QVariantMap item = v.toMap();
+            const QString id = item.value(QStringLiteral("id")).toString();
+            // 空 id 就是上面那一行「不启用技能」，不要再来一遍
+            if (id.isEmpty())
+                continue;
+            const QString itemCategory =
+                item.value(QStringLiteral("category")).toString().trimmed().toLower();
+            if (itemCategory != wanted && itemCategory != QLatin1String("common"))
+                continue;
+            addRow(label, QStringLiteral("skill"), id, skillName(item, id), id,
+                   item.value(QStringLiteral("description")).toString(), false);
+        }
     }
     m_inner->layout()->activate();
 }
@@ -814,10 +1279,14 @@ void SlashPanel::applyFilter()
 
     const QList<SlashRow *> rows = visibleRows();
     int index = 0;
-    for (int i = 0; i < rows.size(); ++i) {
-        if (rows.at(i)->id() == previous) {
-            index = i;
-            break;
+    // 保留上一焦点：只有真有 id 的行才值得眼（空 id 是「不启用技能」这类项，
+    // 不能把它当成「上次选中的行」把初始焦点吸过去）
+    if (!previous.isEmpty()) {
+        for (int i = 0; i < rows.size(); ++i) {
+            if (rows.at(i)->id() == previous) {
+                index = i;
+                break;
+            }
         }
     }
     focusRow(index);
@@ -827,10 +1296,15 @@ void SlashPanel::focusRow(int index)
 {
     for (int i = 0; i < m_rows.size(); ++i)
         m_rows.at(i)->setFocusedRow(false);
-    m_focusIndex = index;
-    SlashRow *row = focusedRow();
-    if (row)
-        row->setFocusedRow(true);
+    // index 是「可见行」的下标（applyFilter / moveFocus 都按 visibleRows 算），
+    // 不能直接拿去索引 m_rows，否则叠上过滤词就对不上了
+    const QList<SlashRow *> rows = visibleRows();
+    if (rows.isEmpty()) {
+        m_focusIndex = -1;
+        return;
+    }
+    m_focusIndex = qBound(0, index, rows.size() - 1);
+    rows.at(m_focusIndex)->setFocusedRow(true);
 }
 
 void SlashPanel::moveFocus(int delta)

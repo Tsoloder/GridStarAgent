@@ -60,6 +60,7 @@ StructuredBlocks structuredBlocks(const QString &text)
 namespace {
 
 const QChar kCodeToken(0x01); // 代码段占位符：先抽出 `code`，全部行内规则跑完再还原
+const QChar kEscapeToken(0x02); // 反斜杠转义占位符（\* \_ 这类，见 inlineMarkdownToHtml）
 const QChar kPipeToken(0x02); // 表格单元格里 \| 的占位符，切列前护住、切完还原
 
 // 与 app.js mdHref 一致：只放行 http(s) / mailto / 锚点相对路径 / 纯路径，
@@ -164,15 +165,20 @@ Qt::Alignment cellAlignment(const QString &name)
 QString inlineMarkdownToHtml(const QString &text)
 {
     static const QRegularExpression codeSpanRe(QStringLiteral("`([^`]+)`"));
+    static const QRegularExpression escapeRe(
+        QStringLiteral("\\\\([\\\\`*_{}\\[\\]()#+\\-.!~|])"));
     static const QRegularExpression imageRe(QStringLiteral("!\\[([^\\]]*)\\]\\(([^\\s)]+)\\)"));
     static const QRegularExpression linkRe(QStringLiteral("\\[([^\\]]+)\\]\\(([^\\s)]+)\\)"));
-    static const QRegularExpression boldStarRe(QStringLiteral("\\*\\*([^*]+)\\*\\*"));
-    static const QRegularExpression boldUnderRe(QStringLiteral("__([^_]+)__"));
+    // 懒惰匹配而非 [^*]+：强调区里带上占位符或其它字符时不该整体失配（webui f47d83d）
+    static const QRegularExpression boldStarRe(QStringLiteral("\\*\\*([\\s\\S]+?)\\*\\*"));
+    static const QRegularExpression boldUnderRe(QStringLiteral("__([\\s\\S]+?)__"));
     static const QRegularExpression delRe(QStringLiteral("~~([^~]+)~~"));
-    static const QRegularExpression emStarRe(QStringLiteral("\\*([^*]+)\\*"));
-    static const QRegularExpression emUnderRe(QStringLiteral("(^|[^\\w])_([^_]+)_(?=$|[^\\w])"));
+    static const QRegularExpression emStarRe(QStringLiteral("\\*([^*]+?)\\*"));
+    static const QRegularExpression emUnderRe(QStringLiteral("(^|[^\\w])_([^_]+?)_(?=$|[^\\w])"));
     static const QRegularExpression codeTokenRe(
         QString(kCodeToken) + QStringLiteral("(\\d+)") + QString(kCodeToken));
+    static const QRegularExpression escapeTokenRe(
+        QString(kEscapeToken) + QStringLiteral("(\\d+)") + QString(kEscapeToken));
 
     const Palette &p = gs::palette();
     const QString linkColor = cssColor(p.cyan);
@@ -183,7 +189,18 @@ QString inlineMarkdownToHtml(const QString &text)
             .arg(cssColor(p.inset), cssColor(p.cyan), monoFont());
 
     QVector<QString> codes;
+    QVector<QString> escapes;
     QString html = escapeHtml(text);
+
+    // 0) 反斜杠转义先护住：模型常把通配符组名写成 engine\*、verticalTail\*/horizontalTail\*，
+    //    这些星号若留在串里，**…** 就匹配不上（内容里出现 *），粗体失配后单星号规则
+    //    再把两个 ** 各拆一半，正文里就会冒出字面星号和错位的斜体（webui f47d83d）。
+    //    必须在代码段抽出之前做，且比 escapeHtml 晚（escapeHtml 不动反斜杠）。
+    html = replaceEach(html, escapeRe, [&](const QRegularExpressionMatch &m) {
+        const QString token = QString(kEscapeToken) + QString::number(escapes.size()) + QString(kEscapeToken);
+        escapes.append(escapeHtml(m.captured(1)));
+        return token;
+    });
 
     // 1) `code` 换成占位符，避免代码里的 ** / _ / ~~ 被后续规则二次解析
     html = replaceEach(html, codeSpanRe, [&](const QRegularExpressionMatch &m) {
@@ -226,6 +243,11 @@ QString inlineMarkdownToHtml(const QString &text)
     html = replaceEach(html, codeTokenRe, [&](const QRegularExpressionMatch &m) {
         const int index = m.captured(1).toInt();
         return (index >= 0 && index < codes.size()) ? codes.at(index) : QString();
+    });
+    // 最后还原反斜杠转义（先转义再插回去，等于让它以字面字符落地）
+    html = replaceEach(html, escapeTokenRe, [&](const QRegularExpressionMatch &m) {
+        const int index = m.captured(1).toInt();
+        return (index >= 0 && index < escapes.size()) ? escapes.at(index) : QString();
     });
     return html;
 }
@@ -281,14 +303,14 @@ void MarkdownView::addHeading(QVBoxLayout *layout, QWidget *parent, const QStrin
     // h1~h3 直接用 .mdHeading 的字号（QSS 里已随缩放展开）；h4~h6 在 CSS 里小一档
     if (level > 3)
         html = QStringLiteral("<span style=\"font-size:%1px;\">%2</span>")
-                   .arg(scaledPx(13))
+                   .arg(scaledPx(14))
                    .arg(html);
 
     QLabel *label = makeLabel(QStringLiteral("mdHeading"), html, parent);
     label->setTextFormat(Qt::RichText);
     label->setWordWrap(true);
     label->setOpenExternalLinks(true);
-    label->setContentsMargins(0, scaledPx(9), 0, scaledPx(5)); // CSS: h1~h6 margin 9px 0 5px
+    label->setContentsMargins(0, scaledPx(10), 0, scaledPx(5)); // CSS: h1~h6 margin 10px 0 5px
     layout->addWidget(label);
 }
 

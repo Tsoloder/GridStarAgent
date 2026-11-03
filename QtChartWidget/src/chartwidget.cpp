@@ -20,6 +20,7 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -27,6 +28,7 @@
 #include <QMimeData>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
+#include <QRegularExpression>
 #include <QFontMetrics>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -47,6 +49,29 @@ namespace {
 
 // app.js ASK_USER_TOOL：询问类工具调用不落成工具条目，改由输入框上方的浮层承担
 const char kAskUserTool[] = "ask_user_question";
+
+// 「结束」类选项（webui 5948605）：点了就是本轮收尾。把它当普通消息发回去，auto 模式的
+// 模型会接着干（再探测、再总结、再弹一张同样的卡），用户点多少次都出不来。
+// 识别只做保守判断：label 命中收尾措辞、或 value 是白名单里的结束值；含「继续、下一步、
+// 再试」这类明确要继续的措辞一票否决——宁可当普通选择发回去，也别误吞一条真指令。
+bool isEndTurnOption(const QString &label, const QString &value)
+{
+    static const QRegularExpression labelRe(QStringLiteral(
+        "本轮到此结束|结束本轮|结束任务|就此结束|到此为止|先到这里|先到这步|先这样吧|先这样|"
+        "就这样吧|不用了|不必了|收尾结束|停止本轮|(^|[，,、\\s])结束$"));
+    static const QRegularExpression valueRe(QStringLiteral(
+        "^(stop|stop_here|stop_turn|end|end_turn|exit|quit|finish|done|cancel)$"),
+        QRegularExpression::CaseInsensitiveOption);
+    static const QRegularExpression continueRe(QStringLiteral("继续|接着|下一步|再试|然后|之后"));
+
+    const QString text = label.trimmed();
+    const QString raw = value.trimmed();
+    if (continueRe.match(text).hasMatch())
+        return false;
+    if (!text.isEmpty() && text.size() <= 24 && labelRe.match(text).hasMatch())
+        return true;
+    return !raw.isEmpty() && valueRe.match(raw).hasMatch();
+}
 
 // QLayout treats negative margins as "unset". Keep the normal flow size and
 // overlap the phase dock with the composer when WebUI's lift is negative.
@@ -344,23 +369,44 @@ ChartWidget::ChartWidget(QWidget *parent)
     connect(m_tabChat, &QPushButton::clicked, this, [this] { setViewTab(QStringLiteral("chat")); });
     connect(m_tabTraj, &QPushButton::clicked, this, [this] { setViewTab(QStringLiteral("traj")); });
 
+    // 新一轮提问让上一轮遗留的确认浮层立即收起：流程已经往下走了，那张卡里的参数
+    // 再提交一次就是错数据；本轮结束时自然会有新的卡顶上（webui c4a6d84）。
+    // 这个连接必须排在 sendMessage 转发之前，保证宿主收到时浮层已经收起
+    connect(m_composer, &Composer::sendMessage, this, [this] { m_composer->closeChoice(); },
+            Qt::DirectConnection);
     connect(m_composer, &Composer::sendMessage, this, &ChartWidget::sendMessage);
     connect(m_composer, &Composer::stopRequested, this, &ChartWidget::stopRequested);
     connect(m_composer, &Composer::modeChanged, this, &ChartWidget::modeChanged);
     connect(m_composer, &Composer::modelSelected, this, &ChartWidget::modelSelected);
     connect(m_composer, &Composer::skillSelected, this, &ChartWidget::skillSelected);
+    connect(m_composer, &Composer::categorySelected, this, &ChartWidget::categorySelected);
+    connect(m_composer, &Composer::knowledgeBaseSelected,
+            this, &ChartWidget::knowledgeBaseSelected);
     connect(m_composer, &Composer::exportRequested, this, &ChartWidget::sessionExportRequested);
     connect(m_composer, &Composer::settingsRequested, this, [this] { openSettings(); });
     connect(m_composer, &Composer::attachRequested, this, &ChartWidget::attachRequested);
     connect(m_composer, &Composer::voiceRequested, this, &ChartWidget::voiceRequested);
     connect(m_composer, &Composer::attachmentRemoved, this, &ChartWidget::attachmentRemoved);
-    connect(m_composer, &Composer::optionChosen, this, &ChartWidget::optionChosen);
+    // 「结束」类选项不走普通发送：只发 endTurnRequested 并在本地收尾，不开新一轮
+    connect(m_composer, &Composer::optionChosen, this,
+            [this](const QString &value, const QString &label) {
+                if (!isEndTurnOption(label, value)) {
+                    emit optionChosen(value, label);
+                    return;
+                }
+                m_composer->closeChoice();
+                markCurrentStopped();
+                hidePhasePanel();
+                appendUserMessage(label, QVariantList());
+                emit endTurnRequested(label);
+            });
     connect(m_composer, &Composer::approvalDecided, this, &ChartWidget::approvalDecided);
     connect(m_composer, &Composer::choiceOpenChanged, this, [this](bool open) {
         syncPhaseLift();
         emit choiceOpenChanged(open);
     });
     connect(m_composer, &Composer::choiceResized, this, &ChartWidget::syncPhaseLift);
+    connect(m_composer, &Composer::toastRequested, this, &ChartWidget::showToast);
 
     connect(m_trajView, &TrajectoryView::reloadRequested, this,
             &ChartWidget::trajectoryReloadRequested);
@@ -370,6 +416,65 @@ ChartWidget::ChartWidget(QWidget *parent)
             &ChartWidget::testProviderRequested);
     connect(m_settings, &SettingsDialog::readModelsRequested, this,
             &ChartWidget::readModelsRequested);
+    connect(m_settings, &SettingsDialog::modelMetadataRefreshRequested, this,
+            &ChartWidget::modelMetadataRefreshRequested);
+    connect(m_settings, &SettingsDialog::modelLimitsResolveRequested, this,
+            &ChartWidget::modelLimitsResolveRequested);
+    connect(m_settings, &SettingsDialog::kbFolderChanged, this, &ChartWidget::kbFolderChanged);
+
+    // 记忆页 / 知识库页的意图信号：SettingsDialog 发出来之后必须继续往上传，
+    // 否则宿主一个都收不到（先前只连了 kbFolderChanged，其余 24 条断在对话框里）
+    connect(m_settings, &SettingsDialog::memoryRefreshRequested,
+            this, &ChartWidget::memoryRefreshRequested);
+    connect(m_settings, &SettingsDialog::memoryListRequested,
+            this, &ChartWidget::memoryListRequested);
+    connect(m_settings, &SettingsDialog::memoryConfigPatchRequested,
+            this, &ChartWidget::memoryConfigPatchRequested);
+    connect(m_settings, &SettingsDialog::memoryActionRequested,
+            this, &ChartWidget::memoryActionRequested);
+    connect(m_settings, &SettingsDialog::memoryBulkRequested,
+            this, &ChartWidget::memoryBulkRequested);
+    connect(m_settings, &SettingsDialog::memoryDetailRequested,
+            this, &ChartWidget::memoryDetailRequested);
+    connect(m_settings, &SettingsDialog::memoryFieldSaveRequested,
+            this, &ChartWidget::memoryFieldSaveRequested);
+    connect(m_settings, &SettingsDialog::memoryFieldDeleteRequested,
+            this, &ChartWidget::memoryFieldDeleteRequested);
+    connect(m_settings, &SettingsDialog::memoryToolClearRequested,
+            this, &ChartWidget::memoryToolClearRequested);
+    connect(m_settings, &SettingsDialog::memoryToolsClearAllRequested,
+            this, &ChartWidget::memoryToolsClearAllRequested);
+    connect(m_settings, &SettingsDialog::memoryMaintenanceRequested,
+            this, &ChartWidget::memoryMaintenanceRequested);
+
+    connect(m_settings, &SettingsDialog::kbRefreshRequested,
+            this, &ChartWidget::kbRefreshRequested);
+    connect(m_settings, &SettingsDialog::kbLibraryCreateRequested,
+            this, &ChartWidget::kbLibraryCreateRequested);
+    connect(m_settings, &SettingsDialog::kbLibraryRenameRequested,
+            this, &ChartWidget::kbLibraryRenameRequested);
+    connect(m_settings, &SettingsDialog::kbLibraryDeleteRequested,
+            this, &ChartWidget::kbLibraryDeleteRequested);
+    connect(m_settings, &SettingsDialog::kbFilesImportRequested,
+            this, &ChartWidget::kbFilesImportRequested);
+    connect(m_settings, &SettingsDialog::kbDirImportRequested,
+            this, &ChartWidget::kbDirImportRequested);
+    connect(m_settings, &SettingsDialog::kbDirImportToFolderRequested,
+            this, &ChartWidget::kbDirImportToFolderRequested);
+    connect(m_settings, &SettingsDialog::kbDocumentDeleteRequested,
+            this, &ChartWidget::kbDocumentDeleteRequested);
+    connect(m_settings, &SettingsDialog::kbDocumentReindexRequested,
+            this, &ChartWidget::kbDocumentReindexRequested);
+    connect(m_settings, &SettingsDialog::kbDocumentMoveRequested,
+            this, &ChartWidget::kbDocumentMoveRequested);
+    connect(m_settings, &SettingsDialog::kbFolderCreateRequested,
+            this, &ChartWidget::kbFolderCreateRequested);
+    connect(m_settings, &SettingsDialog::kbFolderRenameRequested,
+            this, &ChartWidget::kbFolderRenameRequested);
+    connect(m_settings, &SettingsDialog::kbFolderDeleteRequested,
+            this, &ChartWidget::kbFolderDeleteRequested);
+    connect(m_settings, &SettingsDialog::kbSearchRequested,
+            this, &ChartWidget::kbSearchRequested);
     connect(m_settings, &SettingsDialog::refreshSkillsRequested, this,
             &ChartWidget::refreshSkillsRequested);
     connect(m_settings, &SettingsDialog::refreshMcpRequested, this,
@@ -410,14 +515,22 @@ void ChartWidget::buildTopbar()
     layout->setContentsMargins(12, 0, 12, 0);
     layout->setSpacing(8);
 
-    auto *mark = new QLabel(topbar);
+    // 品牌图标：webui 6213b58 把它改成 button（#brand-mark.brand-mark-btn），
+    // 点击即 POST /gridstar/ensure 拉起 GridStar 主程序；库侧只发信号，请求与 Toast 由宿主做
+    auto *mark = new QPushButton(topbar);
     mark->setObjectName(QStringLiteral("brandMark"));
-    mark->setAttribute(Qt::WA_StyledBackground, true);
-    mark->setAlignment(Qt::AlignCenter);
+    setClass(mark, QStringLiteral("brandMarkBtn"));
     mark->setFixedSize(24, 24);
+    mark->setCursor(Qt::PointingHandCursor);
+    mark->setFocusPolicy(Qt::TabFocus);
+    mark->setToolTip(QStringLiteral("打开 GridStar"));
+    mark->setAccessibleName(QStringLiteral("打开 GridStar"));
     const QPixmap logo(QStringLiteral(":/icons/Logo.ico"));
-    if (!logo.isNull())
-        mark->setPixmap(logo.scaled(24, 24, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    if (!logo.isNull()) {
+        mark->setIcon(QIcon(logo));
+        mark->setIconSize(QSize(24, 24));
+    }
+    connect(mark, &QPushButton::clicked, this, &ChartWidget::launchAppRequested);
 
     auto *brand = new QLabel(QStringLiteral("GridStar Agent"), topbar);
     brand->setObjectName(QStringLiteral("brandText"));
@@ -968,6 +1081,10 @@ void ChartWidget::applyTheme(const QString &id)
 {
     gs::setTheme(id);
     setStyleSheet(appStyleSheet());
+    // Composer 的浮层（选择浮层 / 斜杠面板 / 上下文浮层）挂在它的宿主上，
+    // 是 Composer 的兄弟而非后代：换肤重建全局 QSS 带不到它们，显式重烤一次
+    if (m_composer)
+        m_composer->refreshTheme();
     // 皮肤切换后已按旧色着色的图标要重建
     m_sessionChevron->setPixmap(iconPixmap(QStringLiteral("chevron-down"), gs::palette().muted, 12));
     m_connection->update();
@@ -1072,6 +1189,32 @@ QString ChartWidget::currentSkill() const { return m_composer->currentSkill(); }
 void ChartWidget::setMode(const QString &mode) { m_composer->setMode(mode); }
 QString ChartWidget::mode() const { return m_composer->mode(); }
 
+// ------------------------------------------------------------ 分类 / 知识库 / 上下文
+
+void ChartWidget::setCategories(const QVariantList &categories)
+{
+    m_composer->setCategories(categories);
+}
+void ChartWidget::setCurrentCategory(const QString &id) { m_composer->setCurrentCategory(id); }
+QString ChartWidget::currentCategory() const { return m_composer->currentCategory(); }
+void ChartWidget::syncCategoryFromSession(const QString &category)
+{
+    m_composer->syncCategoryFromSession(category);
+}
+
+void ChartWidget::setKnowledgeBases(const QVariantList &libraries)
+{
+    m_composer->setKnowledgeBases(libraries);
+}
+void ChartWidget::setCurrentKnowledgeBase(const QString &id)
+{
+    m_composer->setCurrentKnowledgeBase(id);
+}
+QString ChartWidget::currentKnowledgeBase() const { return m_composer->currentKnowledgeBase(); }
+
+void ChartWidget::setContextUsage(const QVariantMap &usage) { m_composer->setContextUsage(usage); }
+void ChartWidget::clearContextUsage() { m_composer->clearContextUsage(); }
+
 void ChartWidget::setBusy(bool busy)
 {
     m_composer->setBusy(busy);
@@ -1143,6 +1286,8 @@ MessageWidget *ChartWidget::createMessage(const QString &role, const QString &co
     message->setAttachments(attachments);
     message->body()->setText(content);
     message->setBodyVisible(message->body()->hasVisibleContent());
+    // 兜底：先按传入正文当复制源；流式 / 结构化块路径会在收尾时用 setCopyText 覆盖成可见正文
+    message->setCopyText(content);
     connect(message, &MessageWidget::copyRequested, this, [this](const QString &text) {
         // app.js 卡片拷贝：无内容时提示，成功/失败各给一条 toast
         const QString payload = text.isEmpty() ? QString() : text;
@@ -1174,7 +1319,10 @@ void ChartWidget::appendUserMessage(const QString &content, const QVariantList &
     if (!assertGuiThread(__func__))
         return;
     MessageWidget *message = createMessage(QStringLiteral("user"), content, QString(), attachments);
+    // property 供轮次轨摘要（turnText）读；复制按钮读的是 m_copyText，两个都要写，
+    // 否则用户消息的复制按钮就只会弹「没有可复制的内容」
     message->setProperty("copyText", content);
+    message->setCopyText(content);
     // app.js sendMessage：新一轮提问必须落底并恢复自动跟随，即使上一轮用户上滚停留在历史里
     scrollToEnd(true);
 }
@@ -1586,7 +1734,7 @@ void ChartWidget::clearMessages()
     rebuildTurnRail();
 }
 
-void ChartWidget::setHistory(const QVariantList &messages)
+void ChartWidget::setHistory(const QVariantList &messages, bool resume)
 {
     if (!assertGuiThread(__func__))
         return;
@@ -1725,6 +1873,7 @@ void ChartWidget::setHistory(const QVariantList &messages)
             MessageWidget *item = createMessage(QStringLiteral("user"), shown, QString(),
                                                message.value(QStringLiteral("attachments")).toList());
             item->setProperty("copyText", shown);
+            item->setCopyText(shown);
             item->setTimeStamp(message.value(QStringLiteral("ts")).toString());
         } else if (role == QLatin1String("workflow")) {
             QVariantMap started;
@@ -1747,9 +1896,13 @@ void ChartWidget::setHistory(const QVariantList &messages)
     }
     finishTurn();
 
-    // 历史最后一轮停在未作答的询问上才弹浮层（供宿主恢复「待确认」徽标）
-    m_lastTurnAwaiting = !lastAsk.isEmpty();
-    if (m_lastTurnAwaiting)
+    // 历史最后一轮停在未作答的询问上才弹浮层（供宿主恢复「待确认」徽标）。
+    // resume（重连/续跑）：末尾那轮的询问已经被本轮 user 消息回答过了，不能再弹，
+    // 否则刷新回来后会把已审批的旧参数卡重新弹回输入框上方（webui c4a6d84）
+    m_lastTurnAwaiting = !resume && !lastAsk.isEmpty();
+    if (resume)
+        m_composer->closeChoice();
+    else if (m_lastTurnAwaiting)
         m_composer->showChoice(lastAsk);
     scrollToEnd(true);
     rebuildTurnRail();
@@ -1768,6 +1921,20 @@ void ChartWidget::setDiscoveredModels(const QString &providerId, const QVariantL
     if (!assertGuiThread(__func__))
         return;
     m_settings->setDiscoveredModels(providerId, models);
+}
+
+void ChartWidget::setModelMetadata(const QVariantMap &snapshot)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setModelMetadata(snapshot);
+}
+
+void ChartWidget::setModelMetadataFailed(const QString &kind, const QString &error, int httpStatus)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setModelMetadataFailed(kind, error, httpStatus);
 }
 void ChartWidget::setProviderBusy(bool testing, bool reading)
 {
@@ -1795,6 +1962,85 @@ void ChartWidget::setSettingsStatus(const QString &text)
     m_settings->setStatus(text);
 }
 
+// ------------------------------------------------------------ 设置中心：记忆 / 知识库
+
+void ChartWidget::setMemorySummary(const QVariantMap &summary)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setMemorySummary(summary);
+}
+
+void ChartWidget::setMemoryExperiences(const QVariantMap &listing)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setMemoryExperiences(listing);
+}
+
+void ChartWidget::setMemoryListFailed(const QString &error)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setMemoryListFailed(error);
+}
+
+void ChartWidget::setMemoryTools(const QVariantMap &payload)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setMemoryTools(payload);
+}
+
+void ChartWidget::setMemoryStatusText(const QString &text)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setMemoryStatusText(text);
+}
+
+void ChartWidget::setKbLibraries(const QVariantList &libraries)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbLibraries(libraries);
+}
+
+void ChartWidget::setKbStatus(const QVariantMap &status)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbStatus(status);
+}
+
+void ChartWidget::setKbFolders(const QVariantList &folders, const QVariantMap &tree)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbFolders(folders, tree);
+}
+
+void ChartWidget::setKbDocuments(const QVariantList &documents, int total)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbDocuments(documents, total);
+}
+
+void ChartWidget::setKbSearchResult(const QVariantMap &result)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbSearchResult(result);
+}
+
+void ChartWidget::setKbStatusText(const QString &text)
+{
+    if (!assertGuiThread(__func__))
+        return;
+    m_settings->setKbStatusText(text);
+}
+
 void ChartWidget::setUsageStats(const QString &requestId, const QVariantMap &data)
 {
     if (!assertGuiThread(__func__))
@@ -1820,6 +2066,9 @@ void ChartWidget::openSettings(const QString &tab)
     applyDeferredStyleDetails(m_settings);
     m_settings->raise();
     m_settings->activateWindow();
+    // 告诉宿主设置中心被打开了（哪个 Tab）：它据此拉 model-metadata / memory summary /
+    // kb libraries 这类“打开才需要”的数据。以前控件自带的设置按钮那一路宿主无感
+    emit settingsOpened(!tab.isEmpty() ? tab : m_settings->activeTab());
 }
 
 void ChartWidget::closeSettings()
@@ -2115,6 +2364,7 @@ extern "C" QTCHARTWIDGET_EXPORT QWidget *qtchartwidget_create()
 
 extern "C" QTCHARTWIDGET_EXPORT const char *qtchartwidget_version()
 {
-    // 2.2.0：公开头只做加法（新增信号 sessionExportRequested），改这里时同步改 CHANGELOG 与 README
-    return "2.2.0";
+    // 2.3.0：公开头只做加法（记忆 / 知识库 / 分类 / 上下文用量 / 结束本轮 / 模型信息快照），
+    // 改这里时同步改 CHANGELOG 与 README
+    return "2.3.0";
 }

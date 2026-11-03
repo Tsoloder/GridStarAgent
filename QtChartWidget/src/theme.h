@@ -80,7 +80,7 @@ void setTheme(const QString &id);
 // 全部皮肤 id（下拉列表用）
 QStringList themeIds();
 
-// 字体族：CSS 中是 "Bahnschrift","Microsoft YaHei UI",sans-serif
+// 字体族：与 webui/style.css 的 :root 一致（"Microsoft YaHei" 优先）
 QString uiFont();
 QString monoFont();
 int basePixelSize();

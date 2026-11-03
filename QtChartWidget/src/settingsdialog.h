@@ -3,6 +3,7 @@
 
 #include <QDialog>
 #include <QFrame>
+#include <QSet>
 #include <QVariant>
 #include <QWidget>
 
@@ -16,6 +17,7 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QResizeEvent;
+class QShowEvent;
 class QSpacerItem;
 class QStackedWidget;
 class QVBoxLayout;
@@ -24,6 +26,10 @@ QT_END_NAMESPACE
 namespace gs {
 
 class UsagePanel;
+class MemoryPanel;
+class KbPanel;
+// 模型卡的行式表单一行（.srow / .srow-2），定义在 settingsdialog.cpp
+class ModelRow;
 
 // HTML <details> 的等价物：点击 summary 展开 / 收起 body
 class ExpandCard : public QFrame
@@ -40,6 +46,11 @@ public:
     void setOpen(bool open);
     bool isOpen() const { return m_open; }
 
+signals:
+    // 开合状态变化：模型卡片把它转给行尾的折叠箭头（webui 的
+    // .settings-model>summary::after 由 [open] 属性驱动）
+    void openChanged(bool open);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -51,10 +62,10 @@ private:
     bool m_open = false;
 };
 
-// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 / 用量 四个 Tab
+// 设置中心（#settings-modal）：模型 / 技能 / MCP 工具 / 记忆 / 知识库 / 用量 六个 Tab
 // 对应 app.js 的 renderSettings / renderProviderEditor / renderModelCard /
-// renderCandidates / renderSkills / renderMcpTools / validateSettings / saveSettings /
-// renderUsagePanel
+// renderCandidates / renderSkills / renderMcpTools / renderUsagePanel /
+// memory*（记忆页）/ kb*（知识库页）
 class SettingsDialog : public QDialog
 {
     Q_OBJECT
@@ -69,6 +80,15 @@ public:
 
     // readProviderModels() 的结果：providerId -> 候选模型列表
     void setDiscoveredModels(const QString &providerId, const QVariantList &models);
+
+    // GET /config/model-metadata 的快照状态：
+    // {available, source, file_time, fetched_at, providers, models, hosts}
+    // （models / providers / hosts 是计数）。若另带 "limits"（模型 ID ->
+    // {context_window, max_output_tokens, capabilities}）或 "models" 数组形式，
+    // 则按 app.js applyModelLimits 口径回填草稿：上限只填空字段，能力只勾支持项。
+    void setModelMetadata(const QVariantMap &snapshot);
+    // 快照读取 / 刷新失败：kind = "load" | "refresh"，httpStatus 为 0 表示没有状态码
+    void setModelMetadataFailed(const QString &kind, const QString &error, int httpStatus = 0);
     // testProvider() / readProviderModels() 进行中的按钮文案
     void setProviderBusy(bool testing, bool reading);
 
@@ -81,6 +101,21 @@ public:
     void setUsageStats(const QString &requestId, const QVariantMap &data);
     void setUsageLoadFailed(const QString &requestId, const QString &error);
 
+    // ---- 记忆页（GET /memory/*） ----
+    void setMemorySummary(const QVariantMap &summary);
+    void setMemoryExperiences(const QVariantMap &listing);
+    void setMemoryListFailed(const QString &error);
+    void setMemoryTools(const QVariantMap &payload);
+    void setMemoryStatusText(const QString &text);
+
+    // ---- 知识库页（GET /kb/*） ----
+    void setKbLibraries(const QVariantList &libraries);
+    void setKbStatus(const QVariantMap &status);
+    void setKbFolders(const QVariantList &folders, const QVariantMap &tree);
+    void setKbDocuments(const QVariantList &documents, int total);
+    void setKbSearchResult(const QVariantMap &result);
+    void setKbStatusText(const QString &text);
+
     void switchTab(const QString &tab);
     QString activeTab() const { return m_tab; }
     void setStatus(const QString &text);
@@ -90,15 +125,56 @@ public:
 signals:
     void testProviderRequested(const QString &providerId);
     void readModelsRequested(const QString &providerId);
+    // 「更新模型信息」：宿主 POST /config/model-metadata/refresh 后回填 setModelMetadata
+    void modelMetadataRefreshRequested();
+    // 新增模型后请求补上限（webui fillModelLimits）：宿主调 resolve 后回填 setModelMetadata
+    void modelLimitsResolveRequested(const QString &providerId, const QString &modelId);
     void refreshSkillsRequested();
     void refreshMcpRequested();
     void saveRequested(const QVariantMap &config, const QVariant &revision);
     void usageStatsRequested(const QString &requestId, const QString &start, const QString &end,
                              const QString &provider, const QString &model);
 
+    // ---- 记忆页的意图（宿主调 /memory/*） ----
+    void memoryRefreshRequested();
+    void memoryListRequested(int page, const QVariantMap &filters);
+    void memoryConfigPatchRequested(const QVariantMap &updates);
+    void memoryActionRequested(const QString &id, const QString &action);
+    void memoryBulkRequested(const QStringList &ids, const QString &action);
+    void memoryDetailRequested(const QString &id);
+    void memoryFieldSaveRequested(const QString &tool, const QString &field, const QVariant &value);
+    void memoryFieldDeleteRequested(const QString &tool, const QString &field);
+    void memoryToolClearRequested(const QString &tool);
+    void memoryToolsClearAllRequested();
+    void memoryMaintenanceRequested(const QString &kind);
+
+    // ---- 知识库页的意图（宿主调 /kb/*） ----
+    void kbRefreshRequested(const QString &libraryId);
+    void kbLibraryCreateRequested(const QString &name);
+    void kbLibraryRenameRequested(const QString &libraryId, const QString &name);
+    void kbLibraryDeleteRequested(const QString &libraryId);
+    void kbFilesImportRequested(const QStringList &paths, const QString &libraryId,
+                                const QString &folderId);
+    void kbDirImportRequested(const QString &libraryId, const QString &dirPath);
+    // 目录导入带目标文件夹（空串 = 库根）
+    void kbDirImportToFolderRequested(const QString &libraryId, const QString &dirPath,
+                                      const QString &folderId);
+    void kbDocumentDeleteRequested(const QString &docId);
+    void kbDocumentReindexRequested(const QString &docId);
+    void kbDocumentMoveRequested(const QString &docId, const QString &folderId);
+    void kbFolderCreateRequested(const QString &libraryId, const QString &parentId,
+                                 const QString &name);
+    void kbFolderRenameRequested(const QString &folderId, const QString &name);
+    void kbFolderDeleteRequested(const QString &folderId);
+    void kbSearchRequested(const QString &libraryId, const QString &query);
+    // 归档树切目录：folderId 为树上的 key（all / root / 真实 folder id），
+    // 宿主据此拉 /kb/documents?library_id=&folder= 再回填 setKbDocuments
+    void kbFolderChanged(const QString &libraryId, const QString &folderId);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     // Esc 走 reject()，脏检查要在两条路径上都生效
     void reject() override;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -112,6 +188,8 @@ private:
     QWidget *buildProviderEditor();
     QWidget *buildSkillsPage();
     QWidget *buildMcpPage();
+    QWidget *buildMemoryPage();
+    QWidget *buildKbPage();
     QWidget *buildUsagePage();
 
     void renderSettings();
@@ -119,6 +197,17 @@ private:
     void renderProviderEditor();
     void renderModelCard(const QVariantMap &model);
     void renderCandidates();
+    // 模型信息状态行（.models-meta）
+    void renderModelMeta();
+    QString metaStatusText() const;
+    QString metaTitleText() const;
+    // 模型 ID -> 上限与能力项：先看候选（readProviderModels），再看快照
+    QVariantMap modelLimits(const QString &providerId, const QString &modelId) const;
+    QVariantMap metaLimitsFor(const QString &modelId) const;
+    // 把已有的草稿模型按快照 / 候选补齐（只填空字段，不标 dirty）
+    bool applyStoredModelLimits();
+    // 模型页的局部 QSS：行式表单、能力开关、数值预设面板、模型信息状态行
+    void applyModelStyle();
     void renderSkills();
     void renderMcpTools();
     void markDirty();
@@ -168,6 +257,8 @@ private:
     QPushButton *m_tabModels = nullptr;
     QPushButton *m_tabSkills = nullptr;
     QPushButton *m_tabMcp = nullptr;
+    QPushButton *m_tabMemory = nullptr;
+    QPushButton *m_tabKb = nullptr;
     QPushButton *m_tabUsage = nullptr;
     QPushButton *m_saveButton = nullptr;
     QLabel *m_status = nullptr;
@@ -182,9 +273,12 @@ private:
     QVBoxLayout *m_providerEditorLayout = nullptr;
     QGridLayout *m_providerGrid = nullptr;
     QList<QWidget *> m_providerFields;
-    // .form-grid：每个模型卡片一套，切紧凑模式时重排为单列
-    QList<QGridLayout *> m_modelGrids;
-    QList<QList<QWidget *>> m_modelGridFields;
+    // 模型卡的行式表单：紧凑模式下 .srow-2 两列并单列，.model-caps 整段隐藏
+    QList<ModelRow *> m_modelRows;
+    QList<QWidget *> m_modelCapsRows;
+    // 展开着的模型卡片（provider/id）。卡片每次重渲染都是新建的，
+    // 记在这里才不至于是「宿主回填上限 → 整块重建 → 全部收起」
+    QSet<QString> m_openModelKeys;
     QBoxLayout *m_providerActions = nullptr;
     QSpacerItem *m_providerActionsSpacer = nullptr;
     QWidget *m_placeholder = nullptr;
@@ -214,6 +308,16 @@ private:
     QLabel *m_modelsTitle = nullptr;
     QLabel *m_modelsCount = nullptr;
     QPushButton *m_readButton = nullptr;
+    // 模型信息快照状态（/config/model-metadata）
+    QFrame *m_sectionMeta = nullptr;
+    QLabel *m_metaTitle = nullptr;
+    QLabel *m_metaText = nullptr;
+    QPushButton *m_metaButton = nullptr;
+    QVariantMap m_meta;
+    QString m_metaError;
+    QString m_metaErrorKind;
+    int m_metaStatus = 0;
+    bool m_metaRefreshing = false;
     QVBoxLayout *m_modelListLayout = nullptr;
     QLineEdit *m_candidateSearch = nullptr;
     QVBoxLayout *m_candidateLayout = nullptr;
@@ -234,6 +338,10 @@ private:
 
     // 用量页
     UsagePanel *m_usagePanel = nullptr;
+
+    // 记忆 / 知识库页
+    MemoryPanel *m_memoryPanel = nullptr;
+    KbPanel *m_kbPanel = nullptr;
 
     bool m_compact = false;
 };

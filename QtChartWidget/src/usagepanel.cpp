@@ -1011,7 +1011,7 @@ QWidget *UsagePanel::buildTrendCard()
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
-    layout->addWidget(cardHead(QStringLiteral("TREND"), QStringLiteral("输入 / 输出趋势"), nullptr,
+    layout->addWidget(cardHead(QStringLiteral("趋势"), QStringLiteral("输入 / 输出趋势"), nullptr,
                                QString::fromUtf8(kZoomHint), card));
     m_line = new UsageTimeChart(UsageTimeChart::Line, card);
     m_line->setObjectName(QStringLiteral("usageLine"));
@@ -1030,7 +1030,7 @@ QWidget *UsagePanel::buildPieCard()
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
-    layout->addWidget(cardHead(QStringLiteral("SHARE"), QStringLiteral("模型占比"), &m_pieTitle,
+    layout->addWidget(cardHead(QStringLiteral("构成"), QStringLiteral("模型占比"), &m_pieTitle,
                                QString(), card));
     m_pie = new UsagePieChart(card);
     m_pie->setObjectName(QStringLiteral("usagePie"));
@@ -1052,7 +1052,7 @@ QWidget *UsagePanel::buildBarCard()
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
-    layout->addWidget(cardHead(QStringLiteral("MEASURED"), QStringLiteral("实测 vs 估算"), nullptr,
+    layout->addWidget(cardHead(QStringLiteral("实测校验"), QStringLiteral("实测 vs 估算"), nullptr,
                                QString(), card));
     m_bar = new UsageTimeChart(UsageTimeChart::Bar, card);
     m_bar->setObjectName(QStringLiteral("usageBar"));
@@ -1071,7 +1071,7 @@ QWidget *UsagePanel::buildTableCard()
     auto *layout = new QVBoxLayout(card);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
-    layout->addWidget(cardHead(QStringLiteral("DETAIL"), QStringLiteral("模型明细"), &m_tableTitle,
+    layout->addWidget(cardHead(QStringLiteral("明细数据"), QStringLiteral("模型明细"), &m_tableTitle,
                                QString(), card));
     m_table = new QTableWidget(card);
     m_table->setObjectName(QStringLiteral("usageTable"));

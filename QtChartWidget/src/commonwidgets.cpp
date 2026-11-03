@@ -306,19 +306,40 @@ void ComboTrigger::setText(const QString &text)
 {
     m_full = text;
     updateElided();
+    // sizeHint 只看 m_full，标签那边的 updateGeometry 穿不到外层流式布局，得自己报一声
+    updateGeometry();
 }
 
 void ComboTrigger::updateElided()
 {
     const int available = qMax(10, width() - 10);
     QFont f = font();
-    f.setPixelSize(scaledPx(10));
+    // .comboText 是 11px：量字与渲染同一号，省略才与视觉一致
+    f.setPixelSize(scaledPx(11));
     m_text->setText(elidedText(m_full, QFontMetrics(f), available));
+}
+
+QSize ComboTrigger::sizeHint() const
+{
+    // 曾经用布局（标签）的 sizeHint 当尺寸：标签文本会被省略到「刚好装下当前宽度」，
+    // 于是文本一变长就跳进死循环——宽 16px、永远只剩一个省略号。
+    // 现在按全文实测给宽（左右各 5px 内边距 + 2px 余量），省略只发生在被外层压窄时。
+    QFont f = font();
+    f.setPixelSize(scaledPx(11));
+    const int textWidth = QFontMetrics(f).horizontalAdvance(m_full);
+    return QSize(textWidth + 12, 25);
+}
+
+QSize ComboTrigger::minimumSizeHint() const
+{
+    // 可以被压到任意窄（窄窗口 / 外层 max-width）
+    return QSize(12, 25);
 }
 
 void ComboTrigger::refreshZoom()
 {
     updateElided();
+    updateGeometry();
 }
 
 void ComboTrigger::resizeEvent(QResizeEvent *event)
@@ -413,6 +434,16 @@ void ProgressLine::paintEvent(QPaintEvent *)
 
 // ---------------------------------------------------------------- ElidedLabel
 
+// 单行文本控件应该给多高。
+// 直接甩 fontMetrics().height() 会在中文字体上把字顶/字底裁掉一两个像素：
+// Qt 的 QLabel 用 QTextLayout 绘制，行盒按字体自己的 ascent/descent 算，
+// 而主字体的 metrics 与中文回退字形的墨迹未必对得上；雅黑的 ascent/em 高达 1.058，
+// 在 10~12px 这种小字号下差一两个像素就看得出来。多给 2px（随缩放）兜住这个误差。
+int labelLineHeight(const QFontMetrics &fm)
+{
+    return qMax(fm.height(), fm.lineSpacing()) + gs::scaledPx(4);
+}
+
 ElidedLabel::ElidedLabel(QWidget *parent) : QLabel(parent)
 {
     setTextInteractionFlags(Qt::NoTextInteraction);
@@ -428,7 +459,7 @@ void ElidedLabel::setFullText(const QString &text)
 QSize ElidedLabel::sizeHint() const
 {
     const QFontMetrics fm(font());
-    return QSize(fm.horizontalAdvance(m_full), fm.height());
+    return QSize(fm.horizontalAdvance(m_full), labelLineHeight(fm));
 }
 
 QSize ElidedLabel::minimumSizeHint() const
@@ -436,7 +467,7 @@ QSize ElidedLabel::minimumSizeHint() const
     // 宽度下限 0：允许被压到任意窄，省略号自己处理。
     // 高度下限必须留一行文字：文本要等首次 resize 才回填，此前 QLabel 的最小高度是 0，
     // 会把宿主布局压塌（用量下拉的选项行就被挤成 14px、文字高度 0）。
-    return QSize(0, qMax(QLabel::minimumSizeHint().height(), fontMetrics().height()));
+    return QSize(0, qMax(QLabel::minimumSizeHint().height(), labelLineHeight(fontMetrics())));
 }
 
 void ElidedLabel::resizeEvent(QResizeEvent *event)

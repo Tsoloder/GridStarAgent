@@ -1,6 +1,7 @@
 #include "choiceoverlay.h"
 
 #include "commonwidgets.h"
+#include "jsoneditor.h"
 #include "messagewidgets.h"
 #include "theme.h"
 
@@ -8,6 +9,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeyEvent>
@@ -20,6 +22,7 @@
 #include <QResizeEvent>
 #include <QScrollArea>
 #include <QTimer>
+#include <QToolTip>
 #include <QVBoxLayout>
 
 namespace gs {
@@ -59,6 +62,31 @@ QWidget *paramRow(QWidget *left, QWidget *right, QWidget *parent)
     grid->addWidget(left, 0, 0);
     grid->addWidget(right, 0, 1);
     return row;
+}
+
+// webui .param-json-btn：JSON 形态的参数在输入框左边贴一个「表格」入口。
+// 配色走 gs::palette() 的局部样式表（theme.cpp 未接管这两个 class 前先自洽）。
+QPushButton *jsonTableButton(QWidget *parent)
+{
+    const Palette &pal = palette();
+    auto *button = new QPushButton(QStringLiteral("表格"), parent);
+    setClass(button, QStringLiteral("paramJsonBtn"));
+    button->setToolTip(QStringLiteral("用表格编辑这个 JSON 参数"));
+    button->setCursor(Qt::PointingHandCursor);
+    button->setFixedWidth(scaledPx(42));
+    // webui 的 holder 是 align-items:stretch：按钮和多行输入框一样高
+    button->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Expanding);
+    button->setFocusPolicy(Qt::TabFocus);
+    button->setStyleSheet(
+        QStringLiteral("QPushButton.paramJsonBtn {"
+                       " border: 1px solid %1; border-radius: 4px; background: %2; color: %3;"
+                       " font-size: %4px; font-weight: 600; }"
+                       "QPushButton.paramJsonBtn:hover {"
+                       " border-color: %5; color: %6; background: %7; }")
+            .arg(cssColor(pal.lineStrong), cssColor(pal.surface2), cssColor(pal.muted))
+            .arg(scaledPx(11))
+            .arg(cssColor(pal.cyanMid), cssColor(pal.cyan), cssColor(pal.accentTint)));
+    return button;
 }
 
 QString inferType(const QVariant &value)
@@ -166,6 +194,9 @@ ChoiceOverlay::ChoiceOverlay(QWidget *parent) : QFrame(parent)
 
     m_head = new QWidget(this);
     m_head->setObjectName(QStringLiteral("choiceHead"));
+    // 标题行与底部作答区高度固定：卡片比内容高时，多余高度只该给正文滚动区，
+    // 否则 QVBoxLayout 会把可伸展的 head 拉高，文字垂直居中，看起来标题上方凭空多一块空白。
+    m_head->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     m_head->setCursor(Qt::PointingHandCursor);
     m_head->setAttribute(Qt::WA_Hover, true);
     auto *hl = new QHBoxLayout(m_head);
@@ -229,6 +260,7 @@ ChoiceOverlay::ChoiceOverlay(QWidget *parent) : QFrame(parent)
     bodyLayout->addWidget(m_list);
 
     m_foot = new QWidget(this);
+    m_foot->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     auto *fl = new QVBoxLayout(m_foot);
     fl->setContentsMargins(11, 0, 11, 10);
     fl->setSpacing(4);
@@ -340,6 +372,51 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
     // 参数条目：审批按 schema 展开，工具参数按 params 列表
     const QList<ApprovalSpec> specs = m_isApproval ? approvalEntries(m_approvalEvent)
                                                    : toolParamEntries(toolParams);
+
+    // webui .param-json-field：文本能表格化成 JSON 时，在参数框左边贴一个「表格」按钮，
+    // 改完把新 JSON 写回参数框（走与手工输入同一条 textChanged 途径），提交仍然读参数框文本。
+    // 多行输入（object/array）之外，单行参数也要能进表格：groupProperty 的 schema 类型是 string，
+    // 值却是一段 JSON 文本，webui 对这种情况同样给按钮。
+    auto jsonParamField = [this](QWidget *field, const QString &name) -> QWidget * {
+        QString text;
+        if (auto *area = qobject_cast<QPlainTextEdit *>(field))
+            text = area->toPlainText();
+        else if (auto *input = qobject_cast<QLineEdit *>(field))
+            text = input->text();
+        if (!JsonTableEditor::canEdit(text))
+            return field;
+
+        auto *holder = new QWidget(m_params);
+        setClass(holder, QStringLiteral("paramJsonField"));
+        auto *layout = new QHBoxLayout(holder);
+        layout->setContentsMargins(0, 0, 0, 0);
+        layout->setSpacing(6);
+        auto *button = jsonTableButton(holder);
+        connect(button, &QPushButton::clicked, this, [this, field, name, button] {
+            QString current;
+            if (auto *area = qobject_cast<QPlainTextEdit *>(field))
+                current = area->toPlainText();
+            else if (auto *input = qobject_cast<QLineEdit *>(field))
+                current = input->text();
+            QString next;
+            if (!JsonTableEditor::edit(window(), name, current, &next)) {
+                // 输入框里的内容已经被改坏：照 webui 的 toast 口径提示一句
+                if (!JsonTableEditor::canEdit(current))
+                    QToolTip::showText(button->mapToGlobal(QPoint(0, -button->height())),
+                                       QStringLiteral("这个参数不是可表格化的 JSON（对象或数组），请直接在输入框里改"),
+                                       button);
+                return;
+            }
+            if (auto *area = qobject_cast<QPlainTextEdit *>(field))
+                area->setPlainText(next);
+            else if (auto *input = qobject_cast<QLineEdit *>(field))
+                input->setText(next);
+        });
+        layout->addWidget(button, 0);
+        layout->addWidget(field, 1);
+        return holder;
+    };
+
     for (const ApprovalSpec &spec : specs) {
         const bool structured = spec.type == QLatin1String("object")
                                 || spec.type == QLatin1String("array");
@@ -358,15 +435,18 @@ void ChoiceOverlay::showChoice(const QVariantMap &payload)
             area->setFont(mono);
             entry.area = area;
             QWidget *row = paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
-                                    area, m_params);
+                                    jsonParamField(area, spec.name), m_params);
             row->ensurePolished(); // QSS 的边距/字号要先落地，量出的行高才是最终值
             m_paramsLayout->addWidget(row);
         } else {
             auto *input = new QLineEdit(valueForInput(spec.value), m_params);
             setClass(input, QStringLiteral("paramInput"));
             entry.input = input;
+            QWidget *right = jsonParamField(input, spec.name);
+            if (right != input)
+                input->setCursorPosition(0); // JSON 参数从开头显示：不需要只看到尾部那截
             QWidget *row = paramRow(paramLabel(spec.name, spec.required, spec.desc, m_params),
-                                    input, m_params);
+                                    right, m_params);
             row->ensurePolished();
             m_paramsLayout->addWidget(row);
         }
@@ -540,13 +620,33 @@ int ChoiceOverlay::heightForCardWidth(int width)
     resize(w, height());
     if (QLayout *cardLayout = layout())
         cardLayout->activate();
-    syncBodyHeight();
-    return sizeHint().height();
+    syncBodyHeight(qMax(gs::scaledPx(120), w - margins().left() - margins().right()));
+
+    // 不用 sizeHint()：它会去问滚动区的 sizeHint，而滚动区的 sizeHint 在
+    // widgetResizable 下并不跟着刚设好的 body 最小高度走，结果卡片被算矮，
+    // 底部作答区被挤出可视区（参数多的审批卡就是这个症状）。
+    // 改成头 + 正文自然高 + 脚三项直接相加，其中正文高由 syncBodyHeight() 标定。
+    const int headH = m_head ? m_head->sizeHint().height() : 0;
+    const int footH = m_foot ? m_foot->sizeHint().height() : 0;
+    const QMargins m = margins();
+    int bodyNatural = m_bodyNatural;
+    if (m_body && m_body->layout()) {
+        // 两个口径取大：sizeHint 在窄宽下偏小、heightForWidth 在宽未定稿时偏大，
+        // 取大至少保证底部作答区不被顶出去
+        bodyNatural = qMax(bodyNatural, m_body->layout()->sizeHint().height());
+    }
+    const int total = headH + bodyNatural + footH + m.top() + m.bottom();
+    return qMax(total, sizeHint().height());
+}
+
+QMargins ChoiceOverlay::margins() const
+{
+    return layout() ? layout()->contentsMargins() : QMargins();
 }
 
 // 正文（问题/参数/选项）在滚动区里：先按当前宽度标定它的自然高度，
 // 然后把这个高度设为最小高度——卡片放得下就长满，放不下就出滚动条。
-void ChoiceOverlay::syncBodyHeight()
+void ChoiceOverlay::syncBodyHeight(int knownWidth)
 {
     if (!m_scroll || !m_body)
         return;
@@ -555,9 +655,11 @@ void ChoiceOverlay::syncBodyHeight()
         return;
 
     bodyLayout->activate();
-    const int bodyWidth = m_scroll->viewport()->width();
+    // 优先用调用方给的目标宽度：重布局瞬间 viewport()->width() 还是旧值（或 100 的默认值），
+    // 拿它算 heightForWidth 会把每行文字当成极窄宽度来换行，算出翻倍的高度，
+    // 表现就是卡片顶部留一大块空白、底部作答区被顶出可视区。
+    const int bodyWidth = knownWidth > 0 ? knownWidth : m_scroll->viewport()->width();
     int natural = bodyLayout->sizeHint().height();
-    // 换行文本的高度只有按宽度重算才准；宽度还没定稿时先退回 sizeHint
     if (bodyWidth > 0 && bodyLayout->hasHeightForWidth())
         natural = bodyLayout->heightForWidth(bodyWidth);
 
@@ -658,6 +760,21 @@ QVariantMap ChoiceOverlay::paramValues() const
         values.insert(entry.name, coerceSchemaValue(text, entry.type));
     }
     return values;
+}
+
+void ChoiceOverlay::resetSubmitted()
+{
+    if (!m_submitted)
+        return;
+    setSubmitted(false);
+    // 提交时被禁用的输入区要按当前选择重新放开（选的是「其他」就把输入框与提交按钮都还回来）
+    if (m_selected >= 0 && m_selected < m_optionEntries.size()) {
+        const OptionEntry &entry = m_optionEntries.at(m_selected);
+        if (entry.other && !m_isApproval) {
+            m_input->setEnabled(true);
+            m_submit->setEnabled(true);
+        }
+    }
 }
 
 void ChoiceOverlay::setSubmitted(bool submitted)

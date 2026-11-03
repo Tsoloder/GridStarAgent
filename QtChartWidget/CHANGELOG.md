@@ -3,6 +3,155 @@
 版本号遵循语义化版本：**公开头 `include/chartwidget.h` 有破坏性改动时主版本号 +1**。
 版本字符串在 `src/chartwidget.cpp` 的 `qtchartwidget_version()`，改这里时同步改本文件。
 
+## 2.3.0
+
+对齐 `webui/` 自 `bf57771` 之后的 18 个提交（`webui` 侧共 `app.js +2359`、
+`index.html +141`、`style.css +448`）。公开头全部是加法，故次版本号 +1。
+
+### 新增：设置中心两个新页
+
+- **记忆**（`#panel-memory`，第五个提交 9ae9641 / f4e5ab4 / b102431）：状态条（启用状态 / 经验库健康 /
+  全量检索 / 待审核数 / 维护进度，按 ok·off·warn·error 上色）、三个开关（启用记忆 / 自动提炼 /
+  注入提示，后两个随主开关置灰）、四件筛选（状态 / 类型 / 作用域 / 关键词，搜索去抖 300ms）、
+  批量条（本页全选 + 批量通过 / 拒绝）、卡片列表（状态 chip、标签串、置信度与证据数、
+  查看详情 + 按状态的动作）、加载更多（追加而非替换）；参数记忆（按工具折叠，字段值可就地编辑，
+  类型由原值锁定）；维护任务（立即提炼 / 运行维护 / 清空全部工具参数）
+- **知识库**（`#panel-kb`，350abab / f32f166）：多库下拉 + 新建 / 重命名 / 删除 / 刷新、
+  添加文件 / 导入目录、统计卡（文档 / 分块 / 参数 / 索引体积）、归档树（缩进层级、新建 / 重命名 /
+  删除文件夹）、资料清单（拖到文件夹归档、重建 / 删除、失败态红字）、检索试跑（参数命中 + 文本命中）
+
+### 新增：输入区
+
+- **专业分类下拉**（`#category-select`）：首项「全部」由库自补，选中发 `categorySelected`；
+  `syncCategoryFromSession` 只在用户未显式选过时覆盖（`syncCategoryFromMeta` 口径）
+- **知识库下拉**（`#kb-select`）：自带「不使用知识库」（`__none__`）与「全部知识库」（`*`）两项，
+  各库带「N 份 · M 块」副文本
+- **上下文用量圆环**（`#context-ring`）：自绘 22px 环 + 悬停浮层（上限 / 已用 / 剩余 / 进度条 /
+  本地估算），占比 0.7 转橙、0.9 转红，无数据时只留灰底环
+- 四个下拉与斜杠面板**五者互斥**，统一收在 `openDropdown()`，悬停 / 键盘 / 点击都走同一条路
+- 斜杠面板的技能按专业分类分组（选具体分类时只列本分类 + common + 不启用技能）
+
+### 新增：模型设置页
+
+- 行式表单（`.srow` / `.srow-2`）；上下文与最大输出带预设档位下拉（64K / 128K / 200K / 256K / 1M）
+- 四个能力位（视觉 / 视频 / 音频 / 推理）+ 折叠头小图标 + 上下文 chip（配置值优先，回落到快照值并标虚线）
+- 思考强度下拉（`compat.thinking="disabled"` 与 `compat.reasoning_effort` 双向映射）
+- 模型信息快照状态行 + 手动刷新（`setModelMetadata` / `setModelMetadataFailed` /
+  `modelMetadataRefreshRequested`）。注意 `GET /config/model-metadata` 里的
+  `models`/`providers`/`hosts` 是**计数**，每个模型的上限与能力来自
+  `POST /config/model-metadata/resolve`，宿主把结果放进快照的 `limits` 键
+
+### 新增：审批卡 JSON 表格编辑
+
+- 参数文本能解析为对象或数组时，输入框旁多一个「表格」按钮，把四种形状开成表格改：
+  分部件组（一行一组，改属性会同时应用到该组 domain 与 line）、对象键值对、值列表、对象数组
+- 单元格按原值类型找回（number / boolean / null / 嵌套 JSON），嵌套 JSON 解析不开时标红并拦住写回
+- 与 webui 一致：**分部件组表格以 domain 的值为准**，即使用户未改，点应用也会把 line 上同名属性
+  归一成 domain 的值（如果业务上 line 允许独立取值，需要在宿主侧避开这个参数用表格编辑）
+
+### 新增：公开 API 与信号
+
+- 分类 / 知识库 / 上下文：`setCategories` / `setCurrentCategory` / `currentCategory` /
+  `syncCategoryFromSession` / `setKnowledgeBases` / `setCurrentKnowledgeBase` /
+  `currentKnowledgeBase` / `setContextUsage` / `clearContextUsage`；
+  信号 `categorySelected` / `knowledgeBaseSelected`
+- 记忆：`setMemorySummary` / `setMemoryExperiences` / `setMemoryListFailed` / `setMemoryTools` /
+  `setMemoryStatusText`；信号 `memoryRefreshRequested` / `memoryListRequested` /
+  `memoryConfigPatchRequested` / `memoryActionRequested` / `memoryBulkRequested` /
+  `memoryDetailRequested` / `memoryFieldSaveRequested` / `memoryFieldDeleteRequested` /
+  `memoryToolClearRequested` / `memoryToolsClearAllRequested` / `memoryMaintenanceRequested`
+- 知识库：`setKbLibraries` / `setKbStatus` / `setKbFolders` / `setKbDocuments` /
+  `setKbSearchResult` / `setKbStatusText`；信号 `kbRefreshRequested` / `kbLibraryCreateRequested` /
+  `kbLibraryRenameRequested` / `kbLibraryDeleteRequested` / `kbFilesImportRequested` /
+  `kbDirImportRequested` / `kbDocumentDeleteRequested` / `kbDocumentReindexRequested` /
+  `kbDocumentMoveRequested` / `kbFolderCreateRequested` / `kbFolderRenameRequested` /
+  `kbFolderDeleteRequested` / `kbSearchRequested` / `kbFolderChanged`
+- 其他：`launchAppRequested`（顶栏品牌图标）、`endTurnRequested`（「结束」类选项）、
+  `setModelMetadata` / `setModelMetadataFailed` / `modelMetadataRefreshRequested` /
+  `modelLimitsResolveRequested(providerId, modelId)`（新增模型后拉上限的时机）、
+  `settingsOpened(tab)`（设置中心被打开，含模型 / 技能 / MCP / 记忆 / 知识库 / 用量）、
+  `kbDirImportToFolderRequested(libraryId, dirPath, folderId)`（目录导入落当前归档目录）
+
+### 行为变化（签名不变，但宿主需要知道）
+
+- **`setHistory(messages, resume = false)`**：新增第二个参数。`resume = true` 表示这批历史后面
+  还要接上正在跑的新一轮（重连场景），末尾那轮的询问不再弹回输入框上方（webui c4a6d84）。
+  老调用点不传这个参数，行为不变
+- **「结束」类选项不再开新一轮**（webui 5948605）：命中收尾措辞的选项（「本轮到此结束」「不用了」等
+  或 value 为 stop/end/finish 一类）只发 `endTurnRequested` 并在本地收尾；含「继续 / 下一步 / 再试」
+  的措辞一票否决，宁可当普通选择发回去
+- **选项提交在忙时不锁卡**（同属 webui 5948605）：上一轮还在收尾时点选项，卡片不再被锁死
+  （原来宿主的 sendMessage 会默默丢掉这次选择，用户只能刷新），改为退回未提交态并提示
+  「上一轮还在收尾，略等片刻再选」。为此 `ChoiceOverlay` 新增公开方法 `resetSubmitted()`
+- **发消息先收浮层**：`sendMessage` 发出前，上一轮遗留的确认浮层立即收起（webui c4a6d84）
+- **顶栏品牌图标**从 `QLabel` 换成 `QPushButton`（objectName 仍为 `brandMark`），点击发
+  `launchAppRequested`；宿主自行弹确认并 POST `/gridstar/ensure`
+- **正文排版**：正文 14px、标题 15px / 14px、表格 13px，正文与标题统一到微软雅黑；
+  底部用量与用时行由 9px 提到 10.5px
+- **记忆页翻页不再清空选择**（向 webui 对齐）：只有回到第 1 页（首查 / 改筛选 / 点刷新）才清，
+  加载更多时保留，否则「本页全选」一翻页就失效；已不在列表里的选中项由 `setListing()` 里的
+  `pruneSelection()` 收掉
+- **目录导入改发 `kbDirImportToFolderRequested`**：webui 的目录导入只带库、一律落库根，实际使用里
+  导入子目录往往就是想归到当前选中的归档目录。新信号多了 folderId（空串 = 库根）。
+  旧 `kbDirImportRequested` 保留声明但**不再 emit**，宿主需改接新信号（签名不同，需同步改）
+- **`settingsOpened(tab)`**：以前用户点控件自带的设置按钮，宿主完全无感，模型信息快照、记忆摘要、
+  知识库列表这些「打开才需要」的数据拉不到；现在无论从哪个入口打开都会带 Tab 名通知宿主
+- **行内解析先护住反斜杠转义**（webui f47d83d）：模型会把通配符组名写成 `engine\*`、
+  `verticalTail\*/horizontalTail\*`，这些星号不先抽成占位符，`**…**` 就匹配不上，粗体失配后
+  单星号规则再把两个 `**` 各拆一半，正文里会冒出字面星号与错位斜体；同时粗体 / 斜体正则改成
+  懒惰匹配（`[\s\S]+?` / `[^*]+?`），强调区里带占位符时不再整体失配
+- **`syncCategoryFromSession` 改为无条件覆盖**（webui syncCategoryFromMeta）：会话 meta 里的分类是
+  权威值，切会话与后端 `session_meta` 事件都会直接盖掉下拉当前值；早先那个「用户显式选过就跳过」
+  的守卫与 webui 不符（webui 的 `categoryTouched` 只记账、不参与判定）
+- **面板英文标签中文化**：`CONFIGURATION`→配置、`MODELS`→模型、`SKILLS`→技能库、
+  `MCP TOOLS`→MCP 工具、`TREND`→趋势、`SHARE`→构成、`MEASURED`→实测校验、`DETAIL`→明细数据
+- **设置中心从 4 个 Tab 扩到 6 个**（模型 / 技能 / MCP 工具 / 记忆 / 知识库 / 用量），
+  `openSettings(tab)` 的可用值相应增加 `memory` / `kb`
+- `QComboBox` 的下拉箭头改用一张已着色的小 chevron：Qt 的 `::down-arrow` 只认 `image`，
+  原先写的 CSS `border` 三角会画成一个实心方块
+- **斜杠面板两条旧缺陷一并修掉**：面板重排时新旧行会在同一帧叠着（先 `hide()` 再 `deleteLater()`）；
+  键盘焦点从未被真正设上（`focusRow()` 先清空再查询，永远查不到），导致 ↓ 与 Enter 一直是死的
+- **`ComboTrigger` 宽度自锁**：尺寸提示改为按全文实测、`minimumSizeHint` 允许压窄，
+  长模型名不再塌成 16px 的省略号（此前模型 / 模式下拉都中招）
+
+### 内部
+
+- 新增 `src/memorypanel.*`（记忆页）、`src/kbpanel.*`（知识库页）、`src/jsoneditor.*`（JSON 表格编辑器）
+- **记忆页与知识库页的样式已全部迁入 `theme.cpp`**（两个面板里的 `setStyleSheet` 局部表与 `StyleChange` 重烤逻辑删除），
+  跟全局 QSS 一起重建；新增 `%OKLINE%` 调色板令牌（以前只有 OKTINT/OKEXT）。
+  迁移中补了两处遗漏：三个滚动区的 viewport 透明（不然深色皮肤下树区露白底）、
+  `.slashGroupLabel` 那条 Qt 会直接忽略的 `letter-spacing` 声明（改成走字距补偿表）
+- **模型页改了并与 webui 对齐**：provider 侧栏按 `default_api` 分三组（OpenAI / Anthropic / 其它协议，
+  空组不显示）、折叠头加 `::after` 小箭头（由 `ExpandCard::openChanged` 镜像 `Chevron`，
+  开合状态只有一个来源）、「读取模型」降为 link-button；`addModel()` 后发
+  `modelLimitsResolveRequested`（只有能力项未知时才问），并用 `m_openModelKeys` 保证回填后
+  正在展开的模型卡不被收回
+- **信号转发修复**：记忆页 11 个与知识库页 13 个意图信号先前只到 `SettingsDialog` 就断了，
+  没在 `ChartWidget` 里接通，宿主一个都收不到。已补 24 条 `connect`
+- 新增四个能力图标 `cap-vision` / `cap-video` / `cap-audio` / `cap-reasoning` 与
+  `chevron-down-muted`（已注册进 `resources/icons.qrc`）。`QComboBox` 的 `::down-arrow`
+  只认 `image`，原先的 CSS `border` 三角会画成一个实心方块
+- **字体族与 webui 对齐到微软雅黑**（`uiFont()` 不再优先 Bahnschrift）。
+  webui 的 `style.css` `:root` 本来就是 `"Microsoft YaHei"` 优先，Qt 侧还留着 Bahnschrift：
+  中文会回退到雅黑渲染，但 QLabel 的高度按**主字体**的 `fontMetrics()` 算。
+  Bahnschrift 的 ascent/em 是 0.794，雅黑是 1.058，12px 下相差 3.2px，
+  于是标签框按 9.5px 留上方、中文却要 12.7px，字顶/字底被裁。
+  webui 在浏览器里没这个问题，因为 CSS 靠 `line-height` 撑行盒，与字体 metrics 无关。
+  另给 `ElidedLabel` 的 `sizeHint`/`minimumSizeHint` 加了 `labelLineHeight()`（行高 + 4px、随缩放），
+  把 CSS 的 `line-height` 余量补进 Qt 侧。字宽整变宽后重跑了全套用例与三套皮肤截图，版面正常
+- `demo.exe` 新增 `--tab memory` / `--tab kb` / `--tab model-form` / `--tab ring`，
+  并带上记忆、知识库、分类、上下文用量的演示数据；**live 模式补齐了 `/memory/*` 与 `/kb/*` 的
+  真实接线**（含分类 / 知识库随消息带上、切会话回填三样、`/gridstar/ensure`、`end-turn`、
+  两个模型元数据接口），`examples/host_example.cpp` 同步补了注释级接线示例
+- **回归用例从 55 项增到 72 项**（新增 17 项、约 240 条断言，覆盖上下文圆环、两个新下拉、
+  五浮层互斥、记忆页状态/开关/筛选/批量/字段编辑、知识库页归档树/资料/检索、JSON 表格编辑器、
+  结束类选项一票否决、`setHistory(resume)`、品牌按钮、两个模型元数据信号、`settingsOpened`、
+  目录导入带归档目录）
+- 测试里要注意 MSVC + Qt5.12 的一个坑：`QCOMPARE(map.keys(), QStringList{...})` 会被选到泛型
+  `qCompare`，展开到 `QList::op_eq_impl` → `stdext::make_checked_array_iterator`，
+  而 VS2022 的 STL 里这个符号已不可见，报 C2653/C3861（加 `<iterator>` 也没用）；
+  改用 `QCOMPARE(size, n)` + `QVERIFY(contains(...))`，或 `QStringList({...})` 走 `QList<T>` 专载
+
 ## 2.2.0
 
 对齐 `webui/` 自 `2.1.0` 之后的四个提交：`bf57771`（输入框控件改为下拉与斜杠面板）、

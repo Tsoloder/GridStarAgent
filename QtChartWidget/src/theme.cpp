@@ -263,7 +263,12 @@ QString uiFont()
 {
     static QString cached;
     if (cached.isEmpty()) {
-        const QStringList want{QStringLiteral("Bahnschrift"),
+        // 与 webui/style.css 的 :root 保持一致（那里也是 "Microsoft YaHei" 优先）。
+        // 为什么不能用 Bahnschrift 当主族：中文会回退到雅黑渲染，但 QLabel 的高度是按
+        // 主字体的 fontMetrics() 算的。Bahnschrift 的 ascent/em 只有 0.794，雅黑是 1.058，
+        // 12px 下相差 3.2px：标签框按 9.5px 留上方，中文却要 12.7px，于是字顶被裁。
+        // webui 在浏览器里没这个问题，因为 CSS 靠 line-height 撑行盒，与字体 metrics 无关。
+        const QStringList want{QStringLiteral("Microsoft YaHei"),
                                QStringLiteral("Microsoft YaHei UI"),
                                QStringLiteral("Segoe UI")};
         const QFontDatabase db;
@@ -275,7 +280,7 @@ QString uiFont()
             }
         }
         if (cached.isEmpty())
-            cached = QStringLiteral("Microsoft YaHei UI");
+            cached = QStringLiteral("Microsoft YaHei");
     }
     return cached;
 }
@@ -351,6 +356,7 @@ static qreal letterSpacingBase(const QWidget *widget)
         { "phaseTitle", 0.6 },       // .phase-head strong
         { "phaseCount", 0.3 },       // .phase-head small（统计串）
         { "modelGroupLabel", 1.2 },  // .model-group-label
+        { "slashGroupLabel", 1.2 },  // .slash-group-label（QSS 写 letter-spacing 会被 Qt 忽略）
         { "viewTab", 0.5 },          // .view-tab
         { "bubbleMeta", 0.4 },       // .bubble-meta
         { "bubblePill", 0.4 },       // .bubble-timing / .bubble-usage
@@ -542,10 +548,10 @@ QPushButton.bubbleCopy {
     border: 1px solid transparent; background: transparent; color: %MUTED2%; border-radius: 4px;
 }
 QPushButton.bubbleCopy:hover { border-color: %LINESTRONG%; background: %SURFACE2%; color: %CYAN%; }
-QLabel.bubbleMeta { color: %MUTED2%; font-size: 9px; background: transparent; }
+QLabel.bubbleMeta { color: %MUTED2%; font-size: 10.5px; background: transparent; }
 QPushButton.bubblePill {
     border: 1px solid transparent; border-radius: 8px; background: %BAND3%; color: %MUTED%;
-    font-size: 9px; padding: 1px 7px;
+    font-size: 10.5px; padding: 1px 7px;
 }
 QPushButton.bubblePill:hover { border-color: %CYAN%; color: %CYAN%; }
 QPushButton.bubblePill:disabled { color: %MUTED2%; }
@@ -576,9 +582,11 @@ QLabel.procRailText { color: %MUTED%; font-size: 11px; background: transparent; 
 
 /* ===== Markdown ===== */
 QWidget.markdownView { background: transparent; }
-QLabel.mdParagraph { color: %TEXT%; background: transparent; }
-QLabel.mdHeading { color: %TEXTBRIGHT%; font-size: 14px; font-weight: 700; background: transparent; }
-QLabel.mdList { color: %TEXT%; background: transparent; }
+/* webui f47d83d + d031e03：正文统一到微软雅黑并降到 14px，标题同步收一档
+   （h1~h3 15px；h4~h6 14px 在 markdownview.cpp 内联）。 */
+QLabel.mdParagraph { color: %TEXT%; font-size: 14px; background: transparent; font-family: "Microsoft YaHei", "Microsoft YaHei UI"; }
+QLabel.mdHeading { color: %TEXTBRIGHT%; font-size: 15px; font-weight: 700; background: transparent; font-family: "Microsoft YaHei", "Microsoft YaHei UI"; }
+QLabel.mdList { color: %TEXT%; font-size: 14px; background: transparent; font-family: "Microsoft YaHei", "Microsoft YaHei UI"; }
 QFrame.codeBlock { border: 1px solid %LINE%; background: %INSET%; border-radius: 8px; }
 QLabel.codeBlockHeader {
     color: %MUTED2%; font-size: 10px; background: transparent;
@@ -592,8 +600,8 @@ QLabel.mdQuote {
     color: %MUTED%; background: transparent; border-left: 2px solid %CYANMID%; padding: 2px 0 2px 10px;
 }
 QFrame.mdTable { border: 1px solid %LINE%; background: %INSET%; border-radius: 4px; }
-QLabel.mdTableHead { color: %TEXTBRIGHT%; font-size: 11px; font-weight: 600; background: %BAND3%; }
-QLabel.mdTableCell { color: %TEXT%; font-size: 11px; background: transparent; }
+QLabel.mdTableHead { color: %TEXTBRIGHT%; font-size: 13px; font-weight: 600; background: %BAND3%; }
+QLabel.mdTableCell { color: %TEXT%; font-size: 13px; background: transparent; }
 QLabel.mdRule { background: %LINE%; }
 QLabel.mdImage { border: 1px solid %LINE%; border-radius: 4px; background: transparent; }
 
@@ -799,6 +807,24 @@ QLabel#busyLabel { color: %MUTED2%; font-size: 10px; background: transparent; }
 QWidget#listbox { border: 1px solid %LINESTRONG%; background: %INSET%; border-radius: 12px; }
 QScrollArea#listboxScroll { border: 0; background: transparent; }
 QWidget#listboxInner { background: transparent; }
+/* 输入区的专业分类 / 知识库下拉：同一个 .model-listbox 家族，
+   但 objectName 不同，#listbox 那条匹配不上，这里补齐（成在 theme 里，
+   切皮肤跟着全局 QSS 一起重建） */
+QFrame#categoryList, QFrame#kbList {
+    border: 1px solid %LINESTRONG%; background: %INSET%; border-radius: 12px;
+}
+QFrame#kbList QWidget.modelOption QLabel.modelName { color: %TEXT%; }
+QFrame#kbList QWidget.modelOption[selected="true"] QLabel.modelName { color: %CYAN%; }
+QFrame#kbList QWidget.modelOption QLabel.modelId { color: %MUTED2%; }
+
+/* ===== 上下文用量浮层（#context-pop：min-width:216px，贴在圆环上方） ===== */
+QFrame#contextPop { border: 1px solid %LINE%; border-radius: 8px; background: %BAND2%; }
+QWidget#contextPopHead { background: transparent; border: 0; border-bottom: 1px solid %LINE%; }
+QLabel.popTitle { color: %TEXT%; font-size: 11px; font-weight: 600; background: transparent; }
+QLabel.popTotal { color: %TEXT%; font-size: 11px; font-family: %MONO%; background: transparent; }
+QLabel.popLabel { color: %MUTED%; font-size: 11px; background: transparent; }
+QLabel.popValue { color: %TEXTBRIGHT%; font-size: 11px; font-family: %MONO%; background: transparent; }
+QLabel.popNote { color: %MUTED2%; font-size: 9px; background: transparent; }
 QLabel.modelGroupLabel {
     color: %MUTED%; font-size: 10px; font-weight: 700; background: transparent; padding: 7px 8px 4px 8px;
 }
@@ -837,7 +863,7 @@ QScrollArea#slashScroll { border: 0; background: transparent; }
 QWidget.slashInner { background: transparent; }
 QLabel.slashGroupLabel {
     color: %MUTED%; font-size: 10px; font-weight: 700; background: transparent;
-    padding: 7px 8px 4px 8px; letter-spacing: 1.2px;
+    padding: 7px 8px 4px 8px;
 }
 QLineEdit.slashSearch {
     border: 1px solid %LINESTRONG%; background: %BG%; color: %TEXT%;
@@ -1019,8 +1045,12 @@ QWidget.choiceItem:focus, QWidget.sessionSelect:focus {
 QWidget#choiceHead:focus, QWidget#phaseHead:focus { outline: 1px solid %CYAN%; outline-offset: -1px; }
 QLineEdit.settingsInput:disabled { color: %MUTED2%; background: %BAND3%; }
 QComboBox.settingsInput::drop-down { border: 0; width: 20px; }
-QComboBox.settingsInput::down-arrow { image: none; border-left: 4px solid transparent;
-    border-right: 4px solid transparent; border-top: 5px solid %MUTED%; margin-right: 6px; }
+/* Qt 的 ::down-arrow 只认 image，CSS 那套"border 三角"会画成一个实心方块，
+   所以用一张已着色的小 chevron（三套皮肤下都能看清的中性灰）。 */
+QComboBox.settingsInput::down-arrow {
+    image: url(:/icons/chevron-down-muted.svg); width: 10px; height: 10px; margin-right: 6px;
+}
+QComboBox.settingsInput QAbstractItemView::item { padding: 4px 6px; }
 QComboBox QAbstractItemView {
     border: 1px solid %LINESTRONG%; background: %INSET%; color: %TEXT%;
     selection-background-color: %ACCENTTINT%; outline: 0;
@@ -1164,6 +1194,205 @@ QTableWidget#usageTable QHeaderView::section {
 }
 QTableWidget#usageTable QTableCornerButton::section { background: %BAND3%; border: 0; }
 
+/* ===== 设置中心 · 记忆页（.memory-*，对应 webui #panel-memory / app.js memory*） ===== */
+QWidget#memoryPanel, QWidget.memoryContent { background: transparent; }
+QScrollArea.memoryScroll { border: 0; background: transparent; }
+
+QLabel.memoryStatus {
+    border: 1px solid %LINESTRONG%; border-radius: 6px; background: %INSET%;
+    color: %MUTED%; font-size: 11px; padding: 8px 10px;
+}
+QLabel.memoryStatus[tone="ok"] { border-color: %OKLINE%; background: %OKTINT%; color: %OKTEXT%; }
+QLabel.memoryStatus[tone="warn"] { border-color: %WARNLINE%; background: %WARNTINT%; color: %WARNTEXT%; }
+QLabel.memoryStatus[tone="error"] { border-color: %ERRLINE%; background: %ERRTINT%; color: %ERRTEXT%; }
+QLabel.memoryStatus[tone="off"] { color: %MUTED%; }
+
+QWidget.memorySwitches { background: transparent; }
+QFrame.memorySwitch { border: 1px solid %LINE%; border-radius: 6px; background: %BAND2%; }
+QFrame.memorySwitch:hover { border-color: %LINESTRONG%; }
+QFrame.memorySwitch:focus { outline: 1px solid %CYAN%; outline-offset: -1px; }
+QFrame.memorySwitch[disabled="true"] { background: %SURFACE2%; border-color: %LINE%; }
+QLabel.memorySwitchTitle { color: %TEXTBRIGHT%; font-size: 12px; background: transparent; }
+QLabel.memorySwitchHint { color: %MUTED%; font-size: 10px; background: transparent; }
+QFrame.memorySwitch[disabled="true"] QLabel.memorySwitchTitle { color: %MUTED%; }
+
+QCheckBox.memoryCheck { color: %MUTED%; font-size: 11px; background: transparent; spacing: 6px; }
+QCheckBox.memoryCheck::indicator {
+    width: 13px; height: 13px; border: 1px solid %LINESTRONG%; background: %INSET%; border-radius: 4px;
+}
+QCheckBox.memoryCheck::indicator:checked { background: %CYANDARK%; border-color: %CYANMID%; }
+QCheckBox.memoryCheck::indicator:indeterminate { background: %SURFACE3%; border-color: %CYANMID%; }
+QCheckBox.memoryCheck::indicator:disabled { background: %SURFACE2%; border-color: %LINE%; }
+QCheckBox.memoryCheck:focus { outline: 1px solid %CYAN%; outline-offset: 1px; }
+
+QFrame.memorySection { border: 1px solid %LINE%; border-radius: 6px; background: %BAND2%; }
+QFrame.memorySection[danger="true"] { border-color: %ERRLINE%; }
+QLabel.memoryHint { color: %MUTED%; font-size: 10px; background: transparent; }
+QLabel.memoryFilterLabel { color: %MUTED%; font-size: 10px; background: transparent; }
+QWidget.memoryFilters, QWidget.memoryFilter { background: transparent; }
+
+QFrame.memoryBulk { border: 1px dashed %LINESTRONG%; border-radius: 6px; background: %INSET%; }
+QLabel.memoryBulkCount { color: %MUTED%; font-size: 11px; background: transparent; }
+
+QWidget.memoryList, QWidget.memoryTools { background: transparent; }
+QLabel.memoryEmpty { color: %MUTED%; font-size: 11px; background: transparent; padding: 4px 0; }
+
+QFrame.memoryCard { border: 1px solid %LINE%; border-radius: 6px; background: %INSET%; }
+QWidget.memoryCardSpacer { background: transparent; }
+QLabel.memoryChip {
+    border: 1px solid %LINESTRONG%; border-radius: 10px; color: %MUTED%; font-size: 10px;
+    padding: 2px 7px;
+}
+QLabel.memoryChip[tone="candidate"] { border-color: %WARNLINE%; background: %WARNTINT%; color: %WARNTEXT%; }
+QLabel.memoryChip[tone="approved"] { border-color: %OKLINE%; background: %OKTINT%; color: %OKTEXT%; }
+QLabel.memoryChip[tone="rejected"] { border-color: %ERRLINE%; background: %ERRTINT%; color: %ERRTEXT%; }
+QLabel.memoryChip[tone="deprecated"] { border-color: %LINESTRONG%; background: %SURFACE3%; color: %MUTED%; }
+QLabel.memoryCardTag { color: %MUTED2%; font-size: 10px; background: transparent; }
+QLabel.memoryCardTitle { color: %TEXTBRIGHT%; font-size: 13px; background: transparent; }
+QLabel.memoryCardMeta { color: %MUTED%; font-size: 10px; background: transparent; }
+QPushButton.actionButton[tone="approve"] { color: %OKTEXT%; }
+QPushButton.actionButton[tone="deny"] { color: %ERRTEXT%; }
+QPushButton.actionButton[tone="danger"] { border-color: %ERRLINE%; color: %ERRTEXT%; }
+
+QFrame.memoryTool { border: 1px solid %LINE%; border-radius: 6px; background: %INSET%; }
+QWidget.memoryToolHead { background: transparent; }
+QWidget.memoryToolHead:hover { background: %SURFACE2%; }
+QWidget.memoryToolHead:focus { outline: 1px solid %CYAN%; outline-offset: -1px; }
+QLabel.memoryToolName { color: %CYAN%; font-family: %MONO%; font-size: 11px; background: transparent; }
+QLabel.memoryToolMeta { color: %MUTED2%; font-size: 10px; background: transparent; }
+QWidget.memoryToolBody { background: transparent; border-top: 1px solid %LINE%; }
+QWidget.memoryField { background: transparent; border-bottom: 1px solid %LINE%; }
+QLabel.memoryFieldName { color: %TEXTBRIGHT%; font-family: %MONO%; font-size: 11px; background: transparent; }
+QLabel.memoryFieldSep { color: %MUTED2%; font-size: 11px; background: transparent; }
+QLabel.memoryFieldValue { color: %CYAN%; font-family: %MONO%; font-size: 11px; background: transparent; }
+QLabel.memoryFieldType { color: %MUTED2%; font-size: 10px; background: transparent; }
+QLineEdit.memoryFieldInput {
+    border: 1px solid %LINESTRONG%; border-radius: 4px; background: %INSET%; color: %TEXTBRIGHT%;
+    font-family: %MONO%; font-size: 11px; padding: 3px 7px;
+    selection-background-color: %CYANDARK%;
+}
+QLineEdit.memoryFieldInput:focus { border-color: %CYAN%; }
+QLineEdit.memoryFieldInput[invalid="true"] { border-color: %ERRLINE%; background: %ERRTINT%; }
+
+QPushButton.linkButton {
+    border: 0; background: transparent; color: %CYAN%; font-size: 11px; padding: 2px 4px;
+}
+QPushButton.linkButton:hover { color: %CYANMID%; }
+QPushButton.linkButton[tone="approve"] { color: %OKTEXT%; }
+QPushButton.linkButton[tone="danger"] { color: %ERRTEXT%; }
+QPushButton.linkButton:disabled { color: %MUTED2%; }
+QPushButton.linkButton:focus { outline: 1px solid %CYAN%; outline-offset: -1px; }
+
+/* ===== 设置中心 · 知识库页（.kb-*，对应 webui #panel-kb / app.js kb*） ===== */
+QScrollArea#kbPanelScroll { border: 0; background: transparent; }
+QWidget#kbPanelContent { background: transparent; }
+/* 滚动区的 viewport 与内容层：QAbstractScrollArea 的 viewport 默认按 Base 填充，
+   不押回透明就会在深色皮肤下露出一块白底（原来的局部样式表靠一条无选择器的
+   background: transparent 顺带盖住了所有子孙件，搬进全局表后得逐层写清）。 */
+QWidget#kbPanelViewport, QWidget#kbTreeViewport, QWidget#kbDocsViewport { background: transparent; }
+QWidget.kbTreeInner, QWidget.kbDocsInner, QWidget.kbActions { background: transparent; }
+
+QLabel.kbStatus {
+    border: 1px solid %LINE%; border-radius: 4px; background: %INSET%;
+    color: %MUTED%; font-size: 11px; padding: 8px 10px;
+}
+QLabel.kbStatus[tone="error"] { border-color: %ERRLINE%; background: %ERRTINT%; color: %ERRTEXT%; }
+QLabel.kbStatus[tone="warn"] { border-color: %WARNLINE%; background: %WARNTINT%; color: %WARNTEXT%; }
+
+QWidget.kbLibBar { border: 1px solid %LINE%; border-radius: 4px; background: %BAND3%; }
+QLabel.kbLibBarLabel { color: %MUTED%; font-size: 10px; background: transparent; }
+QComboBox.kbLibSelect {
+    border: 1px solid %LINE%; border-radius: 4px; background: %INSET%; color: %TEXT%;
+    font-size: 12px; padding: 0 8px; min-height: 28px;
+}
+QComboBox.kbLibSelect:focus { border-color: %CYAN%; }
+QComboBox.kbLibSelect:disabled { color: %MUTED2%; }
+QComboBox.kbLibSelect::drop-down { border: 0; width: 20px; }
+/* Qt 的 ::down-arrow 只认 image：CSS 那套 border 三角会画成一个实心方块 */
+QComboBox.kbLibSelect::down-arrow {
+    image: url(:/icons/chevron-down-muted.svg); width: 10px; height: 10px; margin-right: 6px;
+}
+
+QLineEdit.kbInput {
+    border: 1px solid %LINE%; border-radius: 4px; background: %INSET%; color: %TEXT%;
+    font-size: 12px; padding: 0 9px; min-height: 28px;
+    selection-background-color: %CYANDARK%;
+}
+QLineEdit.kbInput:focus { border-color: %CYAN%; }
+QLineEdit.kbInput:disabled { color: %MUTED2%; }
+
+QFrame.kbCard { border: 1px solid %LINE%; border-radius: 4px; background: %BAND2%; }
+QFrame.kbCard[warn="true"] { border-color: %WARNLINE%; background: %WARNTINT%; }
+QLabel.kbCardLabel { color: %MUTED%; font-size: 10px; background: transparent; }
+QLabel.kbCardValue { color: %TEXTBRIGHT%; font-size: 20px; font-weight: 600; background: transparent; }
+QLabel.kbCardNote { color: %MUTED2%; font-size: 10px; background: transparent; }
+
+QFrame.kbSection { border: 1px solid %LINE%; border-radius: 4px; background: %BAND2%; }
+QLabel.kbSectionTitle { color: %TEXTBRIGHT%; font-size: 15px; font-weight: 600; background: transparent; }
+QLabel.kbCount { color: %MUTED2%; font-size: 11px; background: transparent; }
+QLabel.kbHint { color: %MUTED2%; font-size: 11px; background: transparent; }
+QLabel.kbEmpty { color: %MUTED2%; font-size: 11px; background: transparent; }
+
+QFrame.kbTree { border: 1px solid %LINE%; border-radius: 4px; background: %BAND2%; }
+QWidget.kbTreeHead { background: %BAND3%; border-bottom: 1px solid %LINE%; }
+QWidget.kbTreeFoot { background: %BAND3%; border-top: 1px solid %LINE%; }
+QScrollArea#kbTreeScroll, QScrollArea#kbDocsScroll { border: 0; background: transparent; }
+
+QPushButton.kbTreeBtn {
+    border: 1px solid %LINE%; border-radius: 4px; background: %SURFACE2%; color: %TEXT%;
+    font-size: 11px; min-height: 22px; padding: 0 7px;
+}
+QPushButton.kbTreeBtn:hover:enabled { border-color: %CYAN%; color: %CYAN%; }
+QPushButton.kbTreeBtn:disabled { color: %MUTED2%; background: %BAND2%; border-color: %LINE%; }
+QPushButton.kbTreeBtn[danger="true"]:hover:enabled {
+    border-color: %ERRLINE%; color: %ERRTEXT%; background: %ERRTINT%;
+}
+
+QWidget.kbTreeRow { background: transparent; border: 1px solid transparent; border-radius: 4px; }
+QWidget.kbTreeRow:hover { background: %ACCENTTINT%; }
+QWidget.kbTreeRow[active="true"] { border-color: %CYANMID%; background: %ACCENTTINT%; }
+QWidget.kbTreeRow[dropTarget="true"] { border: 1px dashed %CYAN%; background: %ACCENTTINT%; }
+QWidget.kbTreeRow:focus { outline: 1px solid %CYAN%; outline-offset: -1px; }
+QLabel.kbTreeTwisty { color: %MUTED2%; font-size: 9px; background: transparent; }
+QLabel.kbTreeName { color: %TEXT%; font-size: 11px; background: transparent; }
+QWidget.kbTreeRow[active="true"] QLabel.kbTreeName { color: %CYAN%; }
+QLabel.kbTreeCount {
+    background: %SURFACE3%; color: %MUTED%; font-size: 9px; border-radius: 8px; padding: 0 5px;
+}
+QWidget.kbTreeRow[dropTarget="true"] QLabel.kbTreeCount { background: %CYANDARK%; color: #ffffff; }
+QLabel.kbTreeEmpty { color: %MUTED2%; font-size: 10px; background: transparent; }
+
+QWidget.kbDoc { border: 1px solid %LINE%; border-radius: 4px; background: %INSET%; }
+QWidget.kbDoc:hover { border-color: %LINESTRONG%; }
+QWidget.kbDoc[failed="true"] { border-color: %ERRLINE%; background: %ERRTINT%; }
+QWidget.kbDoc[dragging="true"] { border-color: %LINESTRONG%; background: %BAND3%; }
+QLabel.kbDocGrip { color: %MUTED2%; font-size: 10px; background: transparent; }
+QLabel.kbDocName { color: %TEXTBRIGHT%; font-size: 12px; font-weight: 600; background: transparent; }
+QWidget.kbDoc[failed="true"] QLabel.kbDocName { color: %ERRTEXT%; }
+QLabel.kbDocMeta { color: %MUTED%; font-size: 10px; background: transparent; }
+QWidget.kbDoc[failed="true"] QLabel.kbDocMeta { color: %ERRTEXT%; }
+
+QPushButton.kbOp {
+    border: 1px solid %LINE%; border-radius: 4px; background: %SURFACE2%; color: %TEXT%;
+    font-size: 11px; min-height: 24px; padding: 0 10px;
+}
+QPushButton.kbOp:hover:enabled { border-color: %CYAN%; color: %CYAN%; }
+QPushButton.kbOp:disabled { color: %MUTED2%; }
+QPushButton.kbOp[danger="true"] { color: %ERRTEXT%; border-color: %ERRLINE%; background: %ERRTINT%; }
+QPushButton.kbOp[danger="true"]:hover:enabled { border-color: %RED%; }
+
+QLabel.kbResultHead { color: %MUTED%; font-size: 10px; font-weight: 700; background: transparent; }
+QFrame.kbResultCard { border: 1px solid %LINE%; border-radius: 4px; background: %INSET%; }
+QLabel.kbResultTitle { color: %TEXTBRIGHT%; font-size: 12px; font-weight: 600; background: transparent; }
+QLabel.kbResultTag {
+    border: 1px solid %LINE%; border-radius: 8px; color: %MUTED%; font-size: 10px;
+    padding: 0 6px; background: transparent;
+}
+QLabel.kbResultEm { color: %CYAN%; font-size: 11px; background: transparent; }
+QLabel.kbResultScore { color: %CYAN%; font-size: 11px; font-weight: 500; background: transparent; }
+QLabel.kbResultBody { color: %TEXT%; font-size: 11px; background: transparent; }
+QLabel.kbResultSrc { color: %MUTED2%; font-size: 10px; background: transparent; }
+
 /* ===== 确认对话框 ===== */
 QDialog#confirmDialog { background: %PANEL%; border: 1px solid %LINESTRONG%; border-radius: 12px; }
 QLabel#confirmTitle { color: %TEXTBRIGHT%; font-size: 15px; font-weight: 700; background: transparent; }
@@ -1204,6 +1433,7 @@ QString appStyleSheet()
         { "ACCENTTINT", cssColor(p.accentTint) },
         { "OKTINT", cssColor(p.okTint) },
         { "OKTEXT", cssColor(p.okText) },
+        { "OKLINE", cssColor(p.okLine) },
         { "ERRLINE", cssColor(p.errLine) },
         { "ERRTINT", cssColor(p.errTint) },
         { "ERRSTRONG", cssColor(p.errStrong) },
@@ -1232,7 +1462,7 @@ QString appStyleSheet()
     }
 
     // 只写 font-size 的 QSS 规则会让 Qt 按「应用字体」重建字体族——中文 Windows 上是宋体
-    // （SimSun），与 webui 的 html{font-family:"Bahnschrift","Microsoft YaHei UI"} 不一致：
+    // （SimSun），与 webui 的 :root{font-family:"Microsoft YaHei",…} 不一致：
     // 拉丁字形变宽（实测同一串模型名宽 30px）、行盒变矮（会话行 13/11px vs webui 18/16px）。
     // 这里给每条声明了字号却没有字体族的规则补上 %UI%，等价于 webui 的字体继承。
     {

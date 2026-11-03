@@ -2105,8 +2105,29 @@ void TrajectoryView::rebuildInspectorBody()
         area->setLineWrapMode(QPlainTextEdit::WidgetWidth);
         area->setWordWrapMode(QTextOption::WrapAnywhere);
         area->setPlainText(text);
-        const int height = int(area->document()->size().height()) + 18;
-        area->setFixedHeight(qBound(scaledPx(64), height, scaledPx(320)));
+        // 高度按内容算，但 document 的尺寸要等它自己布局完才准：
+        // setPlainText 后立即取 size().height() 会拿到偏小的值，代码块就被截成
+        // 一个很矮的小窗口自己滚（应该由详情区统一滚）。这里先算一次，
+        // 事件循环跑完一轮再按定稿高度重算。上限只作为病态数据的平安阀。
+        // 高度按内容算：QPlainTextEdit 自己的 document()->size() 在未显示时不准（会返回初始值），
+        // 拿它算出来的就是一个很小的固定高度，代码块于是变成一个小窗口自己滚。
+        // 改用一份独立的 QTextDocument 按详情区宽度预算排版，得到的行盒高度才是准的。
+        auto fitToContent = [this, area, text] {
+            if (!m_inspBody)
+                return;
+            const int width = qMax(gs::scaledPx(160),
+                                   m_inspBody->viewport()->width() - gs::scaledPx(44));
+            QTextDocument measure;
+            measure.setDefaultFont(area->font());
+            measure.setDocumentMargin(0);
+            measure.setPlainText(text);
+            measure.setTextWidth(width);
+            const int h = int(measure.size().height()) + gs::scaledPx(18);
+            // 上限只作为病态数据的平安阀；常规情况下由外层 m_inspBody 统一滚动
+            area->setFixedHeight(qBound(gs::scaledPx(64), h, gs::scaledPx(4000)));
+        };
+        fitToContent();
+        QTimer::singleShot(0, area, fitToContent);
         return area;
     };
 

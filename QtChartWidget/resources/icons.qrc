@@ -7,6 +7,7 @@
         <file alias="stop.svg">icons/stop.svg</file>
         <file alias="plus.svg">icons/plus.svg</file>
         <file alias="chevron-down.svg">icons/chevron-down.svg</file>
+<file alias="chevron-down-muted.svg">icons/chevron-down-muted.svg</file>
         <file alias="chevron-up.svg">icons/chevron-up.svg</file>
         <file alias="chevron-right.svg">icons/chevron-right.svg</file>
         <file alias="chevrons-right.svg">icons/chevrons-right.svg</file>
@@ -20,6 +21,10 @@
         <file alias="copy.svg">icons/copy.svg</file>
         <file alias="clock.svg">icons/clock.svg</file>
         <file alias="database.svg">icons/database.svg</file>
+        <file alias="cap-vision.svg">icons/cap-vision.svg</file>
+        <file alias="cap-video.svg">icons/cap-video.svg</file>
+        <file alias="cap-audio.svg">icons/cap-audio.svg</file>
+        <file alias="cap-reasoning.svg">icons/cap-reasoning.svg</file>
         <file alias="Logo.ico">Logo.ico</file>
     </qresource>
 </RCC>

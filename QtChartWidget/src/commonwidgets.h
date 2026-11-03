@@ -116,6 +116,10 @@ public:
     void setRightAligned(bool right);
     // 界面缩放系数变化后：重建 chevron 图标并按新字号重新省略文本
     void refreshZoom();
+    // 宽度按全文给（不拿省略后的标签当成绩，否则文本一变长就自锁成省略号）；
+    // 最小宽度允许压窄，省略交给 updateElided 按实际宽度做
+    QSize sizeHint() const override;
+    QSize minimumSizeHint() const override;
 
 signals:
     void clicked();
@@ -366,6 +370,9 @@ private:
 // 加载 :/icons/<name>.svg，按 color 着色并缩放到 sizePx（内部缓存 64px 母版）
 QPixmap iconPixmap(const QString &name, const QColor &color, int sizePx);
 QString elidedText(const QString &text, const QFontMetrics &fm, int width);
+// 单行文本控件应给的高度：字体行高 + 2px（随缩放），等价于 CSS 的 line-height 余量，
+// 避免中文字体在小字号下字顶/字底被裁（见 commonwidgets.cpp 的注释）
+int labelLineHeight(const QFontMetrics &fm);
 QString fileSizeLabel(qint64 bytes);
 // QSS 的 .class 选择器实际匹配动态属性 "class"（空格分隔可多个），并非 objectName
 void setClass(QWidget *w, const QString &cls);

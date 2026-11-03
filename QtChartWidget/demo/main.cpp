@@ -13,6 +13,7 @@
 //   /params 工具参数确认卡  /toast <文本>      /settings [tab]
 #include <chartwidget.h>
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QDateTime>
 #include <QDebug>
@@ -26,6 +27,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QMouseEvent>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -34,6 +36,7 @@
 #include <QSet>
 #include <QStringList>
 #include <QTimer>
+#include <QThread>
 #include <QUrl>
 #include <QUrlQuery>
 #include <QVariant>
@@ -41,6 +44,7 @@
 
 #include <functional>
 #include <initializer_list>
+#include <memory>
 #include <utility>
 
 using gs::ChartWidget;
@@ -82,6 +86,13 @@ QVariantList demoSessions()
                    { "created_at", "2026-09-04T10:02" } }) };
 }
 
+// 模型设置页要用的能力位：界面只摆四项（视觉 / 视频 / 音频 / 推理）
+QVariant demoCapabilities(bool vision, bool video, bool audio, bool reasoning)
+{
+    return QVariant(obj({ { "vision", vision }, { "video", video },
+                          { "audio", audio }, { "reasoning", reasoning } }));
+}
+
 QVariantList demoModels()
 {
     return { obj({ { "provider", "gridstar" },
@@ -89,22 +100,34 @@ QVariantList demoModels()
                    { "id", "gs-pro-32k" },
                    { "name", "GS-Pro 32K" },
                    { "enabled", true },
-                   { "provider_enabled", true } }),
+                   { "provider_enabled", true },
+                   { "context_window", 32768 },
+                   { "max_output_tokens", 8192 },
+                   { "capabilities", demoCapabilities(true, false, false, true) } }),
              obj({ { "provider", "gridstar" },
                    { "id", "gs-lite-8k" },
                    { "name", "GS-Lite 8K" },
                    { "enabled", true },
-                   { "provider_enabled", true } }),
+                   { "provider_enabled", true },
+                   { "context_window", 8192 },
+                   { "max_output_tokens", 2048 },
+                   { "capabilities", demoCapabilities(false, false, false, false) } }),
              obj({ { "provider", "deepseek" },
                    { "id", "deepseek-chat" },
                    { "name", "DeepSeek Chat" },
                    { "enabled", true },
-                   { "provider_enabled", true } }),
+                   { "provider_enabled", true },
+                   { "context_window", 65536 },
+                   { "max_output_tokens", 8192 },
+                   { "capabilities", demoCapabilities(false, false, false, false) } }),
              obj({ { "provider", "deepseek" },
                    { "id", "deepseek-reasoner" },
                    { "name", "DeepSeek Reasoner（停用）" },
                    { "enabled", false },
-                   { "provider_enabled", true } }) };
+                   { "provider_enabled", true },
+                   { "context_window", 65536 },
+                   { "max_output_tokens", 8192 },
+                   { "capabilities", demoCapabilities(false, false, false, true) } }) };
 }
 
 // 输入区 Skill 下拉只需要 id / name
@@ -233,6 +256,295 @@ QString phasePlanText()
 }
 
 // GET /usage/stats 的演示响应：按小时切桶，供应商/模型两套聚合，candidates 不随筛选缩水
+// ---------------------------------------------------------------- 记忆 / 知识库演示数据
+// 只用于演示宿主：形状与后端 /memory/* 、/kb/* 的响应同构，库本身不做任何校验
+
+QVariantMap demoMemorySummary()
+{
+    QVariantMap maintenance;
+    maintenance.insert(QStringLiteral("state"), QStringLiteral("idle"));
+    maintenance.insert(QStringLiteral("finished_at"), QStringLiteral("2026-11-02T08:12:00Z"));
+    QVariantMap last;
+    last.insert(QStringLiteral("merged"), 2);
+    last.insert(QStringLiteral("flagged"), 1);
+    last.insert(QStringLiteral("archived"), 3);
+    last.insert(QStringLiteral("submitted"), 4);
+    last.insert(QStringLiteral("candidates"), 4);
+    last.insert(QStringLiteral("facts"), 2);
+    maintenance.insert(QStringLiteral("last_result"), last);
+
+    QVariantMap store;
+    store.insert(QStringLiteral("status"), QStringLiteral("healthy"));
+    store.insert(QStringLiteral("fts"), true);
+
+    QVariantMap counts;
+    counts.insert(QStringLiteral("candidate"), 4);
+    counts.insert(QStringLiteral("approved"), 6);
+    counts.insert(QStringLiteral("rejected"), 1);
+    counts.insert(QStringLiteral("deprecated"), 1);
+
+    QVariantMap config;
+    config.insert(QStringLiteral("experience_extract"), true);
+    config.insert(QStringLiteral("experience_inject"), false);
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("enabled"), true);
+    summary.insert(QStringLiteral("store"), store);
+    summary.insert(QStringLiteral("experience"), counts);
+    summary.insert(QStringLiteral("config"), config);
+    summary.insert(QStringLiteral("maintenance"), maintenance);
+    summary.insert(QStringLiteral("notice"), QStringLiteral("当前为影子期：只采集不注入。"));
+    return summary;
+}
+
+QVariantMap demoMemoryItem(const QString &id, const QString &status, const QString &kind,
+                           const QString &scope, const QString &title, double confidence,
+                           int evidence, const QString &when)
+{
+    QVariantMap item;
+    item.insert(QStringLiteral("id"), id);
+    item.insert(QStringLiteral("status"), status);
+    item.insert(QStringLiteral("kind"), kind);
+    item.insert(QStringLiteral("scope"), scope);
+    item.insert(QStringLiteral("task_type"), QStringLiteral("modeling"));
+    item.insert(QStringLiteral("title"), title);
+    item.insert(QStringLiteral("confidence"), confidence);
+    item.insert(QStringLiteral("evidence_count"), evidence);
+    item.insert(QStringLiteral("created_at"), when);
+    item.insert(QStringLiteral("updated_at"), when);
+    return item;
+}
+
+QVariantMap demoMemoryExperiences()
+{
+    QVariantList items;
+    items << demoMemoryItem(QStringLiteral("m-1001"), QStringLiteral("candidate"),
+                            QStringLiteral("experience"), QStringLiteral("aircraft"),
+                            QStringLiteral("附面层首层高度取 y+ 不超过 1e-5 时收敛更稳"),
+                            0.86, 3, QStringLiteral("2026-11-02T07:40:00Z"));
+    items << demoMemoryItem(QStringLiteral("m-1002"), QStringLiteral("candidate"),
+                            QStringLiteral("fact"), QStringLiteral("common"),
+                            QStringLiteral("本机 GridStar 求解器版本为 4.2.1"),
+                            0.94, 5, QStringLiteral("2026-11-01T15:02:00Z"));
+    items << demoMemoryItem(QStringLiteral("m-1003"), QStringLiteral("approved"),
+                            QStringLiteral("experience"), QStringLiteral("missile"),
+                            QStringLiteral("网格量超过 800 万后先粗算再加密，避免一次提交超时"),
+                            0.91, 8, QStringLiteral("2026-10-30T09:20:00Z"));
+    items << demoMemoryItem(QStringLiteral("m-1004"), QStringLiteral("rejected"),
+                            QStringLiteral("experience"), QStringLiteral("aircraft"),
+                            QStringLiteral("把边界层厚度直接写成 0.1（证据不足）"),
+                            0.31, 1, QStringLiteral("2026-10-29T11:05:00Z"));
+
+    QVariantMap listing;
+    listing.insert(QStringLiteral("items"), items);
+    listing.insert(QStringLiteral("total"), 12);
+    listing.insert(QStringLiteral("page"), 1);
+    listing.insert(QStringLiteral("page_size"), 20);
+    QVariantMap facets;
+    facets.insert(QStringLiteral("scopes"), QVariantList{ QStringLiteral("aircraft"),
+                                                          QStringLiteral("missile"),
+                                                          QStringLiteral("common") });
+    facets.insert(QStringLiteral("task_types"), QVariantList{ QStringLiteral("modeling") });
+    listing.insert(QStringLiteral("facets"), facets);
+    return listing;
+}
+
+QVariantMap demoMemoryTools()
+{
+    QVariantMap fields;
+    fields.insert(QStringLiteral("max_iterations"), 500);
+    fields.insert(QStringLiteral("tolerance"), 1e-5);
+    fields.insert(QStringLiteral("report_format"), QStringLiteral("pdf"));
+    fields.insert(QStringLiteral("verbose"), false);
+    QVariantMap tool;
+    tool.insert(QStringLiteral("tool"), QStringLiteral("run_cfd_solver"));
+    tool.insert(QStringLiteral("fields"), fields);
+    tool.insert(QStringLiteral("updated_at"), QStringLiteral("2026-11-02T06:31:00Z"));
+
+    QVariantMap fields2;
+    fields2.insert(QStringLiteral("unit"), QStringLiteral("m/s"));
+    fields2.insert(QStringLiteral("altitude"), 10000);
+    QVariantMap tool2;
+    tool2.insert(QStringLiteral("tool"), QStringLiteral("set_flight_condition"));
+    tool2.insert(QStringLiteral("fields"), fields2);
+    tool2.insert(QStringLiteral("updated_at"), QStringLiteral("2026-11-01T19:12:00Z"));
+
+    QVariantMap payload;
+    payload.insert(QStringLiteral("tools"), QVariantList{ tool, tool2 });
+    payload.insert(QStringLiteral("tool_count"), 2);
+    return payload;
+}
+
+QVariantList demoCategories()
+{
+    QVariantList list;
+    const struct { const char *id; const char *name; } rows[] = {
+        { "aircraft", "Aircraft" }, { "missile", "Missile" }, { "common", "Common" }
+    };
+    for (const auto &row : rows) {
+        QVariantMap item;
+        item.insert(QStringLiteral("id"), QString::fromLatin1(row.id));
+        item.insert(QStringLiteral("name"), QString::fromLatin1(row.name));
+        list << item;
+    }
+    return list;
+}
+
+QVariantList demoKnowledgeBases()
+{
+    QVariantList list;
+    const struct { const char *id; const char *name; int docs; int chunks; } rows[] = {
+        { "kb-aero", "气动手册", 42, 1860 },
+        { "kb-struct", "结构强度规范", 18, 740 },
+        { "kb-general", "通用工程知识", 96, 4120 }
+    };
+    for (const auto &row : rows) {
+        QVariantMap item;
+        item.insert(QStringLiteral("id"), QString::fromLatin1(row.id));
+        item.insert(QStringLiteral("name"), QString::fromUtf8(row.name));
+        item.insert(QStringLiteral("documents"), row.docs);
+        item.insert(QStringLiteral("chunks"), row.chunks);
+        list << item;
+    }
+    return list;
+}
+
+QVariantMap demoContextUsage()
+{
+    QVariantMap usage;
+    usage.insert(QStringLiteral("max"), 32768);
+    usage.insert(QStringLiteral("used"), 12480);
+    usage.insert(QStringLiteral("left"), 20288);
+    usage.insert(QStringLiteral("percent"), 38);
+    usage.insert(QStringLiteral("estimated"), true);
+    usage.insert(QStringLiteral("model"), QStringLiteral("gs-pro-32k"));
+    return usage;
+}
+
+QVariantMap demoKbStatus()
+{
+    QVariantMap status;
+    status.insert(QStringLiteral("available"), true);
+    status.insert(QStringLiteral("documents"), 42);
+    status.insert(QStringLiteral("chunks"), 1860);
+    status.insert(QStringLiteral("params"), 318);
+    status.insert(QStringLiteral("db_bytes"), 22 * 1024 * 1024LL);
+    return status;
+}
+
+QVariantList demoKbFolders()
+{
+    QVariantList folders;
+    const struct { const char *id; const char *name; const char *parent; int depth; } rows[] = {
+        { "fd-manual", "型号手册", "", 1 },
+        { "fd-flight", "飞行性能", "fd-manual", 2 },
+        { "fd-struct", "结构强度", "", 1 }
+    };
+    for (const auto &row : rows) {
+        QVariantMap item;
+        item.insert(QStringLiteral("id"), QString::fromLatin1(row.id));
+        item.insert(QStringLiteral("name"), QString::fromUtf8(row.name));
+        item.insert(QStringLiteral("parent_id"), QString::fromLatin1(row.parent));
+        item.insert(QStringLiteral("depth"), row.depth);
+        folders << item;
+    }
+    return folders;
+}
+
+QVariantMap demoKbTree()
+{
+    QVariantMap flight;
+    flight.insert(QStringLiteral("id"), QStringLiteral("fd-flight"));
+    flight.insert(QStringLiteral("name"), QStringLiteral("飞行性能"));
+    flight.insert(QStringLiteral("depth"), 2);
+    flight.insert(QStringLiteral("total"), 8);
+    flight.insert(QStringLiteral("children"), QVariantList());
+
+    QVariantMap manual;
+    manual.insert(QStringLiteral("id"), QStringLiteral("fd-manual"));
+    manual.insert(QStringLiteral("name"), QStringLiteral("型号手册"));
+    manual.insert(QStringLiteral("depth"), 1);
+    manual.insert(QStringLiteral("total"), 12);
+    manual.insert(QStringLiteral("children"), QVariantList{ flight });
+
+    QVariantMap structure;
+    structure.insert(QStringLiteral("id"), QStringLiteral("fd-struct"));
+    structure.insert(QStringLiteral("name"), QStringLiteral("结构强度"));
+    structure.insert(QStringLiteral("depth"), 1);
+    structure.insert(QStringLiteral("total"), 6);
+    structure.insert(QStringLiteral("children"), QVariantList());
+
+    QVariantMap tree;
+    tree.insert(QStringLiteral("documents"), 3);
+    tree.insert(QStringLiteral("children"), QVariantList{ manual, structure });
+    return tree;
+}
+
+QVariantList demoKbDocuments()
+{
+    QVariantList docs;
+    const struct { const char *id; const char *name; const char *path; const char *folder;
+                   int pages; int chunks; int params; qint64 size; const char *when; } rows[] = {
+        { "d-01", "A320 飞行性能手册.pdf", "D:\\资料\\A320\\性能.pdf", "fd-flight",
+          486, 1240, 96, 18 * 1024 * 1024LL, "2026-11-02 09:14" },
+        { "d-02", "附面层计算规范.docx", "D:\\资料\\规范\\附面层.docx", "fd-manual",
+          64, 210, 24, 3 * 1024 * 1024LL, "2026-11-01 16:40" },
+        { "d-03", "结构强度校核条目.xlsx", "D:\\资料\\结构\\校核.xlsx", "fd-struct",
+          12, 88, 41, 820 * 1024LL, "2026-10-31 11:02" },
+        { "d-04", "旧版扫描件.pdf", "D:\\资料\\旧版.pdf", "",
+          0, 0, 0, 0, "2026-10-30 08:00" }
+    };
+    for (const auto &row : rows) {
+        QVariantMap doc;
+        doc.insert(QStringLiteral("doc_id"), QString::fromLatin1(row.id));
+        doc.insert(QStringLiteral("name"), QString::fromUtf8(row.name));
+        doc.insert(QStringLiteral("path"), QString::fromUtf8(row.path));
+        doc.insert(QStringLiteral("folder_id"), QString::fromLatin1(row.folder));
+        doc.insert(QStringLiteral("pages"), row.pages);
+        doc.insert(QStringLiteral("chunks"), row.chunks);
+        doc.insert(QStringLiteral("params"), row.params);
+        doc.insert(QStringLiteral("size"), row.size);
+        doc.insert(QStringLiteral("indexed_at"), QString::fromLatin1(row.when));
+        const bool failed = row.id == QLatin1String("d-04");
+        doc.insert(QStringLiteral("status"), failed ? QStringLiteral("failed")
+                                                     : QStringLiteral("ok"));
+        if (failed)
+            doc.insert(QStringLiteral("error"), QStringLiteral("扫描件无文本层，OCR 未识别到内容"));
+        docs << doc;
+    }
+    return docs;
+}
+
+QVariantMap demoKbSearch()
+{
+    QVariantMap param;
+    param.insert(QStringLiteral("name"), QStringLiteral("boundary_layer_height"));
+    param.insert(QStringLiteral("domain"), QStringLiteral("aircraft"));
+    param.insert(QStringLiteral("default"), QStringLiteral("1e-5"));
+    param.insert(QStringLiteral("min"), QStringLiteral("1e-6"));
+    param.insert(QStringLiteral("max"), QStringLiteral("1e-4"));
+    param.insert(QStringLiteral("description"),
+                 QStringLiteral("附面层首层网格高度，影响 y+ 与摩阻计算精度。"));
+    param.insert(QStringLiteral("doc"), QStringLiteral("附面层计算规范.docx"));
+    param.insert(QStringLiteral("heading_path"), QStringLiteral("第 3 章 > 3.2 首层高度"));
+    param.insert(QStringLiteral("page"), 12);
+
+    QVariantMap hit;
+    hit.insert(QStringLiteral("title"), QStringLiteral("附面层首层高度确定方法"));
+    hit.insert(QStringLiteral("doc"), QStringLiteral("附面层计算规范.docx"));
+    hit.insert(QStringLiteral("page"), 12);
+    hit.insert(QStringLiteral("score"), 0.82);
+    hit.insert(QStringLiteral("heading_path"), QStringLiteral("第 3 章 / 3.2 首层高度"));
+    hit.insert(QStringLiteral("chunk_id"), QStringLiteral("c-3128"));
+    hit.insert(QStringLiteral("snippet"),
+               QStringLiteral("首层高度应使 y+ 落在 1~5 区间，推荐取 1e-5 m……"));
+
+    QVariantMap result;
+    result.insert(QStringLiteral("params"), QVariantList{ param });
+    result.insert(QStringLiteral("hits"), QVariantList{ hit });
+    return result;
+}
+
 QVariantMap demoUsageStats(const QString &start, const QString &end, const QString &provider,
                            const QString &model)
 {
@@ -434,6 +746,35 @@ QVariantMap approvalEvent(const QString &callId)
                                                   QStringLiteral("action") }) } }) } });
 }
 
+// 后端错误体优先取 error / detail，取不到退回宿主给的话术；带 HTTP 码便于排障
+QString errorText(const QJsonObject &object, const QString &fallback, int status = 0)
+{
+    QString message = object.value(QStringLiteral("error")).toString();
+    if (message.isEmpty())
+        message = object.value(QStringLiteral("detail")).toString();
+    if (message.isEmpty())
+        message = fallback;
+    return status > 0 ? QStringLiteral("%1（HTTP %2）").arg(message).arg(status) : message;
+}
+
+// 专业分类（webui #category-select）不是接口给的表：webui 把 skills 的 category 去重后
+// 拼成下拉，首项「全部」由库自己补（id 为空串）。这里照同一口径从 /skills 响应派生。
+QVariantList categoriesFromSkills(const QVariantList &skills)
+{
+    QStringList seen;
+    QVariantList out;
+    for (const QVariant &value : skills) {
+        QString id = value.toMap().value(QStringLiteral("category")).toString().trimmed().toLower();
+        if (id.isEmpty() || seen.contains(id))
+            continue;
+        seen << id;
+        QString name = id;
+        name[0] = name.at(0).toUpper();
+        out << obj({ { "id", id }, { "name", name } });
+    }
+    return out;
+}
+
 QVariantList workflowSteps()
 {
     return { obj({ { "tool", "scada_snapshot" },
@@ -463,6 +804,8 @@ public:
 
     void populate();
     void loadHistory();
+    // 只给 --tab approve 的离屏截图用：弹一张审批卡
+    void approveForShot();
     // 轨迹视图示例数据（宿主从 /sessions/{id}/trajectory 拉到的 events）
     void loadTrajectory();
     // 初始数据推完之后再接信号：否则 populate 的 setter 会触发下面这些处理器里
@@ -470,6 +813,8 @@ public:
     void wire();
     // live 模式启动后异步拉取服务状态与首屏数据；fake 模式不调用。
     void bootstrap();
+    // 打开设置中心：宿主自己拉一次模型信息快照再交给库（「打开」这个动作库不发信号）
+    void openSettings(const QString &tab);
 
 private:
     using JsonCallback = std::function<void(const QJsonObject &, int)>;
@@ -492,7 +837,7 @@ private:
     void failLiveTurn(const QString &error, const QString &message, const QString &display,
                       const QVariantList &attachments, bool retryable = true);
     void startLiveTurn(const QString &message, const QString &display,
-                       const QVariantList &attachments);
+                       const QVariantList &attachments, bool appendUser = true);
     void checkConnection(bool notify = false);
     void loadModels();
     void loadSkills();
@@ -509,6 +854,45 @@ private:
                            const QString &provider, const QString &model);
     void resolveLiveApproval(const QString &callId, bool approved, const QVariantMap &args);
     void renameSession(const QString &id);
+
+    // ---- 记忆页（/memory/*，只在 m_live 下联网）----
+    void loadMemorySummary();
+    void loadMemoryTools();
+    void loadMemoryList(int page, const QVariantMap &filters);
+    void memoryPatchConfig(const QVariantMap &updates);
+    void memoryTransition(const QString &id, const QString &action);
+    void memoryBulk(const QStringList &ids, const QString &action);
+    void memorySaveField(const QString &tool, const QString &field, const QVariant &value);
+    void memoryDeleteField(const QString &tool, const QString &field);
+    void memoryClearTool(const QString &tool);
+    void memoryClearAllTools();
+    void memoryMaintenance(const QString &kind);
+    void memoryShowDetail(const QString &id);
+
+    // ---- 知识库页（/kb/*）+ 输入区知识库下拉 ----
+    void loadKnowledgeBases();
+    void kbRefresh(const QString &libraryId);
+    // 把新拿到的库列表推给面板，并按 wanted 定下当前库，随后统一重拉 status/folders/documents
+    void kbAdoptLibraries(const QVariantList &libraries, const QString &wanted);
+    void kbLoadPanel(const QString &libraryId, const QString &folderKey);
+    void kbImportFiles(const QStringList &paths, const QString &libraryId,
+                       const QString &folderId);
+    void kbImportDir(const QString &libraryId, const QString &dirPath,
+                     const QString &folderId);
+
+    // ---- 模型信息快照 / 顶栏 / 收尾 ----
+    void loadModelMetadata();
+    void refreshModelMetadata();
+    void resolveModelLimits(const QString &providerId, const QString &modelId);
+    void launchGridStar();
+    void endTurn(const QString &label);
+
+    // ---- 上下文用量圆环（webui renderContextRing / restoreContextRing）----
+    void applyContextUsage(const QVariantMap &event);
+    void restoreContextRing(const QVariantList &messages);
+    // 统一的回填入口：window <= 0 且 used <= 0 时清空圆环
+    void pushContextRing(double used, qint64 window, bool estimated);
+    qint64 contextWindowFor(const QString &modelKey) const;
 
     ChartWidget *m_chart;
     QStringList m_chunks;
@@ -538,6 +922,31 @@ private:
     bool m_bootstrapStarted = false;
     // 会话存储异常每次启动只提示一次（对应 webui warnStorageIssues 的 warnedStorageIssues 集合）
     QSet<QString> m_warnedStorageIssues;
+
+    // 输入区两件状态：宿主侧镜像（webui state.selectedCategory / kbState.selected）。
+    // 分类与知识库都没有独立的 meta 写接口，靠 /chat/stream 的 body 生效
+    QString m_category;
+    bool m_categoryTouched = false;
+    QString m_kbLibrary = QStringLiteral("*");
+
+    // 设置页知识库面板：当前库 + 当前目录（all / root / 真实 id）
+    QString m_kbPanelLibrary;
+    QString m_kbFolder = QStringLiteral("all");
+    // 正在把库列表推给面板：面板回发的 libraryChanged / folderChanged 是回声，不重复拉取
+    bool m_kbAdopting = false;
+
+    // 记忆列表的最近一次结果与筛选（详情从这里取，不另开接口）
+    QVariantList m_memoryItems;
+    QVariantMap m_memoryFilters;
+    int m_memoryPage = 1;
+    bool m_memorySummaryBusy = false;
+    bool m_memoryToolsBusy = false;
+
+    // 模型信息快照：resolve 只补 limits 键，不能把状态行覆盖没了
+    QVariantMap m_modelMeta;
+    // 圆环的当前读数：窗口分母随模型切换 / 模型目录晚到都要重算，所以留一份最近值
+    double m_contextUsed = 0.0;
+    bool m_contextEstimated = false;
 };
 
 DemoHost::DemoHost(ChartWidget *chart, bool live, const QString &apiBase)
@@ -566,12 +975,79 @@ void DemoHost::populate()
     m_chart->setSettingsDraft(demoConfig(), 7);
     m_chart->setSettingsSkills(demoSettingsSkills(), false, QString());
     m_chart->setMcpTools(demoMcpTools(), true, false, QString());
+
+    // 输入区新件（webui #category-select / #kb-select / #context-ring）
+    m_chart->setCategories(demoCategories());
+    m_chart->setCurrentCategory(QStringLiteral("aircraft"));
+    m_chart->setKnowledgeBases(demoKnowledgeBases());
+    m_chart->setCurrentKnowledgeBase(QStringLiteral("*"));
+    m_chart->setContextUsage(demoContextUsage());
+
+    // 设置中心两个新页
+    m_chart->setMemorySummary(demoMemorySummary());
+    m_chart->setMemoryExperiences(demoMemoryExperiences());
+    m_chart->setMemoryTools(demoMemoryTools());
+    // 详情浮层由宿主弹：假数据路径也把这份列表留住，点「查看详情」才有东西可摊
+    m_memoryItems = demoMemoryExperiences()
+                        .value(QStringLiteral("items"))
+                        .toList();
+    m_chart->setKbLibraries(demoKnowledgeBases());
+    m_chart->setKbStatus(demoKbStatus());
+    m_chart->setKbFolders(demoKbFolders(), demoKbTree());
+    m_chart->setKbDocuments(demoKbDocuments(), 42);
+    m_chart->setKbSearchResult(demoKbSearch());
+
+    // 模型信息快照（webui 模型页的状态行）：只给状态，不填上限
+    QVariantMap snapshot;
+    snapshot.insert(QStringLiteral("source"), QStringLiteral("内置快照 + 供应商目录"));
+    snapshot.insert(QStringLiteral("fetched_at"), QStringLiteral("2026-11-02T12:00:00Z"));
+    snapshot.insert(QStringLiteral("models"), 4);
+    snapshot.insert(QStringLiteral("providers"), 2);
+    snapshot.insert(QStringLiteral("hosts"), 2);
+    snapshot.insert(QStringLiteral("available"), true);
+    m_chart->setModelMetadata(snapshot);
 }
 
 void DemoHost::loadHistory()
 {
     m_chart->setHistory(demoHistory());
     m_chart->setCurrentSessionTitle(QStringLiteral("10kV 城南线故障研判与转供电方案"));
+}
+
+void DemoHost::approveForShot()
+{
+    // 比常规审批卡多两个参数，用来压测浮层高度（参数多时应该在可视区内滚，不能顶出窗口）
+    const QVariantMap schema = obj({ { "type", "object" },
+                                     { "properties",
+                                       obj({ { "device",
+                                               obj({ { "type", "string" },
+                                                     { "description", "开关编号" } }) },
+                                             { "action",
+                                               obj({ { "type", "string" },
+                                                     { "description", "open / close" } }) },
+                                             { "delay_s",
+                                               obj({ { "type", "integer" },
+                                                     { "description", "延时秒数" } }) },
+                                             { "note",
+                                               obj({ { "type", "string" },
+                                                     { "description",
+                                                       "操作备注：这一行故意写长一点，测试参数行换行与卡片整体高度" } }) },
+                                             { "confirm_text",
+                                               obj({ { "type", "string" },
+                                                     { "description", "二次确认文案" } }) } }) },
+                                     { "required",
+                                       QVariant(QVariantList{ QStringLiteral("device"),
+                                                              QStringLiteral("action") }) } });
+    const QVariantMap event = obj({ { "name", "switch_order" },
+                                    { "call_id", "call_shot_1" },
+                                    { "args",
+                                      obj({ { "device", "LK-07" },
+                                            { "action", "close" },
+                                            { "delay_s", 5 },
+                                            { "note", "" },
+                                            { "confirm_text", "" } }) },
+                                    { "schema", schema } });
+    m_chart->appendApproval(event);
 }
 
 QString DemoHost::apiUrl(const QString &path) const
@@ -645,6 +1121,9 @@ void DemoHost::bootstrap()
     loadConfig();
     loadModels();
     loadSkills();
+    // 输入区知识库下拉与设置页共用一份库列表；模型信息快照先拉一次，等用户打开设置就已有状态行
+    loadKnowledgeBases();
+    loadModelMetadata();
     refreshSessions(true);
 }
 
@@ -750,6 +1229,10 @@ void DemoHost::loadModels()
                 m_chart->setCurrentModel(defaultModel);
             if (!m_liveModels.isEmpty())
                 m_chart->setConfigLoaded(true);
+            // 模型目录晚于会话详情到达时圆环可能只拿到了 used：这里用真实 context_window 补算一次
+            if (m_contextUsed > 0.0)
+                pushContextRing(m_contextUsed, contextWindowFor(m_chart->currentModel()),
+                                m_contextEstimated);
         });
 }
 
@@ -766,6 +1249,8 @@ void DemoHost::loadSkills()
             m_liveSkills = object.value(QStringLiteral("skills")).toArray().toVariantList();
             m_chart->setSkills(m_liveSkills);
             m_chart->setSettingsSkills(m_liveSkills, false, QString());
+            // 专业分类下拉从技能目录派生（与 webui 一致），别让 live 模式一直空着
+            m_chart->setCategories(categoriesFromSkills(m_liveSkills));
             qInfo() << "[demo:live] skills loaded:" << m_liveSkills.size();
         });
 }
@@ -885,6 +1370,13 @@ void DemoHost::createSession()
                 object.value(QStringLiteral("title")).toString(QStringLiteral("新对话")));
             m_chart->setPhasePlan(QVariant());
             m_chart->setTrajectoryEvents(QVariantList());
+            // 新会话没有 meta：分类回「全部」、知识库回「全部知识库」、上下文圆环清掉
+            m_category.clear();
+            m_categoryTouched = false;
+            m_chart->syncCategoryFromSession(QString());
+            m_kbLibrary = QStringLiteral("*");
+            m_chart->setCurrentKnowledgeBase(m_kbLibrary);
+            m_chart->clearContextUsage();
             m_chart->focusInput();
             refreshSessions(false);
             qInfo() << "[demo:live] session created" << m_sessionId;
@@ -911,7 +1403,26 @@ void DemoHost::loadSession(const QString &id)
             const QString modelId = meta.value(QStringLiteral("model_id")).toString();
             if (!modelId.isEmpty())
                 m_chart->setCurrentModel(modelId);
-            m_chart->setHistory(object.value(QStringLiteral("messages")).toArray().toVariantList());
+
+            // 切会话必须回填的三样（webui loadSession）：
+            // 1) meta.category —— 服务端权威值，走 syncCategoryFromSession（会无条件覆盖）；
+            //    这不是用户的选择，所以把 categoryTouched 清掉
+            m_category = meta.value(QStringLiteral("category")).toString();
+            m_categoryTouched = false;
+            m_chart->syncCategoryFromSession(m_category);
+            // 2) meta.kb_library —— 后端用空串表示「不使用」、"*" 表示全部，
+            //    输入区下拉里「不使用」的 id 是 __none__，两边做一次映射
+            const QJsonValue kbValue = meta.value(QStringLiteral("kb_library"));
+            const QString kbRaw = (kbValue.isNull() || kbValue.isUndefined())
+                                      ? QStringLiteral("*")
+                                      : kbValue.toString();
+            m_kbLibrary = kbRaw.isEmpty() ? QStringLiteral("__none__") : kbRaw;
+            m_chart->setCurrentKnowledgeBase(m_kbLibrary);
+
+            const QVariantList messages = object.value(QStringLiteral("messages")).toArray().toVariantList();
+            m_chart->setHistory(messages);
+            // 3) 上下文圆环 —— 从历史里最近一条带 context_used 的消息恢复
+            restoreContextRing(messages);
             const QJsonValue plan = object.value(QStringLiteral("plan"));
             m_chart->setPhasePlan(plan.isNull() || plan.isUndefined() ? QVariant()
                                                                       : plan.toVariant());
@@ -955,6 +1466,8 @@ void DemoHost::saveConfig(const QVariantMap &config, const QVariant &revision)
             if (status == 409) {
                 m_chart->setSettingsStatus(
                     QStringLiteral("保存冲突：配置已被其他客户端修改，请刷新后重试"));
+                // 重新拉一份配置与 revision，用户不必重启宿主就能再存一次
+                loadConfig();
                 return;
             }
             if (status < 200 || status >= 300) {
@@ -1177,6 +1690,821 @@ void DemoHost::renameSession(const QString &id)
         });
 }
 
+// ------------------------------------------------------------ 记忆页（/memory/*）
+//
+// 信号 → 请求的对应关系见 README「/memory/*、/kb/* 接口对照」。
+// 回填全部发生在 QNetworkReply::finished 的 lambda 里（以 m_chart 为 context，
+// 本来就投递在 GUI 线程），不会踩库的 assertGuiThread。
+
+void DemoHost::loadMemorySummary()
+{
+    if (!m_live || m_memorySummaryBusy)
+        return;
+    m_memorySummaryBusy = true;
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/memory/summary"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            m_memorySummaryBusy = false;
+            if (status < 200 || status >= 300) {
+                m_chart->setMemoryStatusText(
+                    QStringLiteral("记忆状态读取失败：%1")
+                        .arg(errorText(object, QStringLiteral("后台不可达"), status)));
+                return;
+            }
+            m_chart->setMemorySummary(object.toVariantMap());
+        });
+}
+
+void DemoHost::loadMemoryTools()
+{
+    if (!m_live || m_memoryToolsBusy)
+        return;
+    m_memoryToolsBusy = true;
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/memory/tool-parameters"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            m_memoryToolsBusy = false;
+            if (status < 200 || status >= 300) {
+                m_chart->setMemoryStatusText(
+                    QStringLiteral("工具参数记忆读取失败：%1")
+                        .arg(errorText(object, QStringLiteral("后台不可达"), status)));
+                return;
+            }
+            m_chart->setMemoryTools(object.toVariantMap());
+        });
+}
+
+void DemoHost::loadMemoryList(int page, const QVariantMap &filters)
+{
+    if (!m_live)
+        return;
+    m_memoryPage = page < 1 ? 1 : page;
+    m_memoryFilters = filters;
+    // 筛选键与后端 /memory/experiences 的 query 同名；空值一律不下发
+    // （状态「全部」的 value 是空串，传过去会被当成筛选条件）
+    QUrlQuery query;
+    const auto put = [&query, &filters](const char *key) {
+        const QString value = filters.value(QString::fromLatin1(key)).toString();
+        if (!value.isEmpty())
+            query.addQueryItem(QString::fromLatin1(key), value);
+    };
+    put("status");
+    put("kind");
+    put("scope");
+    put("q");
+    query.addQueryItem(QStringLiteral("page"), QString::number(m_memoryPage));
+    const int pageSize = filters.value(QStringLiteral("page_size")).toInt();
+    query.addQueryItem(QStringLiteral("page_size"), QString::number(pageSize > 0 ? pageSize : 20));
+    requestJson(
+        QStringLiteral("GET"),
+        QStringLiteral("/memory/experiences?") + query.query(QUrl::FullyEncoded), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setMemoryListFailed(
+                    errorText(object, QStringLiteral("记忆列表读取失败"), status));
+                return;
+            }
+            m_memoryItems = object.value(QStringLiteral("items")).toArray().toVariantList();
+            m_chart->setMemoryExperiences(object.toVariantMap());
+        });
+}
+
+void DemoHost::memoryPatchConfig(const QVariantMap &updates)
+{
+    if (!m_live || updates.isEmpty())
+        return;
+    requestJson(
+        QStringLiteral("PATCH"), QStringLiteral("/memory/config"),
+        QJsonObject::fromVariantMap(updates),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    QStringLiteral("记忆设置保存失败：%1")
+                        .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                loadMemorySummary();
+                return;
+            }
+            m_chart->setMemorySummary(object.toVariantMap());
+            m_chart->showToast(QStringLiteral("记忆设置已保存"));
+            // 记忆开关与模型设置共用同一份 config.json / revision（webui memorySyncSettingsConfig）。
+            // 这里只把宿主侧副本与 revision 更新，不 setSettingsDraft：那个入口会把设置对话框
+            // 整份重载并切回「模型」页，用户正站在「记忆」页上会被踢走。
+            requestJson(
+                QStringLiteral("GET"), QStringLiteral("/config"), QJsonObject(),
+                [this](const QJsonObject &config, int configStatus) {
+                    if (configStatus < 200 || configStatus >= 300)
+                        return;
+                    const QJsonValue body = config.value(QStringLiteral("config"));
+                    if (!body.isObject())
+                        return;
+                    m_config = body.toObject().toVariantMap();
+                    m_configRevision = config.value(QStringLiteral("revision")).toVariant();
+                });
+        });
+}
+
+void DemoHost::memoryTransition(const QString &id, const QString &action)
+{
+    if (!m_live || id.isEmpty() || action.isEmpty())
+        return;
+    // 单条状态流转是 PATCH /memory/experiences/{id}，action 放 body（后端不接受 POST）
+    QJsonObject body;
+    body.insert(QStringLiteral("action"), action);
+    requestJson(
+        QStringLiteral("PATCH"),
+        QStringLiteral("/memory/experiences/") + encodedId(id), body,
+        [this, action](const QJsonObject &object, int status) {
+            if (status == 409) {
+                // 乐观锁：这条在别处已经变过状态了
+                m_chart->showToast(QStringLiteral("该条状态已变化，已刷新"));
+                loadMemoryList(1, m_memoryFilters);
+                return;
+            }
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(errorText(object, QStringLiteral("操作失败"), status));
+                return;
+            }
+            m_chart->showToast(QStringLiteral("已执行 %1").arg(action));
+            loadMemoryList(1, m_memoryFilters); // webui memoryAct：回到第一页重拉
+            loadMemorySummary();
+        });
+}
+
+void DemoHost::memoryBulk(const QStringList &ids, const QString &action)
+{
+    if (!m_live || ids.isEmpty() || action.isEmpty())
+        return;
+    QJsonObject body;
+    body.insert(QStringLiteral("ids"), QJsonArray::fromStringList(ids));
+    body.insert(QStringLiteral("action"), action);
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/memory/experiences/bulk"), body,
+        [this, action](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("批量操作失败"), status));
+                return;
+            }
+            const int succeeded = object.value(QStringLiteral("succeeded")).toInt();
+            const int failed = object.value(QStringLiteral("failed")).toInt();
+            m_chart->showToast(failed > 0
+                                   ? QStringLiteral("成功 %1 条，失败 %2 条")
+                                         .arg(succeeded)
+                                         .arg(failed)
+                                   : QStringLiteral("已%1 %2 条").arg(action).arg(succeeded));
+            loadMemoryList(1, m_memoryFilters);
+            loadMemorySummary();
+        });
+}
+
+void DemoHost::memorySaveField(const QString &tool, const QString &field, const QVariant &value)
+{
+    if (!m_live)
+        return;
+    // 只改值、不新增字段（后端口径）；成功后用 tool-parameters 整体回填
+    QJsonObject body;
+    body.insert(QStringLiteral("value"), QJsonValue::fromVariant(value));
+    requestJson(
+        QStringLiteral("PATCH"),
+        QStringLiteral("/memory/tool-parameters/") + encodedId(tool) + QStringLiteral("/")
+            + encodedId(field),
+        body,
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("参数保存失败"), status));
+                return;
+            }
+            m_chart->showToast(QStringLiteral("已更新"));
+            loadMemoryTools();
+        });
+}
+
+void DemoHost::memoryDeleteField(const QString &tool, const QString &field)
+{
+    if (!m_live)
+        return;
+    requestJson(
+        QStringLiteral("DELETE"),
+        QStringLiteral("/memory/tool-parameters/") + encodedId(tool) + QStringLiteral("/")
+            + encodedId(field),
+        QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            // 204 是正常路径；404 说明别处已经删过了，照样重拉
+            if (status != 404 && (status < 200 || status >= 300)) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("删除失败"), status));
+                return;
+            }
+            m_chart->showToast(status == 404 ? QStringLiteral("该字段已不存在，已刷新")
+                                             : QStringLiteral("已删除"));
+            loadMemoryTools();
+        });
+}
+
+void DemoHost::memoryClearTool(const QString &tool)
+{
+    if (!m_live)
+        return;
+    requestJson(
+        QStringLiteral("DELETE"),
+        QStringLiteral("/memory/tool-parameters/") + encodedId(tool), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status != 404 && (status < 200 || status >= 300)) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("清除失败"), status));
+                return;
+            }
+            m_chart->showToast(status == 404 ? QStringLiteral("该工具已不存在，已刷新")
+                                             : QStringLiteral("已清除"));
+            loadMemoryTools();
+        });
+}
+
+void DemoHost::memoryClearAllTools()
+{
+    if (!m_live)
+        return;
+    requestJson(
+        QStringLiteral("DELETE"), QStringLiteral("/memory/tool-parameters"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("清空失败"), status));
+                return;
+            }
+            m_chart->showToast(
+                QStringLiteral("已清空 %1 个字段")
+                    .arg(object.value(QStringLiteral("fields")).toInt()));
+            loadMemoryTools();
+        });
+}
+
+void DemoHost::memoryMaintenance(const QString &kind)
+{
+    if (!m_live)
+        return;
+    QJsonObject body;
+    body.insert(QStringLiteral("kind"), kind.isEmpty() ? QStringLiteral("governance") : kind);
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/memory/maintenance/runs"), body,
+        [this, kind](const QJsonObject &object, int status) {
+            if (status == 409) {
+                m_chart->showToast(QStringLiteral("已有维护任务在运行"));
+                loadMemorySummary();
+                return;
+            }
+            // 202 = 已投递，进度靠面板自己的轮询（memoryRefreshRequested）拉 summary
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    errorText(object, QStringLiteral("维护任务投递失败"), status));
+                return;
+            }
+            m_chart->showToast(kind == QLatin1String("extract")
+                                   ? QStringLiteral("已投递提炼任务，完成后候选会出现在待审核列表")
+                                   : QStringLiteral("已开始维护"));
+            loadMemorySummary();
+        });
+}
+
+void DemoHost::memoryShowDetail(const QString &id)
+{
+    // 详情不另开接口：列表里已经带着 payload，直接摊开给用户看
+    // （真要做服务端详情可以打 GET /memory/experiences/{id}，demo 从简）
+    QVariantMap item;
+    for (const QVariant &entry : m_memoryItems) {
+        const QVariantMap candidate = entry.toMap();
+        if (candidate.value(QStringLiteral("id")).toString() == id) {
+            item = candidate;
+            break;
+        }
+    }
+    if (item.isEmpty()) {
+        m_chart->showToast(QStringLiteral("该条记忆已不在当前列表，已刷新"));
+        loadMemoryList(m_memoryPage, m_memoryFilters);
+        return;
+    }
+    QStringList lines;
+    QString title = item.value(QStringLiteral("title")).toString();
+    if (title.isEmpty())
+        title = QStringLiteral("（无标题）");
+    lines << QStringLiteral("标题：%1").arg(title);
+    lines << QStringLiteral("状态：%1").arg(item.value(QStringLiteral("status")).toString());
+    lines << QStringLiteral("类型：%1").arg(item.value(QStringLiteral("kind")).toString());
+    lines << QStringLiteral("作用域：%1").arg(item.value(QStringLiteral("scope")).toString());
+    lines << QStringLiteral("置信度：%1    证据：%2")
+                 .arg(item.value(QStringLiteral("confidence")).toDouble())
+                 .arg(item.value(QStringLiteral("evidence_count")).toInt());
+    const QVariant payload = item.value(QStringLiteral("payload"));
+    if (payload.isValid() && !payload.toMap().isEmpty()) {
+        lines << QString();
+        lines << QStringLiteral("payload：");
+        lines << QString::fromUtf8(QJsonDocument(QJsonObject::fromVariantMap(payload.toMap()))
+                                      .toJson(QJsonDocument::Indented));
+    }
+    QMessageBox::information(m_chart, QStringLiteral("记忆详情 · %1").arg(id),
+                             lines.join(QLatin1Char('\n')));
+}
+
+// ------------------------------------------------------------ 知识库页（/kb/*）
+
+void DemoHost::loadKnowledgeBases()
+{
+    if (!m_live)
+        return;
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/kb/libraries"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300)
+                return;
+            const QVariantList libraries =
+                object.value(QStringLiteral("libraries")).toArray().toVariantList();
+            m_chart->setKnowledgeBases(libraries);
+            // 库被删了就把输入区的选择收回「全部知识库」（webui loadKbLibraries），
+            // 否则下一轮会带着一个不存在的库 id 发出去
+            if (m_kbLibrary == QLatin1String("*") || m_kbLibrary == QLatin1String("__none__"))
+                return;
+            bool found = false;
+            for (const QVariant &entry : libraries) {
+                if (entry.toMap().value(QStringLiteral("id")).toString() == m_kbLibrary) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                m_kbLibrary = QStringLiteral("*");
+                m_chart->setCurrentKnowledgeBase(m_kbLibrary);
+            }
+        });
+}
+
+void DemoHost::kbRefresh(const QString &libraryId)
+{
+    if (!m_live || m_kbAdopting)
+        return;
+    m_chart->setKbStatusText(QStringLiteral("正在读取知识库…"));
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/kb/libraries"), QJsonObject(),
+        [this, libraryId](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setKbStatusText(
+                    QStringLiteral("知识库读取失败：%1")
+                        .arg(errorText(object, QStringLiteral("后台不可达"), status)));
+                return;
+            }
+            kbAdoptLibraries(object.value(QStringLiteral("libraries")).toArray().toVariantList(),
+                             libraryId);
+        });
+}
+
+void DemoHost::kbAdoptLibraries(const QVariantList &libraries, const QString &wanted)
+{
+    m_chart->setKnowledgeBases(libraries);
+    QString target = wanted;
+    bool found = false;
+    for (const QVariant &entry : libraries) {
+        if (entry.toMap().value(QStringLiteral("id")).toString() == target) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        target = libraries.isEmpty()
+                     ? QString()
+                     : libraries.first().toMap().value(QStringLiteral("id")).toString();
+    }
+    if (target != m_kbPanelLibrary)
+        m_kbFolder = QStringLiteral("all"); // 换库就把归档位置收回「全部资料」
+    m_kbPanelLibrary = target;
+
+    // 推库列表：面板若因此换库会同步回发 libraryChanged / folderChanged，
+    // 那两发是回声（settingsdialog 把它们接到同一条链上），用 m_kbAdopting 吃掉
+    m_kbAdopting = true;
+    m_chart->setKbLibraries(libraries);
+    m_kbAdopting = false;
+
+    if (m_live)
+        kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+}
+
+void DemoHost::kbLoadPanel(const QString &libraryId, const QString &folderKey)
+{
+    const QString libQuery = libraryId.isEmpty()
+                                 ? QString()
+                                 : QStringLiteral("?library_id=") + encodedId(libraryId);
+    // status 先拉：它给出库级总量，「全部资料」那行与 docsTotal 都靠它（webui kbState.docsTotal）
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/kb/status") + libQuery, QJsonObject(),
+        [this, libraryId, folderKey](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setKbStatusText(
+                    QStringLiteral("知识库状态读取失败：%1")
+                        .arg(errorText(object, QStringLiteral("后台不可达"), status)));
+                return;
+            }
+            m_chart->setKbStatus(object.toVariantMap());
+            const int total = object.value(QStringLiteral("documents")).toInt();
+            const QString lib = libraryId;
+
+            requestJson(
+                QStringLiteral("GET"),
+                QStringLiteral("/kb/folders")
+                    + (lib.isEmpty() ? QString() : QStringLiteral("?library_id=") + encodedId(lib)),
+                QJsonObject(),
+                [this](const QJsonObject &folders, int folderStatus) {
+                    if (folderStatus < 200 || folderStatus >= 300)
+                        return;
+                    m_chart->setKbFolders(
+                        folders.value(QStringLiteral("folders")).toArray().toVariantList(),
+                        folders.value(QStringLiteral("tree")).toObject().toVariantMap());
+                });
+
+            // folder 参数：all 表示不传（后端列全库），root 传空串，其余传真文件夹 id
+            QStringList parts;
+            if (!lib.isEmpty())
+                parts << QStringLiteral("library_id=") + encodedId(lib);
+            if (folderKey == QLatin1String("root"))
+                parts << QStringLiteral("folder=");
+            else if (!folderKey.isEmpty() && folderKey != QLatin1String("all"))
+                parts << QStringLiteral("folder=") + encodedId(folderKey);
+            const QString path = parts.isEmpty()
+                                     ? QStringLiteral("/kb/documents")
+                                     : QStringLiteral("/kb/documents?")
+                                           + parts.join(QLatin1Char('&'));
+            requestJson(
+                QStringLiteral("GET"), path, QJsonObject(),
+                [this, total](const QJsonObject &docs, int docsStatus) {
+                    if (docsStatus < 200 || docsStatus >= 300)
+                        return;
+                    m_chart->setKbDocuments(
+                        docs.value(QStringLiteral("documents")).toArray().toVariantList(), total);
+                });
+        });
+}
+
+void DemoHost::kbImportFiles(const QStringList &paths, const QString &libraryId,
+                             const QString &folderId)
+{
+    if (!m_live || !m_network)
+        return;
+    QStringList files;
+    for (const QString &path : paths) {
+        const QFileInfo info(path);
+        if (info.isFile())
+            files << info.absoluteFilePath(); // 目录请走 kbDirImportRequested（/kb/import）
+    }
+    if (files.isEmpty()) {
+        m_chart->setKbStatusText(QStringLiteral("没有可导入的文件"));
+        return;
+    }
+
+    // 逐份串行上传：后端每份都会当场建索引，几十份并发只会把 sqlite 写锁打满。
+    // 进度只报到状态行（没做进度条，见 README「宿主职责」）
+    auto cursor = std::make_shared<int>(0);
+    auto failures = std::make_shared<QStringList>();
+    auto step = std::make_shared<std::function<void()>>();
+    *step = [this, files, libraryId, folderId, cursor, failures, step] {
+        if (*cursor >= files.size()) {
+            const int okCount = files.size() - failures->size();
+            if (failures->isEmpty()) {
+                m_chart->setKbStatusText(
+                    QStringLiteral("导入完成：成功 %1 份").arg(okCount));
+            } else {
+                m_chart->setKbStatusText(QStringLiteral("导入完成：成功 %1 份，失败 %2 份（%3）")
+                                             .arg(okCount)
+                                             .arg(failures->size())
+                                             .arg(failures->first()));
+            }
+            loadKnowledgeBases(); // 份数 / 分块数变了，输入区下拉的副文本跟着刷
+            kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+            return;
+        }
+        const QString path = files.at(*cursor);
+        const QFileInfo info(path);
+        const int position = *cursor + 1;
+        m_chart->setKbStatusText(QStringLiteral("正在索引进「%1」%2/%3：%4…")
+                                     .arg(m_kbFolder.isEmpty() || m_kbFolder == QLatin1String("all")
+                                              ? QStringLiteral("全部资料")
+                                              : m_kbFolder)
+                                     .arg(position)
+                                     .arg(files.size())
+                                     .arg(info.fileName()));
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            failures->append(QStringLiteral("%1：无法读取文件").arg(info.fileName()));
+            ++*cursor;
+            (*step)();
+            return;
+        }
+        const QByteArray bytes = file.readAll();
+        file.close();
+
+        // 字节上传走 /kb/upload：正文即文件字节（与 webui kbUploadOne 的 xhr.send(file) 同形），
+        // 目标库 / 目录走 query。multipart 后端不支持，别按表单发
+        QUrl url(apiUrl(QStringLiteral("/kb/upload")));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("name"), info.fileName());
+        if (!libraryId.isEmpty())
+            query.addQueryItem(QStringLiteral("library_id"), libraryId);
+        if (!folderId.isEmpty())
+            query.addQueryItem(QStringLiteral("folder_id"), folderId);
+        url.setQuery(query);
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::ContentTypeHeader,
+                          QStringLiteral("application/octet-stream"));
+        QNetworkReply *reply = m_network->post(request, bytes);
+        QObject::connect(reply, &QNetworkReply::finished, m_chart,
+                         [this, reply, info, failures, cursor, step] {
+                             const int status =
+                                 reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                             const QJsonObject object =
+                                 QJsonDocument::fromJson(reply->readAll()).object();
+                             if (reply->error() != QNetworkReply::NoError || status < 200
+                                 || status >= 300) {
+                                 failures->append(
+                                     QStringLiteral("%1：%2")
+                                         .arg(info.fileName(),
+                                              errorText(object, reply->errorString(), status)));
+                             }
+                             reply->deleteLater();
+                             ++*cursor;
+                             (*step)();
+                         });
+    };
+    (*step)();
+}
+
+void DemoHost::kbImportDir(const QString &libraryId, const QString &dirPath,
+                           const QString &folderId)
+{
+    if (!m_live)
+        return;
+    const QString dir = dirPath.trimmed();
+    if (dir.isEmpty()) {
+        m_chart->setKbStatusText(QStringLiteral("请先填一个本机目录路径"));
+        return;
+    }
+    // 目录形态走后端自己的扫描：JSON 传本机路径（与 webui kbImportDir 同一份 body）
+    QJsonObject body;
+    body.insert(QStringLiteral("paths"), QJsonArray{ dir });
+    body.insert(QStringLiteral("recursive"), true);
+    body.insert(QStringLiteral("mirror_tree"), true); // 按原目录结构在库里建文件夹
+    if (!libraryId.isEmpty())
+        body.insert(QStringLiteral("library_id"), libraryId);
+    if (!folderId.isEmpty())
+        body.insert(QStringLiteral("folder_id"), folderId); // 落当前选中的归档目录
+    m_chart->setKbStatusText(QStringLiteral("正在扫描并索引进「库根」…（文件多时请等一会儿）"));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/kb/import"), body,
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setKbStatusText(
+                    QStringLiteral("导入失败：%1")
+                        .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                return;
+            }
+            const int ok = object.value(QStringLiteral("indexed")).toArray().size();
+            const int bad = object.value(QStringLiteral("failed")).toArray().size();
+            const int skipped = object.value(QStringLiteral("skipped_count")).toInt();
+            QString text = QStringLiteral("导入完成：成功 %1 份").arg(ok);
+            if (bad > 0)
+                text += QStringLiteral("，失败 %1 份").arg(bad);
+            if (skipped > 0)
+                text += QStringLiteral("，跳过 %1 个不支持的文件").arg(skipped);
+            const QJsonArray missing = object.value(QStringLiteral("missing")).toArray();
+            if (ok == 0 && !missing.isEmpty())
+                text = QStringLiteral("路径不存在：%1").arg(missing.first().toString());
+            m_chart->setKbStatusText(text);
+            loadKnowledgeBases();
+            kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+        });
+}
+
+// ------------------------------------------------------------ 模型信息 / 顶栏 / 收尾
+
+void DemoHost::loadModelMetadata()
+{
+    if (!m_live)
+        return;
+    requestJson(
+        QStringLiteral("GET"), QStringLiteral("/config/model-metadata"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setModelMetadataFailed(
+                    QStringLiteral("load"),
+                    errorText(object, QStringLiteral("模型信息读取失败"), status), status);
+                return;
+            }
+            m_modelMeta = object.toVariantMap();
+            m_chart->setModelMetadata(m_modelMeta);
+        });
+}
+
+void DemoHost::refreshModelMetadata()
+{
+    if (!m_live)
+        return;
+    m_chart->setSettingsStatus(QStringLiteral("正在更新模型信息…"));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/config/model-metadata/refresh"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setModelMetadataFailed(
+                    QStringLiteral("refresh"),
+                    errorText(object, QStringLiteral("更新模型信息失败"), status), status);
+                return;
+            }
+            m_modelMeta = object.toVariantMap();
+            m_modelMeta.remove(QStringLiteral("ok")); // 刷新响应比查询多带一个 ok 标记
+            m_chart->setModelMetadata(m_modelMeta);
+            m_chart->setSettingsStatus(QStringLiteral("模型信息已更新"));
+        });
+}
+
+void DemoHost::resolveModelLimits(const QString &providerId, const QString &modelId)
+{
+    if (!m_live || modelId.isEmpty())
+        return;
+    // 快照只按模型 ID + API 地址查表，base_url 从当前配置的 provider 里取
+    QString baseUrl;
+    const QVariantList providers = m_config.value(QStringLiteral("providers")).toList();
+    for (const QVariant &value : providers) {
+        const QVariantMap provider = value.toMap();
+        if (provider.value(QStringLiteral("id")).toString() == providerId) {
+            baseUrl = provider.value(QStringLiteral("base_url")).toString();
+            break;
+        }
+    }
+    QJsonObject item;
+    item.insert(QStringLiteral("id"), modelId);
+    if (!baseUrl.isEmpty())
+        item.insert(QStringLiteral("base_url"), baseUrl);
+    QJsonObject body;
+    body.insert(QStringLiteral("models"), QJsonArray{ item });
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/config/model-metadata/resolve"), body,
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->setModelMetadataFailed(
+                    QStringLiteral("load"),
+                    errorText(object, QStringLiteral("模型上限查询失败"), status), status);
+                return;
+            }
+            const QJsonObject limits = object.value(QStringLiteral("limits")).toObject();
+            if (limits.isEmpty())
+                return;
+            // resolve 只给 {limits: {modelId: {...}|null}}：并进上一次的快照再整体回填，
+            // 别让状态行（来源 / 抓取日期 / 收录规模）被一个只有 limits 的快照顶掉
+            QVariantMap merged = m_modelMeta;
+            QVariantMap known = merged.value(QStringLiteral("limits")).toMap();
+            for (auto it = limits.constBegin(); it != limits.constEnd(); ++it)
+                known.insert(it.key(), it.value().toVariant());
+            merged.insert(QStringLiteral("limits"), known);
+            m_modelMeta = merged;
+            m_chart->setModelMetadata(m_modelMeta);
+        });
+}
+
+void DemoHost::launchGridStar()
+{
+    if (!m_live)
+        return;
+    m_chart->showToast(QStringLiteral("正在确认 GridStar 进程…"));
+    requestJson(
+        QStringLiteral("POST"), QStringLiteral("/gridstar/ensure"), QJsonObject(),
+        [this](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                m_chart->showToast(
+                    QStringLiteral("无法启动 GridStar：%1")
+                        .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                return;
+            }
+            m_chart->showToast(object.value(QStringLiteral("launched")).toBool()
+                                   ? QStringLiteral("正在启动 GridStar…")
+                                   : QStringLiteral("GridStar 已在运行"));
+        });
+}
+
+void DemoHost::endTurn(const QString &label)
+{
+    const QString text = label.trimmed();
+    if (text.isEmpty())
+        return;
+    if (m_sessionId.isEmpty()) {
+        // 库已在本地追过这条用户消息，这里直发就行，不要再追一次
+        startLiveTurn(text, text, QVariantList(), false);
+        return;
+    }
+    // 「结束」类选项：只把这个选择落成一条用户消息，不开新一轮（否则 auto 模式会接着干）
+    QJsonObject body;
+    body.insert(QStringLiteral("label"), text);
+    requestJson(
+        QStringLiteral("POST"),
+        QStringLiteral("/sessions/") + encodedId(m_sessionId) + QStringLiteral("/end-turn"),
+        body,
+        [this, text](const QJsonObject &object, int status) {
+            if (status < 200 || status >= 300) {
+                // 后端不认这条收尾（旧版本 / 会话已换）：退回普通选择发送，别让点击落空。
+                // 用户消息库里已经追过了（endTurn 的本地收尾），appendUser=false 避开重复气泡
+                qWarning() << "[demo:live] end-turn failed" << status
+                           << object.value(QStringLiteral("error")).toString();
+                m_chart->showToast(QStringLiteral("收尾失败，已按普通选择发送"));
+                startLiveTurn(text, text, QVariantList(), false);
+                return;
+            }
+            m_chart->showToast(QStringLiteral("本轮已结束"));
+            refreshSessions(false);
+        });
+}
+
+// ------------------------------------------------------------ 上下文圆环
+
+qint64 DemoHost::contextWindowFor(const QString &modelKey) const
+{
+    const QVariantList models = m_liveModels.isEmpty() ? demoModels() : m_liveModels;
+    for (const QVariant &value : models) {
+        const QVariantMap item = value.toMap();
+        QString key = item.value(QStringLiteral("key")).toString();
+        if (key.isEmpty()) {
+            const QString id = item.value(QStringLiteral("id")).toString();
+            const QString provider = item.value(QStringLiteral("provider")).toString();
+            key = provider.isEmpty() ? id : provider + QLatin1Char('/') + id;
+        }
+        if (key != modelKey)
+            continue;
+        const qint64 window = item.value(QStringLiteral("context_window")).toLongLong();
+        return window > 0 ? window : 0;
+    }
+    return 0;
+}
+
+void DemoHost::applyContextUsage(const QVariantMap &event)
+{
+    // 用量口径（webui applyContextUsage）：used 取最近一次请求实际送出的 input（含缓存读），
+    // 上限优先用事件里的 context_window，取不到就回落到当前模型的配置
+    const double used = event.value(QStringLiteral("context_used")).toDouble();
+    const double window = event.value(QStringLiteral("context_window")).toDouble();
+    if (used <= 0.0 && window <= 0.0)
+        return; // 事件里没带（老后端）：保持圆环现状，别把已有读数清掉
+
+    const QString model = m_chart->currentModel();
+    const qint64 max = window > 0.0 ? qint64(window) : contextWindowFor(model);
+    pushContextRing(used, max, event.value(QStringLiteral("context_estimated")).toBool());
+}
+
+void DemoHost::pushContextRing(double used, qint64 window, bool estimated)
+{
+    if (used <= 0.0 && window <= 0)
+        m_chart->clearContextUsage();
+    m_contextUsed = used > 0.0 ? used : 0.0;
+    m_contextEstimated = estimated;
+
+    const QString model = m_chart->currentModel();
+    QVariantMap usage;
+    usage.insert(QStringLiteral("model"), model);
+    usage.insert(QStringLiteral("estimated"), estimated);
+    if (window > 0)
+        usage.insert(QStringLiteral("max"), window);
+    if (used > 0.0) {
+        usage.insert(QStringLiteral("used"), qint64(used));
+        if (window > 0) {
+            usage.insert(QStringLiteral("left"), qMax<qint64>(0, window - qint64(used)));
+            usage.insert(QStringLiteral("percent"), int(qRound(used / double(window) * 100.0)));
+        }
+    }
+    m_chart->setContextUsage(usage);
+}
+
+void DemoHost::restoreContextRing(const QVariantList &messages)
+{
+    // 切会话 / 刷新后从历史恢复（webui restoreContextRing）：取最近一条带
+    // context_used 的消息；一条都没有就清空圆环，不沿用上一个会话的读数
+    double used = 0.0;
+    for (int i = messages.size() - 1; i >= 0; --i) {
+        const QVariantMap usage =
+            messages.at(i).toMap().value(QStringLiteral("usage")).toMap();
+        const double value = usage.value(QStringLiteral("context_used")).toDouble();
+        if (value > 0.0) {
+            used = value;
+            break;
+        }
+    }
+    if (used <= 0.0) {
+        pushContextRing(0.0, 0, false);
+        return;
+    }
+    pushContextRing(used, contextWindowFor(m_chart->currentModel()), false);
+}
+
+void DemoHost::openSettings(const QString &tab)
+{
+    // 现在库会把「设置中心被打开」发成 settingsOpened(tab)，宿主在那里统一拉快照；
+    // 这里只保留一个兑底：不经库入口的路径（如书签直开）也能拿到数据
+    if (m_live)
+        loadModelMetadata();
+    m_chart->openSettings(tab);
+}
+
 void DemoHost::wire()
 {
     ChartWidget *c = m_chart;
@@ -1245,6 +2573,9 @@ void DemoHost::wire()
     });
     QObject::connect(c, &ChartWidget::modelSelected, c, [this](const QString &key) {
         m_chart->setCurrentModel(key);
+        // 换了模型，圆环的分母跟着换（webui renderContextRing 每次都取当前模型的窗口）
+        if (m_contextUsed > 0.0)
+            pushContextRing(m_contextUsed, contextWindowFor(key), m_contextEstimated);
         m_chart->showToast(QStringLiteral("模型已切换：%1").arg(key));
     });
     QObject::connect(c, &ChartWidget::skillSelected, c, [this](const QString &id) {
@@ -1476,6 +2807,351 @@ void DemoHost::wire()
                          });
                      });
 
+    // 输入区与顶栏的新件（webui #category-select / #kb-select / #brand-mark）
+    QObject::connect(c, &ChartWidget::categorySelected, c, [this](const QString &id) {
+        // 用户自己点过下拉框才算「显式选择」（webui categoryTouched）：只有显式选择才允许
+        // 覆盖服务端 meta 里的分类，「全部」那个空值也一样
+        m_category = id;
+        m_categoryTouched = true;
+        m_chart->showToast(id.isEmpty() ? QStringLiteral("专业分类：全部")
+                                        : QStringLiteral("专业分类：") + id);
+    });
+    QObject::connect(c, &ChartWidget::knowledgeBaseSelected, c, [this](const QString &id) {
+        // __none__ / * / 具体库 id 都存在宿主侧，发消息时作为 kb_library 带出
+        m_kbLibrary = id;
+        m_chart->showToast(QStringLiteral("知识库：") + id);
+    });
+    QObject::connect(c, &ChartWidget::launchAppRequested, c, [this] {
+        // webui launchGridStar：POST /gridstar/ensure
+        if (m_live) {
+            launchGridStar();
+            return;
+        }
+        m_chart->showToast(QStringLiteral("演示模式：不会真的启动 GridStar"));
+    });
+    QObject::connect(c, &ChartWidget::modelMetadataRefreshRequested, c, [this] {
+        if (m_live) {
+            refreshModelMetadata();
+            return;
+        }
+        m_chart->showToast(QStringLiteral("演示模式：模型信息不会变"));
+    });
+    // 新增模型后补上限（webui fillModelLimits）：resolve 只给 limits，宿主并回快照里回填
+    QObject::connect(c, &ChartWidget::modelLimitsResolveRequested, c,
+                     [this](const QString &providerId, const QString &modelId) {
+                         if (m_live) {
+                             resolveModelLimits(providerId, modelId);
+                             return;
+                         }
+                         qDebug() << "[demo] resolve limits" << providerId << modelId;
+                     });
+
+    // 「结束」类选项：宿主 POST /sessions/{id}/end-turn
+    QObject::connect(c, &ChartWidget::endTurnRequested, c, [this](const QString &label) {
+        if (m_live) {
+            endTurn(label);
+            return;
+        }
+        qDebug() << "[demo] end-turn" << label;
+    });
+
+    // ---- 设置中心「记忆」页（/memory/*） ----
+    QObject::connect(c, &ChartWidget::memoryRefreshRequested, c, [this] {
+        // 进页、维护中轮询（3s）都走这里：summary 与 tool-parameters 两路并发拉
+        if (!m_live)
+            return; // 假数据路径：populate() 已把两份数据推进去
+        loadMemorySummary();
+        loadMemoryTools();
+    });
+    QObject::connect(c, &ChartWidget::memoryListRequested, c,
+                     [this](int page, const QVariantMap &filters) {
+                         if (m_live)
+                             loadMemoryList(page, filters);
+                     });
+    QObject::connect(c, &ChartWidget::memoryConfigPatchRequested, c,
+                     [this](const QVariantMap &updates) {
+                         if (m_live) {
+                             memoryPatchConfig(updates);
+                             return;
+                         }
+                         m_chart->showToast(QStringLiteral("演示模式：记忆开关不会落盘"));
+                     });
+    QObject::connect(c, &ChartWidget::memoryActionRequested, c,
+                     [this](const QString &id, const QString &action) {
+                         if (m_live)
+                             memoryTransition(id, action);
+                     });
+    QObject::connect(c, &ChartWidget::memoryBulkRequested, c,
+                     [this](const QStringList &ids, const QString &action) {
+                         if (m_live)
+                             memoryBulk(ids, action);
+                     });
+    QObject::connect(c, &ChartWidget::memoryDetailRequested, c, [this](const QString &id) {
+        // 详情不另开接口：从当前列表里取那条，把 payload 摊开给用户看
+        memoryShowDetail(id);
+    });
+    QObject::connect(c, &ChartWidget::memoryFieldSaveRequested, c,
+                     [this](const QString &tool, const QString &field, const QVariant &value) {
+                         if (m_live)
+                             memorySaveField(tool, field, value);
+                     });
+    QObject::connect(c, &ChartWidget::memoryFieldDeleteRequested, c,
+                     [this](const QString &tool, const QString &field) {
+                         if (m_live)
+                             memoryDeleteField(tool, field);
+                     });
+    QObject::connect(c, &ChartWidget::memoryToolClearRequested, c, [this](const QString &tool) {
+        if (m_live)
+            memoryClearTool(tool);
+    });
+    QObject::connect(c, &ChartWidget::memoryToolsClearAllRequested, c, [this] {
+        if (m_live)
+            memoryClearAllTools();
+    });
+    QObject::connect(c, &ChartWidget::memoryMaintenanceRequested, c, [this](const QString &kind) {
+        if (m_live)
+            memoryMaintenance(kind);
+    });
+
+    // ---- 设置中心「知识库」页（/kb/*） ----
+    QObject::connect(c, &ChartWidget::kbRefreshRequested, c, [this](const QString &libraryId) {
+        // 进页 / 换库 / 点刷新：库列表 → status → folders + documents
+        if (m_live)
+            kbRefresh(libraryId);
+    });
+    QObject::connect(c, &ChartWidget::kbFolderChanged, c,
+                     [this](const QString &libraryId, const QString &folderId) {
+                         m_kbPanelLibrary = libraryId;
+                         m_kbFolder = folderId.isEmpty() ? QStringLiteral("all") : folderId;
+                         if (!m_live || m_kbAdopting)
+                             return; // 回声：库列表刚由本地推进面板，kbAdoptLibraries 里统一填
+                         kbLoadPanel(libraryId, m_kbFolder);
+                     });
+    QObject::connect(c, &ChartWidget::kbLibraryCreateRequested, c, [this](const QString &name) {
+        if (!m_live || name.isEmpty())
+            return;
+        QJsonObject body;
+        body.insert(QStringLiteral("name"), name);
+        requestJson(QStringLiteral("POST"), QStringLiteral("/kb/libraries"), body,
+                    [this, name](const QJsonObject &object, int status) {
+                        if (status < 200 || status >= 300) {
+                            m_chart->setKbStatusText(
+                                QStringLiteral("新建知识库失败：%1")
+                                    .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                            return;
+                        }
+                        const QString created =
+                            object.value(QStringLiteral("library"))
+                                .toObject()
+                                .value(QStringLiteral("id"))
+                                .toString();
+                        m_chart->setKbStatusText(
+                            QStringLiteral("已新建知识库「%1」，现在可以往里加文件了").arg(name));
+                        kbAdoptLibraries(
+                            object.value(QStringLiteral("libraries")).toArray().toVariantList(),
+                            created);
+                    });
+    });
+    QObject::connect(c, &ChartWidget::kbLibraryRenameRequested, c,
+                     [this](const QString &libraryId, const QString &name) {
+                         if (!m_live || libraryId.isEmpty() || name.isEmpty())
+                             return;
+                         QJsonObject body;
+                         body.insert(QStringLiteral("name"), name);
+                         requestJson(QStringLiteral("PATCH"),
+                                     QStringLiteral("/kb/libraries/") + encodedId(libraryId), body,
+                                     [this, libraryId](const QJsonObject &object, int status) {
+                                         if (status < 200 || status >= 300) {
+                                             m_chart->setKbStatusText(
+                                                 QStringLiteral("重命名知识库失败：%1")
+                                                     .arg(errorText(object, QStringLiteral("未知错误"),
+                                                                    status)));
+                                             return;
+                                         }
+                                         kbAdoptLibraries(
+                                             object.value(QStringLiteral("libraries"))
+                                                 .toArray()
+                                                 .toVariantList(),
+                                             libraryId);
+                                     });
+                     });
+    QObject::connect(c, &ChartWidget::kbLibraryDeleteRequested, c, [this](const QString &libraryId) {
+        if (!m_live || libraryId.isEmpty())
+            return;
+        requestJson(QStringLiteral("DELETE"),
+                    QStringLiteral("/kb/libraries/") + encodedId(libraryId), QJsonObject(),
+                    [this](const QJsonObject &object, int status) {
+                        if (status < 200 || status >= 300) {
+                            m_chart->setKbStatusText(
+                                QStringLiteral("删除知识库失败：%1")
+                                    .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                            return;
+                        }
+                        // 删掉的正好是当前库：kbAdoptLibraries 会落到第一个库（或空）
+                        kbAdoptLibraries(
+                            object.value(QStringLiteral("libraries")).toArray().toVariantList(),
+                            QString());
+                    });
+    });
+    QObject::connect(c, &ChartWidget::kbFilesImportRequested, c,
+                     [this](const QStringList &paths, const QString &libraryId,
+                            const QString &folderId) {
+                         if (m_live)
+                             kbImportFiles(paths, libraryId, folderId);
+                     });
+    QObject::connect(c, &ChartWidget::kbDirImportToFolderRequested, c,
+                     [this](const QString &libraryId, const QString &dirPath,
+                            const QString &folderId) {
+                         if (m_live)
+                             kbImportDir(libraryId, dirPath, folderId);
+                     });
+    QObject::connect(c, &ChartWidget::kbDocumentDeleteRequested, c, [this](const QString &docId) {
+        if (!m_live || docId.isEmpty())
+            return;
+        requestJson(QStringLiteral("DELETE"),
+                    QStringLiteral("/kb/documents/") + encodedId(docId), QJsonObject(),
+                    [this](const QJsonObject &object, int status) {
+                        if (status < 200 || status >= 300) {
+                            m_chart->setKbStatusText(
+                                QStringLiteral("删除资料失败：%1")
+                                    .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                            return;
+                        }
+                        loadKnowledgeBases();
+                        kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                    });
+    });
+    QObject::connect(c, &ChartWidget::kbDocumentReindexRequested, c, [this](const QString &docId) {
+        if (!m_live || docId.isEmpty())
+            return;
+        m_chart->setKbStatusText(QStringLiteral("正在重建索引…"));
+        requestJson(QStringLiteral("POST"),
+                    QStringLiteral("/kb/documents/") + encodedId(docId)
+                        + QStringLiteral("/reindex"),
+                    QJsonObject(),
+                    [this](const QJsonObject &object, int status) {
+                        if (status < 200 || status >= 300) {
+                            m_chart->setKbStatusText(
+                                QStringLiteral("重建索引失败：%1")
+                                    .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                            return;
+                        }
+                        kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                    });
+    });
+    QObject::connect(c, &ChartWidget::kbDocumentMoveRequested, c,
+                     [this](const QString &docId, const QString &folderId) {
+                         if (!m_live || docId.isEmpty())
+                             return;
+                         // folder_id 为空串 = 移回库根（后端口径，与 webui kbMoveDoc 一致）
+                         QJsonObject body;
+                         body.insert(QStringLiteral("folder_id"), folderId);
+                         requestJson(QStringLiteral("PATCH"),
+                                     QStringLiteral("/kb/documents/") + encodedId(docId), body,
+                                     [this](const QJsonObject &object, int status) {
+                                         if (status < 200 || status >= 300) {
+                                             m_chart->setKbStatusText(
+                                                 QStringLiteral("归档失败：%1")
+                                                     .arg(errorText(object,
+                                                                    QStringLiteral("未知错误"),
+                                                                    status)));
+                                             return;
+                                         }
+                                         kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                                     });
+                     });
+    QObject::connect(c, &ChartWidget::kbFolderCreateRequested, c,
+                     [this](const QString &libraryId, const QString &parentId,
+                            const QString &name) {
+                         if (!m_live || name.isEmpty())
+                             return;
+                         QJsonObject body;
+                         body.insert(QStringLiteral("library_id"), libraryId);
+                         body.insert(QStringLiteral("name"), name);
+                         body.insert(QStringLiteral("parent_id"), parentId);
+                         requestJson(QStringLiteral("POST"), QStringLiteral("/kb/folders"), body,
+                                     [this](const QJsonObject &object, int status) {
+                                         if (status < 200 || status >= 300) {
+                                             m_chart->setKbStatusText(
+                                                 QStringLiteral("新建文件夹失败：%1")
+                                                     .arg(errorText(object,
+                                                                    QStringLiteral("未知错误"),
+                                                                    status)));
+                                             return;
+                                         }
+                                         kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                                     });
+                     });
+    QObject::connect(c, &ChartWidget::kbFolderRenameRequested, c,
+                     [this](const QString &folderId, const QString &name) {
+                         if (!m_live || folderId.isEmpty() || name.isEmpty())
+                             return;
+                         QJsonObject body;
+                         body.insert(QStringLiteral("name"), name);
+                         requestJson(QStringLiteral("PATCH"),
+                                     QStringLiteral("/kb/folders/") + encodedId(folderId), body,
+                                     [this](const QJsonObject &object, int status) {
+                                         if (status < 200 || status >= 300) {
+                                             m_chart->setKbStatusText(
+                                                 QStringLiteral("重命名文件夹失败：%1")
+                                                     .arg(errorText(object,
+                                                                    QStringLiteral("未知错误"),
+                                                                    status)));
+                                             return;
+                                         }
+                                         kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                                     });
+                     });
+    QObject::connect(c, &ChartWidget::kbFolderDeleteRequested, c, [this](const QString &folderId) {
+        if (!m_live || folderId.isEmpty())
+            return;
+        requestJson(QStringLiteral("DELETE"),
+                    QStringLiteral("/kb/folders/") + encodedId(folderId), QJsonObject(),
+                    [this](const QJsonObject &object, int status) {
+                        if (status < 200 || status >= 300) {
+                            m_chart->setKbStatusText(
+                                QStringLiteral("删除文件夹失败：%1")
+                                    .arg(errorText(object, QStringLiteral("未知错误"), status)));
+                            return;
+                        }
+                        // 删掉的可能正是当前目录：收回「全部资料」再拉，否则会拉一个不存在的目录
+                        m_kbFolder = QStringLiteral("all");
+                        kbLoadPanel(m_kbPanelLibrary, m_kbFolder);
+                    });
+    });
+    // 设置中心被打开（哪个 Tab），也包括用户点控件自带的设置按钮那一路：
+    // 以前这条路宿主无感，模型信息行会停在「正在读取模型信息…」
+    QObject::connect(c, &ChartWidget::settingsOpened, c, [this](const QString &tab) {
+        Q_UNUSED(tab)
+        if (m_live)
+            loadModelMetadata();
+    });
+
+    QObject::connect(c, &ChartWidget::kbSearchRequested, c,
+                     [this](const QString &libraryId, const QString &query) {
+                         if (!m_live)
+                             return; // 假数据路径：populate() 已给了示例检索结果
+                         QUrlQuery params;
+                         params.addQueryItem(QStringLiteral("q"), query);
+                         params.addQueryItem(QStringLiteral("top_k"), QStringLiteral("6"));
+                         if (!libraryId.isEmpty())
+                             params.addQueryItem(QStringLiteral("library_id"), libraryId);
+                         requestJson(
+                             QStringLiteral("GET"),
+                             QStringLiteral("/kb/search?") + params.query(QUrl::FullyEncoded),
+                             QJsonObject(),
+                             [this](const QJsonObject &object, int status) {
+                                 if (status < 200 || status >= 300) {
+                                     m_chart->setKbStatusText(
+                                         QStringLiteral("检索失败：%1")
+                                             .arg(errorText(object, QStringLiteral("未知错误"),
+                                                            status)));
+                                     return;
+                                 }
+                                 m_chart->setKbSearchResult(object.toVariantMap());
+                             });
+                     });
+
     QObject::connect(c, &ChartWidget::attachRequested, c, [this] {
         const QStringList paths = QFileDialog::getOpenFileNames(
             m_chart, QStringLiteral("选择附件"), QString(),
@@ -1656,7 +3332,7 @@ void DemoHost::startTurn(const QString &message, const QString &display,
 }
 
 void DemoHost::startLiveTurn(const QString &message, const QString &display,
-                             const QVariantList &attachments)
+                             const QVariantList &attachments, bool appendUser)
 {
     if (!m_live || !m_network)
         return;
@@ -1679,7 +3355,8 @@ void DemoHost::startLiveTurn(const QString &message, const QString &display,
         body.insert(QStringLiteral("model_id"), m_chart->currentModel());
         requestJson(
             QStringLiteral("POST"), QStringLiteral("/sessions"), body,
-            [this, message, display, attachments](const QJsonObject &object, int status) {
+            [this, message, display, attachments, appendUser](const QJsonObject &object,
+                                                              int status) {
                 if (status < 200 || status >= 300) {
                     m_chart->showToast(
                         QStringLiteral("创建会话失败，消息未发送：%1")
@@ -1690,7 +3367,7 @@ void DemoHost::startLiveTurn(const QString &message, const QString &display,
                 m_chart->setCurrentSessionTitle(
                     object.value(QStringLiteral("title")).toString(QStringLiteral("新对话")));
                 refreshSessions(false);
-                startLiveTurn(message, display, attachments);
+                startLiveTurn(message, display, attachments, appendUser);
             });
         return;
     }
@@ -1698,7 +3375,10 @@ void DemoHost::startLiveTurn(const QString &message, const QString &display,
     m_stopped = false;
     m_streamDone = false;
     m_streamFailed = false;
-    m_chart->appendUserMessage(shown, attachments);
+    // 「结束类选项收尾失败后改走普通发送」时这条用户消息库已经追加过了（endTurn 的本地收尾），
+    // appendUser=false 避开两个一模一样的气泡
+    if (appendUser)
+        m_chart->appendUserMessage(shown, attachments);
     m_chart->clearAttachments();
     m_chart->setBusy(true);
     m_chart->startLiveTiming();
@@ -1720,6 +3400,14 @@ void DemoHost::startLiveTurn(const QString &message, const QString &display,
         body.insert(QStringLiteral("selected_skills"), QJsonArray());
     }
     body.insert(QStringLiteral("attachments"), QJsonArray::fromVariantList(attachments));
+    // 输入区两个下拉（webui sendMessage 同名字段）：
+    //   selected_category + category_explicit —— 只有显式选过才允许覆盖会话 meta 里的分类，
+    //     所以「全部」这种空值必须配 category_explicit=true，否则后端会回落到 meta
+    //   kb_library —— 后端用空串表示「不使用知识库」，输入区下拉里那个值叫 __none__
+    body.insert(QStringLiteral("selected_category"), m_category);
+    body.insert(QStringLiteral("category_explicit"), m_categoryTouched);
+    body.insert(QStringLiteral("kb_library"),
+                m_kbLibrary == QLatin1String("__none__") ? QString() : m_kbLibrary);
 
     QNetworkRequest request(QUrl(apiUrl(QStringLiteral("/chat/stream"))));
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
@@ -1852,6 +3540,8 @@ void DemoHost::processSseFrame(const QByteArray &frame, const QString &message,
             event.value(QStringLiteral("tokens_input")).toLongLong(),
             event.value(QStringLiteral("tokens_output")).toLongLong(),
             event.value(QStringLiteral("tokens_estimated")).toBool());
+        // 同一个事件里带着本轮请求实际送出的 input（含缓存读）与模型窗口
+        applyContextUsage(event);
     } else if (type == QLatin1String("workflow_started")
                || type == QLatin1String("workflow_step")
                || type == QLatin1String("workflow_done")) {
@@ -1886,6 +3576,8 @@ void DemoHost::processSseFrame(const QByteArray &frame, const QString &message,
                      event.value(QStringLiteral("reasoning_tokens")));
         usage.insert(QStringLiteral("model"), event.value(QStringLiteral("model")));
         m_chart->setTokenUsageDetail(usage);
+        // done 也带一份用量字段：token_usage 可能早退（本轮无工具调用），圆环不能停在旧值
+        applyContextUsage(event);
 
         QVariantMap timing;
         timing.insert(QStringLiteral("elapsed"), event.value(QStringLiteral("elapsed_ms")));
@@ -2011,7 +3703,7 @@ bool DemoHost::runCommand(const QString &text, const QVariantList &attachments)
         return true;
     }
     if (name == QLatin1String("/settings")) {
-        m_chart->openSettings(rest);
+        openSettings(rest);
         return true;
     }
 
@@ -2207,17 +3899,92 @@ int main(int argc, char *argv[])
     // showToast，启动即弹一条提示压住阶段计划面板，干扰离屏对照图。
     // 必须早于下面的 Tab 块：openSettings("usage") 会同步发 usageStatsRequested。
     host->wire();
+    // live 模式下数据是异步拉回来的：立刻 openSettings 会被后续会话/配置加载覆盖掉
+    // （看到的总是模型页），所以延一下再切 Tab
+    auto openTab = [host, chart, live](const QString &name) {
+        if (!live) {
+            host->openSettings(name);
+            return;
+        }
+        // live 下配置是异步拉回来的，早切会被 loadConfig 盖掉：
+        // 连切几次，确保最终停在目标页（幂等，重复切无副作用）
+        for (int delay : {900, 1800, 2800})
+            QTimer::singleShot(delay, chart, [host, name] { host->openSettings(name); });
+    };
     if (tab == QLatin1String("traj")) {
         if (!live)
             host->loadTrajectory();
         chart->setViewTab(QStringLiteral("traj"));
+    } else if (tab == QLatin1String("traj-detail")) {
+        // 轨迹页 + 选中第一条记录，用来核对右侧详情（尤其「原始内容」的高度）
+        if (!live)
+            host->loadTrajectory();
+        chart->setViewTab(QStringLiteral("traj"));
+        QTimer::singleShot(320, chart, [chart] {
+            for (QWidget *w : chart->findChildren<QWidget *>()) {
+                if (!w->property("class").toString().contains(QStringLiteral("trajRow")))
+                    continue;
+                const QPoint center(w->width() / 2, w->height() / 2);
+                QMouseEvent press(QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(w, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, center, Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(w, &release);
+                break;
+            }
+        });
+        // 再切到「原始内容」页签：这一页才是代码块高度按内容算的地方
+        QTimer::singleShot(520, chart, [chart] {
+            for (QAbstractButton *button : chart->findChildren<QAbstractButton *>()) {
+                if (button->text() != QStringLiteral("原始内容"))
+                    continue;
+                button->click();
+                break;
+            }
+        });
+    } else if (tab == QLatin1String("approve")) {
+        // 审批卡：核对浮层高度（参数多时应该在可视区内出滚动，而不是顶出窗口）
+        host->loadHistory();
+        QTimer::singleShot(260, chart, [host] {
+            host->approveForShot();
+        });
     } else if (tab == QLatin1String("usage")) {
         // 打开设置中心的「用量」页（与 webui 的第四个 Tab 对照）
-        chart->openSettings(QStringLiteral("usage"));
+        openTab(QStringLiteral("usage"));
     } else if (tab == QLatin1String("models") || tab == QLatin1String("skills")
-               || tab == QLatin1String("mcp")) {
-        // 设置中心其余三个 Tab（与 webui 的 tab-models / tab-skills / tab-mcp 对照）
-        chart->openSettings(tab);
+               || tab == QLatin1String("mcp") || tab == QLatin1String("memory")
+               || tab == QLatin1String("kb")) {
+        // 设置中心其余 Tab（与 webui 的 tab-models / -skills / -mcp / -memory / -kb 对照）
+        openTab(tab);
+    } else if (tab == QLatin1String("model-form")) {
+        // 模型行式表单：展开第一张模型卡片（离屏没有真实点击）
+        openTab(QStringLiteral("models"));
+        QTimer::singleShot(200, chart, [chart] {
+            auto *dialog = chart->findChild<QWidget *>(QStringLiteral("settingsDialog"));
+            if (!dialog)
+                return;
+            for (QWidget *w : dialog->findChildren<QWidget *>()) {
+                if (!w->property("class").toString().contains(QStringLiteral("settingsModelSummary")))
+                    continue;
+                const QPoint center(w->width() / 2, w->height() / 2);
+                QMouseEvent press(QEvent::MouseButtonPress, center, Qt::LeftButton, Qt::LeftButton,
+                                  Qt::NoModifier);
+                QApplication::sendEvent(w, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, center, Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(w, &release);
+                break;
+            }
+        });
+    } else if (tab == QLatin1String("ring")) {
+        // 上下文圆环浮层（离屏无法悬停：等价派发 Enter）
+        QTimer::singleShot(200, chart, [chart] {
+            if (QWidget *ring = chart->findChild<QWidget *>(QStringLiteral("contextRing"))) {
+                QEvent enter(QEvent::Enter);
+                QApplication::sendEvent(ring, &enter);
+            }
+        });
     } else if (tab == QLatin1String("rail")) {
         // 离屏无法悬停：等价地派发 Enter 展开轮次列表面板，便于出对照图
         QTimer::singleShot(200, chart, [chart] {
@@ -2241,7 +4008,7 @@ int main(int argc, char *argv[])
         });
     } else if (tab == QLatin1String("usage-cal")) {
         // 用量页 + 日期浮层：离屏没有真实点击，等价地给日期触发器派发一次点击
-        chart->openSettings(QStringLiteral("usage"));
+        host->openSettings(QStringLiteral("usage"));
         QTimer::singleShot(500, chart, [chart] {
             if (QWidget *range = chart->findChild<QWidget *>(QStringLiteral("usageRange"))) {
                 const QPoint center(range->width() / 2, range->height() / 2);
@@ -2255,7 +4022,7 @@ int main(int argc, char *argv[])
         });
     } else if (tab == QLatin1String("usage-list")) {
         // 用量页 + 下拉：核对 .usage-listbox 是否相对 .usage-filter 容器（含标签）左对齐
-        chart->openSettings(QStringLiteral("usage"));
+        host->openSettings(QStringLiteral("usage"));
         QTimer::singleShot(500, chart, [chart] {
             if (QWidget *select = chart->findChild<QWidget *>(QStringLiteral("usageModel"))) {
                 const QPoint center(select->width() / 2, select->height() / 2);
@@ -2276,8 +4043,14 @@ int main(int argc, char *argv[])
 
     if (!shotPath.isEmpty()) {
         QTimer::singleShot(700, &app, [chart, shotPath, tab, theme] {
-            if (!theme.isEmpty())
+            if (!theme.isEmpty()) {
                 chart->setTheme(theme); // 显示之后再套一次，确保离屏截图用的是目标皮肤
+                // setStyleSheet 引发的 StyleChange 是异步投递的：不先跑一轮事件循环，
+                // 子控件的「随皮肤重建局部样式」还没发生，截图会拍到旧配色
+                QCoreApplication::processEvents();
+                QThread::msleep(150);
+                QCoreApplication::processEvents();
+            }
             // 用量页在设置对话框里，截图目标跟着切换
             QWidget *target = chart;
             if (tab == QLatin1String("usage") || tab == QLatin1String("usage-cal")
@@ -2288,11 +4061,22 @@ int main(int argc, char *argv[])
                     dialog->resize(dialog->width(), 1240);
                     target = dialog;
                 }
-            } else if (tab == QLatin1String("models") || tab == QLatin1String("skills")
-                       || tab == QLatin1String("mcp")) {
+            } else if (tab == QLatin1String("models") || tab == QLatin1String("model-form")
+                       || tab == QLatin1String("skills") || tab == QLatin1String("mcp")) {
                 if (QWidget *dialog =
-                        chart->findChild<QWidget *>(QStringLiteral("settingsDialog")))
+                        chart->findChild<QWidget *>(QStringLiteral("settingsDialog"))) {
+                    // 模型页的卡片在编辑区下方，截全图时拉高才能看到行式表单
+                    if (tab == QLatin1String("models") || tab == QLatin1String("model-form"))
+                        dialog->resize(dialog->width(), 1180);
                     target = dialog;
+                }
+            } else if (tab == QLatin1String("memory") || tab == QLatin1String("kb")) {
+                // 记忆 / 知识库页比对话框高，拉高后再拍，把整个面板装进去
+                if (QWidget *dialog =
+                        chart->findChild<QWidget *>(QStringLiteral("settingsDialog"))) {
+                    dialog->resize(dialog->width(), tab == QLatin1String("kb") ? 1180 : 1300);
+                    target = dialog;
+                }
             }
             if (tab == QLatin1String("usage-cal")) {
                 // 日期浮层是独立控件，单独抓它自己

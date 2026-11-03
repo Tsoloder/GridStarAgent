@@ -82,6 +82,25 @@ public:
     void setConfigLoaded(bool loaded);
     void setConfigWarning(const QString &text);
 
+    // ---- 专业分类（webui #category-select）：categories: [{id, name}]，
+    // 首项「全部」由库自己补（id 为空串） ----
+    void setCategories(const QVariantList &categories);
+    void setCurrentCategory(const QString &id);
+    QString currentCategory() const;
+    // 会话 meta 里的 category 回填（app.js syncCategoryFromMeta）
+    void syncCategoryFromSession(const QString &category);
+
+    // ---- 知识库（webui #kb-select）：libraries: [{id, name, documents, chunks}]，
+    // 库自己补「不使用知识库」（id = "__none__"）与「全部知识库」（id = "*"）两项 ----
+    void setKnowledgeBases(const QVariantList &libraries);
+    void setCurrentKnowledgeBase(const QString &id);
+    QString currentKnowledgeBase() const;
+
+    // ---- 上下文用量圆环（webui #context-ring）：
+    // usage: {max, used, left, percent, estimated, model}；空 map 收进圆环 ----
+    void setContextUsage(const QVariantMap &usage);
+    void clearContextUsage();
+
     QString inputText() const;
     void setInputText(const QString &text);
     void focusInput();
@@ -103,7 +122,10 @@ public:
 
     // ---- 消息流（对应 app.js createMessage / renderHistory / finishAssistant） ----
     void clearMessages();
-    void setHistory(const QVariantList &messages);
+    // resume = true：这批历史后面还要接上正在跑的新一轮（重连场景）。
+    // 此时末尾那轮的询问已经被本轮 user 消息回答过了，不能再当待答弹出来，
+    // 否则重连后会把已审批的旧参数卡重新弹回输入框上方（webui c4a6d84）
+    void setHistory(const QVariantList &messages, bool resume = false);
     void appendUserMessage(const QString &content, const QVariantList &attachments = QVariantList());
     // 一次性追加完整的助手消息（正文里的结构化块会立即渲染成卡片）
     void appendAssistantMessage(const QString &content, const QString &label = QString(),
@@ -145,6 +167,12 @@ public:
     // ---- 设置中心 ----
     void setSettingsDraft(const QVariantMap &config, const QVariant &revision);
     void setDiscoveredModels(const QString &providerId, const QVariantList &models);
+    // 模型信息快照（GET /config/model-metadata 的状态 + 可选的 limits）：
+    // 状态行始终能显示；要填模型上限就额外塞 "limits": {modelId: {...}}
+    // 或 "models": [{id, context_window, max_output_tokens, capabilities}] 数组
+    void setModelMetadata(const QVariantMap &snapshot);
+    // kind = "load" | "refresh"；httpStatus 非 0 时状态行会带上 HTTP 码
+    void setModelMetadataFailed(const QString &kind, const QString &error, int httpStatus = 0);
     void setProviderBusy(bool testing, bool reading);
     void setSettingsSkills(const QVariantList &skills, bool loading, const QString &error);
     void setMcpTools(const QVariantList &tools, bool connected, bool loading,
@@ -154,6 +182,24 @@ public:
     void setSettingsStatus(const QString &text);
     // 宿主保存成功后调用：清除脏标记并关闭对话框
     void settingsSaved();
+
+    // ---- 设置中心「记忆」页（GET /memory/*） ----
+    // summary: {enabled, config, store, experience, maintenance, notice}
+    void setMemorySummary(const QVariantMap &summary);
+    // listing: {items, total, page, page_size, facets}
+    void setMemoryExperiences(const QVariantMap &listing);
+    void setMemoryListFailed(const QString &error);
+    // payload: {tools:[{tool, fields, updated_at}], tool_count}
+    void setMemoryTools(const QVariantMap &payload);
+    void setMemoryStatusText(const QString &text);
+
+    // ---- 设置中心「知识库」页（GET /kb/*） ----
+    void setKbLibraries(const QVariantList &libraries);
+    void setKbStatus(const QVariantMap &status);
+    void setKbFolders(const QVariantList &folders, const QVariantMap &tree);
+    void setKbDocuments(const QVariantList &documents, int total);
+    void setKbSearchResult(const QVariantMap &result);
+    void setKbStatusText(const QString &text);
 
     // ---- 用量统计（设置中心「用量」页） ----
     // 宿主收到 usageStatsRequested 后拉 GET /usage/stats 并回填；
@@ -184,8 +230,18 @@ signals:
     // 输入框斜杠面板里的「/ 导出对话」：宿主 POST /sessions/{id}/export 并保存返回的文件名
     void sessionExportRequested();
     void connectionCheckRequested();
+    // 顶栏品牌图标被点击：宿主确认后启动 GridStar 主程序（webui launchGridStar）
+    void launchAppRequested();
+
+    // 输入区两个新下拉
+    void categorySelected(const QString &id);
+    void knowledgeBaseSelected(const QString &id);
 
     void optionChosen(const QString &value, const QString &label);
+    // 「结束」类选项（webui 5948605）：点它就是本轮收尾。宿主收到后 POST
+    // /sessions/{id}/end-turn 并落一条用户消息，不开新一轮——否则 auto 模式会接着
+    // 干、再弹一张同样的卡。识别只做保守判断，见 chartwidget.cpp 的 isEndTurnOption
+    void endTurnRequested(const QString &label);
     // 工具参数确认不发独立信号：按 webui 口径打包成 <structured_interaction> 一轮消息，
     // 由 sendMessage 带出（display 为所选按钮文案）
     void approvalDecided(const QString &callId, bool approved, const QVariantMap &args);
@@ -200,13 +256,59 @@ signals:
     void choiceOpenChanged(bool open);
 
     void settingsSaveRequested(const QVariantMap &config, const QVariant &revision);
+    // 设置中心被打开（tab = models | skills | mcp | memory | kb | usage）：
+    // 宿主据此拉对应数据（如 model-metadata、memory summary、kb libraries）。
+    // 宿主导航或用户点设置按钮都会触发
+    void settingsOpened(const QString &tab);
     void testProviderRequested(const QString &providerId);
     void readModelsRequested(const QString &providerId);
+    // 宿主收到后 POST /config/model-metadata/refresh，再回填 setModelMetadata
+    void modelMetadataRefreshRequested();
+    // 新增一个模型后，webui 会立刻拉它的上限（app.js fillModelLimits →
+    // POST /config/model-metadata/resolve）；库不联网，只把时机发出来，
+    // 宿主拿到后把 resolve 结果放进 setModelMetadata 的 limits 键即可
+    void modelLimitsResolveRequested(const QString &providerId, const QString &modelId);
     void refreshSkillsRequested();
     void refreshMcpRequested();
     // 宿主收到后拉 GET /usage/stats（start/end 为本地时间 "yyyy-MM-ddTHH:mm"）并回填 setUsageStats
     void usageStatsRequested(const QString &requestId, const QString &start, const QString &end,
                              const QString &provider, const QString &model);
+
+    // ---- 记忆页的意图（宿主调 /memory/*） ----
+    void memoryRefreshRequested();
+    void memoryListRequested(int page, const QVariantMap &filters);
+    void memoryConfigPatchRequested(const QVariantMap &updates);
+    void memoryActionRequested(const QString &id, const QString &action);
+    void memoryBulkRequested(const QStringList &ids, const QString &action);
+    void memoryDetailRequested(const QString &id);
+    void memoryFieldSaveRequested(const QString &tool, const QString &field, const QVariant &value);
+    void memoryFieldDeleteRequested(const QString &tool, const QString &field);
+    void memoryToolClearRequested(const QString &tool);
+    void memoryToolsClearAllRequested();
+    void memoryMaintenanceRequested(const QString &kind);
+
+    // ---- 知识库页的意图（宿主调 /kb/*） ----
+    void kbRefreshRequested(const QString &libraryId);
+    void kbLibraryCreateRequested(const QString &name);
+    void kbLibraryRenameRequested(const QString &libraryId, const QString &name);
+    void kbLibraryDeleteRequested(const QString &libraryId);
+    void kbFilesImportRequested(const QStringList &paths, const QString &libraryId,
+                                const QString &folderId);
+    void kbDirImportRequested(const QString &libraryId, const QString &dirPath);
+    // 目录导入带上目标文件夹（空串 = 库根）：KbPanel 现在只发这个，旧的 dirImportRequested
+    // 路径不再 emit（宿主改接本信号）
+    void kbDirImportToFolderRequested(const QString &libraryId, const QString &dirPath,
+                                      const QString &folderId);
+    void kbDocumentDeleteRequested(const QString &docId);
+    void kbDocumentReindexRequested(const QString &docId);
+    void kbDocumentMoveRequested(const QString &docId, const QString &folderId);
+    void kbFolderCreateRequested(const QString &libraryId, const QString &parentId,
+                                 const QString &name);
+    void kbFolderRenameRequested(const QString &folderId, const QString &name);
+    void kbFolderDeleteRequested(const QString &folderId);
+    void kbSearchRequested(const QString &libraryId, const QString &query);
+    // 归档树切目录（libraryId, folderId；folderId 为 all / root / 真实 id）
+    void kbFolderChanged(const QString &libraryId, const QString &folderId);
 
     void attachRequested();
     void voiceRequested();

@@ -10,7 +10,9 @@
 
 #include <QAbstractButton>
 #include <QApplication>
+#include <QCheckBox>
 #include <QColor>
+#include <QComboBox>
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
@@ -21,6 +23,7 @@
 #include <QGraphicsOpacityEffect>
 #include <QGridLayout>
 #include <QHeaderView>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLayout>
 #include <QLineEdit>
@@ -126,6 +129,80 @@ QWidget *choiceItemByText(QWidget *card, const QString &text)
             return item;
     }
     return nullptr;
+}
+
+// 平铺下拉（分类 / 知识库）里按可见名字找一行：两种下拉共用 ListBoxPopup，
+// 行的 class 是 modelOption，名字写在 modelName 上
+QWidget *optionRowByText(QWidget *popup, const QString &text)
+{
+    if (!popup)
+        return nullptr;
+    for (QWidget *row : widgetsByClass(popup, QStringLiteral("modelOption"))) {
+        if (labelTexts(row, QStringLiteral("modelName")).contains(text))
+            return row;
+    }
+    return nullptr;
+}
+
+QPushButton *buttonByText(QWidget *root, const QString &text)
+{
+    if (!root)
+        return nullptr;
+    for (QPushButton *button : root->findChildren<QPushButton *>()) {
+        if (button->text() == text)
+            return button;
+    }
+    return nullptr;
+}
+
+QCheckBox *checkBoxByText(QWidget *root, const QString &text)
+{
+    if (!root)
+        return nullptr;
+    for (QCheckBox *box : root->findChildren<QCheckBox *>()) {
+        if (box->text() == text)
+            return box;
+    }
+    return nullptr;
+}
+
+// webui bindHoverDropdown：悬停即展开。真实指针会由 Qt 从 WA_Hover 派生同一事件
+void hoverWidget(QWidget *widget)
+{
+    if (!widget)
+        return;
+    QEvent event(QEvent::HoverEnter);
+    QApplication::sendEvent(widget, &event);
+}
+
+// 模型 / 模式下拉的 objectName 都是 listbox，按 role 动态属性区分
+QWidget *visibleListPopup(QWidget *root, const QString &role)
+{
+    for (QWidget *popup : root->findChildren<QWidget *>(QStringLiteral("listbox"))) {
+        if (popup->property("role").toString() == role && popup->isVisible())
+            return popup;
+    }
+    return nullptr;
+}
+
+// ConfirmDialog::ask / prompt 走模态 exec()：用 0 延时在嵌套事件循环里点掉它。
+// 对话框压根没出现（动作被拦下）时这里什么也不做，调用方随后的断言会自己失败。
+void answerConfirmLater(QWidget *root, const QString &buttonText)
+{
+    QPointer<QWidget> host(root);
+    QTimer::singleShot(0, root, [host, buttonText] {
+        if (!host)
+            return;
+        QWidget *dialog = host->findChild<QWidget *>(QStringLiteral("confirmDialog"));
+        if (!dialog)
+            return;
+        for (QPushButton *button : dialog->findChildren<QPushButton *>()) {
+            if (button->text() == buttonText) {
+                button->click();
+                return;
+            }
+        }
+    });
 }
 
 // 账本结构快照：按布局顺序记录「分组头 / 数据行 / 摘要行」及其文本（用 toolTip 取全文）。
@@ -440,6 +517,25 @@ private slots:
     void guiThreadGuard();
     void renderPerformance();
     void trajectoryLedgerVirtualization();
+
+    // ---- 2.3.0（webui bf57771 → HEAD）新增能力的回归 ----
+    void contextRingUsage();
+    void categoryDropdown();
+    void knowledgeBaseDropdown();
+    void dropdownsMutuallyExclusive();
+    void memoryPanelStatus();
+    void memoryPanelSwitchesAndFilters();
+    void memoryPanelBulkAndCards();
+    void memoryPanelToolsEditing();
+    void kbPanelTreeAndDocs();
+    void kbPanelSearch();
+    void jsonTableEditor();
+    void endTurnOptionChosen();
+    void historyResumeSuppressesAsk();
+    void brandMarkLaunchesApp();
+    void modelMetadataSignals();
+    void settingsOpenedNotified();
+    void kbDirImportCarriesFolder();
 
 private:
     QWidget *choiceCard() const;
@@ -1927,10 +2023,15 @@ void TestChartWidget::settingsDialogCompactLayout()
     QVERIFY(dialog);
     QWidget *sidebar = dialog->findChild<QWidget *>(QStringLiteral("providerSidebar"));
     auto *providerGrid = dialog->findChild<QGridLayout *>(QStringLiteral("providerFormGrid"));
-    auto *modelGrid = dialog->findChild<QGridLayout *>(QStringLiteral("modelFormGrid"));
+    // 模型卡片改成行式表单（webui ee30f4e）后不再是一整块 .form-grid，
+    // 双列语义挪到 .srow-2（上下文 / 最大输出那一行），用 modelLimitRow 守它
+    QWidget *limitRow = dialog->findChild<QWidget *>(QStringLiteral("modelLimitRow"));
     QVERIFY(sidebar);
     QVERIFY(providerGrid);
-    QVERIFY(modelGrid);
+    QVERIFY(limitRow);
+    auto *limitGrid = qobject_cast<QGridLayout *>(limitRow->layout());
+    QVERIFY(limitGrid);
+    QCOMPARE(limitGrid->count(), 2);
 
     int row = -1;
     int col = -1;
@@ -1945,7 +2046,8 @@ void TestChartWidget::settingsDialogCompactLayout()
     providerGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
     QCOMPARE(row, 0);
     QCOMPARE(col, 1);
-    modelGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    // .srow-2：宽屏下两个字段并排在同一行
+    limitGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
     QCOMPARE(row, 0);
     QCOMPARE(col, 1);
 
@@ -1960,9 +2062,11 @@ void TestChartWidget::settingsDialogCompactLayout()
     providerGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
     QCOMPARE(row, 1);
     QCOMPARE(col, 0);
-    modelGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
+    // .srow-2 @media(max-width:640px)：单列，第二个字段落到下一行并跨两列
+    limitGrid->getItemPosition(1, &row, &col, &rowSpan, &colSpan);
     QCOMPARE(row, 1);
     QCOMPARE(col, 0);
+    QCOMPARE(colSpan, 2);
 }
 
 // .confirm-dialog{width:92vw;max-width:380px}：设置中心最小宽 360（<380），
@@ -2186,10 +2290,21 @@ void TestChartWidget::keyboardReachability()
         QVERIFY2(button->focusPolicy() & Qt::TabFocus, qPrintable(name));
     }
 
-    // 全树按钮都要可 Tab（设置对话框 / 会话面板 / 皮肤弹层的按钮也在内）
+    // 全树按钮都要可 Tab（设置对话框 / 会话面板 / 皮肤弹层的按钮也在内）。
+    // 例外：QLineEdit 自带的清除按钮（Qt 内部类 QLineEditIconButton）是鼠标辅助件，
+    // 默认 NoFocus，Tab 本来就不该停在它上面。
     for (QAbstractButton *button : m_chart->findChildren<QAbstractButton *>()) {
-        QVERIFY2(button->focusPolicy() & Qt::TabFocus,
-                 qPrintable(button->objectName() + QLatin1Char(' ') + button->text()));
+        const QString cls = QString::fromLatin1(button->metaObject()->className());
+        if (cls.startsWith(QStringLiteral("QLineEdit"))) {
+            QVERIFY2(!(button->focusPolicy() & Qt::TabFocus), qPrintable(cls));
+            continue;
+        }
+        const QWidget *holder = button->parentWidget();
+        const QString where = QStringLiteral("name=") + button->objectName()
+            + QStringLiteral(" text=") + button->text()
+            + QStringLiteral(" class=") + cls
+            + QStringLiteral(" parent=") + (holder ? holder->objectName() : QStringLiteral("(none)"));
+        QVERIFY2(button->focusPolicy() & Qt::TabFocus, qPrintable(where));
     }
 
     // 无文本按钮的 accessibleName 取 toolTip
@@ -2370,9 +2485,9 @@ void TestChartWidget::overlayGeometryMatchesWebui()
     QTest::qWait(20);
     QVERIFY(!sessionPanel->isVisible());
 
-    // --- 模式 / 模型下拉（Skill 已改为输入框里的斜杠面板，这里只剩两个下拉） ---
-    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("modelControl")).size(), 2);
-    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("comboTrigger")).size(), 2);
+    // --- 模式 / 模型 / 专业分类 / 知识库 四个下拉（Skill 已改为输入框里的斜杠面板） ---
+    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("modelControl")).size(), 4);
+    QCOMPARE(widgetsByClass(m_chart.data(), QStringLiteral("comboTrigger")).size(), 4);
     // 按名字取，不按 findChildren 的顺序：顺序取决于对象树深度，加个控件就会翻
     QWidget *modeTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modeTrigger"));
     QWidget *modelTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modelTrigger"));
@@ -3266,6 +3381,933 @@ void TestChartWidget::trajectoryLedgerVirtualization()
             tailSelected = true;
     }
     QVERIFY2(tailSelected, "点击的那一行应处于选中态");
+}
+
+// ================================================================ 2.3.0 新增能力
+//
+// 这一批对的是 webui bf57771 → HEAD 的 18 个提交：记忆页 / 知识库页 / JSON 表格编辑器 /
+// 专业分类与知识库下拉 / 上下文用量圆环 / 结束类选项 / 重连重放 / 品牌按钮 / 模型信息。
+// 仍然只走 include/chartwidget.h 的公开面 + QObject 树（objectName / class 动态属性）。
+
+// #context-ring：setContextUsage 后圆环在、悬停展开 .context-pop（百分比 / 上限 / 已用 /
+// 剩余 / 本地估算），clearContextUsage 回到「—」空态
+void TestChartWidget::contextRingUsage()
+{
+    QWidget *ring = m_chart->findChild<QWidget *>(QStringLiteral("contextRing"));
+    QVERIFY(ring);
+    QVERIFY(ring->isVisible());
+
+    const QString dash = QString::fromUtf8("—");
+
+    QVariantMap usage;
+    usage.insert(QStringLiteral("max"), 128000);
+    usage.insert(QStringLiteral("used"), 64000);
+    usage.insert(QStringLiteral("left"), 64000);
+    usage.insert(QStringLiteral("percent"), 50);
+    usage.insert(QStringLiteral("estimated"), true);
+    m_chart->setContextUsage(usage);
+    QTest::qWait(20);
+
+    QWidget *pop = m_chart->findChild<QWidget *>(QStringLiteral("contextPop"));
+    QVERIFY(pop);
+    QVERIFY(!pop->isVisible());
+
+    // 悬停圆环展开浮层（焦点进入 / 方向键 / 回车走同一条 showContextPop）
+    QEvent enter(QEvent::Enter);
+    QApplication::sendEvent(ring, &enter);
+    QTest::qWait(20);
+    QVERIFY(pop->isVisible());
+
+    QCOMPARE(labelText(pop, QStringLiteral("popTotal")), QStringLiteral("50%"));
+    QCOMPARE(labelTexts(pop, QStringLiteral("popLabel")),
+             QStringList({ QStringLiteral("窗口上限"), QStringLiteral("已用"),
+                           QStringLiteral("剩余") }));
+    QCOMPARE(labelTexts(pop, QStringLiteral("popValue")),
+             QStringList({ QStringLiteral("128K"), QStringLiteral("64K"),
+                           QStringLiteral("64K") }));
+
+    QWidget *note = widgetByClass(pop, QStringLiteral("popNote"));
+    QVERIFY(note);
+    QVERIFY(note->isVisible()); // estimated 为真才露出来
+    QCOMPARE(qobject_cast<QLabel *>(note)->text(), QStringLiteral("本地估算"));
+
+    // 清空：整张浮层回到空态（上限 / 已用 / 剩余 / 百分比都是「—」，估算提示消失）
+    m_chart->clearContextUsage();
+    QTest::qWait(20);
+    QCOMPARE(labelText(pop, QStringLiteral("popTotal")), dash);
+    QCOMPARE(labelTexts(pop, QStringLiteral("popValue")), QStringList({ dash, dash, dash }));
+    QVERIFY(!note->isVisible());
+
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(ring, &leave);
+    QTest::qWait(20);
+    QVERIFY(!pop->isVisible());
+}
+
+// 专业分类下拉：首项「全部」由库补，选中发 categorySelected；
+// setCurrentCategory 是程序化路径、不置「用户已选」，所以随后 syncCategoryFromSession 必须盖得住
+void TestChartWidget::categoryDropdown()
+{
+    QWidget *trigger = m_chart->findChild<QWidget *>(QStringLiteral("categoryTrigger"));
+    QVERIFY(trigger);
+    QVERIFY(trigger->isVisible());
+    QCOMPARE(labelText(trigger, QStringLiteral("comboText")), QStringLiteral("全部"));
+    QVERIFY(m_chart->currentCategory().isEmpty());
+
+    m_chart->setCategories(QVariantList{
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("missile") },
+                     { QStringLiteral("name"), QStringLiteral("导弹与飞行器") } },
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("power") },
+                     { QStringLiteral("name"), QStringLiteral("电力系统") } } });
+
+    clickWidget(trigger);
+    QTest::qWait(30);
+    QWidget *popup = m_chart->findChild<QWidget *>(QStringLiteral("categoryList"));
+    QVERIFY(popup);
+    QVERIFY(popup->isVisible());
+    // 「全部」+ 两个分类
+    QCOMPARE(widgetsByClass(popup, QStringLiteral("modelOption")).size(), 3);
+    const QStringList names = labelTexts(popup, QStringLiteral("modelName"));
+    QVERIFY(names.contains(QStringLiteral("全部")));
+    QVERIFY(names.contains(QStringLiteral("导弹与飞行器")));
+    QVERIFY(names.contains(QStringLiteral("电力系统")));
+
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::categorySelected);
+    clickWidget(optionRowByText(popup, QStringLiteral("导弹与飞行器")));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("missile"));
+    QCOMPARE(m_chart->currentCategory(), QStringLiteral("missile"));
+    QVERIFY(!popup->isVisible());
+
+    // 程序化赋值不置「用户已选」：会话 meta 回填（syncCategoryFromSession）无条件覆盖
+    m_chart->setCurrentCategory(QStringLiteral("power"));
+    QCOMPARE(m_chart->currentCategory(), QStringLiteral("power"));
+    m_chart->syncCategoryFromSession(QStringLiteral("missile"));
+    QCOMPARE(m_chart->currentCategory(), QStringLiteral("missile"));
+}
+
+// 知识库下拉：自带「不使用知识库」(__none__) 与「全部知识库」(*)，选中发 knowledgeBaseSelected
+void TestChartWidget::knowledgeBaseDropdown()
+{
+    QWidget *trigger = m_chart->findChild<QWidget *>(QStringLiteral("kbTrigger"));
+    QVERIFY(trigger);
+    QVERIFY(trigger->isVisible());
+
+    m_chart->setKnowledgeBases(QVariantList{
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("kb1") },
+                     { QStringLiteral("name"), QStringLiteral("一次设备手册") },
+                     { QStringLiteral("documents"), 12 },
+                     { QStringLiteral("chunks"), 80 } } });
+    // 默认就是「全部知识库」（与 webui #kb-select 一致）
+    QCOMPARE(m_chart->currentKnowledgeBase(), QStringLiteral("*"));
+    QCOMPARE(labelText(trigger, QStringLiteral("comboText")), QStringLiteral("全部知识库"));
+
+    clickWidget(trigger);
+    QTest::qWait(30);
+    QWidget *popup = m_chart->findChild<QWidget *>(QStringLiteral("kbList"));
+    QVERIFY(popup);
+    QVERIFY(popup->isVisible());
+    QCOMPARE(labelTexts(popup, QStringLiteral("modelName")),
+             QStringList({ QStringLiteral("不使用知识库"), QStringLiteral("全部知识库"),
+                           QStringLiteral("一次设备手册") }));
+    // 各库带「N 份 · M 块」副文本
+    QCOMPARE(labelTexts(popup, QStringLiteral("modelId")),
+             QStringList({ QStringLiteral("本轮不去查资料"), QStringLiteral("跨库检索"),
+                           QStringLiteral("12 份 · 80 块") }));
+
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::knowledgeBaseSelected);
+    clickWidget(optionRowByText(popup, QStringLiteral("一次设备手册")));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("kb1"));
+    QCOMPARE(m_chart->currentKnowledgeBase(), QStringLiteral("kb1"));
+    QVERIFY(!popup->isVisible());
+
+    clickWidget(trigger);
+    QTest::qWait(30);
+    QVERIFY(popup->isVisible());
+    clickWidget(optionRowByText(popup, QStringLiteral("不使用知识库")));
+    QCOMPARE(spy.count(), 2);
+    QCOMPARE(spy.at(1).at(0).toString(), QStringLiteral("__none__"));
+    QCOMPARE(m_chart->currentKnowledgeBase(), QStringLiteral("__none__"));
+}
+
+// 四个下拉互斥：打开后一个，前一个必须已经收起（openDropdown 统一收口）
+void TestChartWidget::dropdownsMutuallyExclusive()
+{
+    QWidget *modeTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modeTrigger"));
+    QWidget *modelTrigger = m_chart->findChild<QWidget *>(QStringLiteral("modelTrigger"));
+    QWidget *categoryTrigger = m_chart->findChild<QWidget *>(QStringLiteral("categoryTrigger"));
+    QWidget *kbTrigger = m_chart->findChild<QWidget *>(QStringLiteral("kbTrigger"));
+    QVERIFY(modeTrigger && modelTrigger && categoryTrigger && kbTrigger);
+
+    // 模式 → 模型
+    hoverWidget(modeTrigger->parentWidget());
+    QTest::qWait(20);
+    QVERIFY(visibleListPopup(m_chart.data(), QStringLiteral("mode")));
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("model")));
+
+    hoverWidget(modelTrigger->parentWidget());
+    QTest::qWait(20);
+    QVERIFY(visibleListPopup(m_chart.data(), QStringLiteral("model")));
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("mode")));
+
+    // 分类 → 知识库（跨组也要收掉上一组那个）
+    hoverWidget(categoryTrigger->parentWidget());
+    QTest::qWait(20);
+    QWidget *categoryPopup = m_chart->findChild<QWidget *>(QStringLiteral("categoryList"));
+    QVERIFY(categoryPopup && categoryPopup->isVisible());
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("model")));
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("mode")));
+
+    hoverWidget(kbTrigger->parentWidget());
+    QTest::qWait(20);
+    QWidget *kbPopup = m_chart->findChild<QWidget *>(QStringLiteral("kbList"));
+    QVERIFY(kbPopup && kbPopup->isVisible());
+    QVERIFY(!categoryPopup->isVisible());
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("model")));
+    QVERIFY(!visibleListPopup(m_chart.data(), QStringLiteral("mode")));
+}
+
+// 记忆页状态条：正常（ok）/ 降级（warn）/ 关闭（off）三态，notice 追加在尾部
+void TestChartWidget::memoryPanelStatus()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("memory"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("memoryPanel"));
+    QVERIFY(panel);
+    QWidget *status = widgetByClass(panel, QStringLiteral("memoryStatus"));
+    QVERIFY(status);
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("enabled"), true);
+    summary.insert(QStringLiteral("config"),
+                   QVariantMap{ { QStringLiteral("experience_extract"), true },
+                                { QStringLiteral("experience_inject"), true } });
+    summary.insert(QStringLiteral("store"),
+                   QVariantMap{ { QStringLiteral("status"), QStringLiteral("healthy") },
+                                { QStringLiteral("fts"), true } });
+    summary.insert(QStringLiteral("experience"),
+                   QVariantMap{ { QStringLiteral("candidate"), 3 },
+                                { QStringLiteral("approved"), 9 } });
+    m_chart->setMemorySummary(summary);
+    QTest::qWait(20);
+
+    const QString healthy = labelText(panel, QStringLiteral("memoryStatus"));
+    QVERIFY2(healthy.contains(QStringLiteral("记忆已启用")), qPrintable(healthy));
+    QVERIFY2(healthy.contains(QStringLiteral("经验库正常")), qPrintable(healthy));
+    QVERIFY2(healthy.contains(QStringLiteral("全文检索可用")), qPrintable(healthy));
+    QVERIFY2(healthy.contains(QStringLiteral("待审核 3 条")), qPrintable(healthy));
+    QCOMPARE(status->property("tone").toString(), QStringLiteral("ok"));
+
+    // 降级：库不健康 + 没有 FTS → warn
+    summary.insert(QStringLiteral("store"),
+                   QVariantMap{ { QStringLiteral("status"), QStringLiteral("degraded") },
+                                { QStringLiteral("fts"), false } });
+    m_chart->setMemorySummary(summary);
+    QTest::qWait(20);
+    const QString degraded = labelText(panel, QStringLiteral("memoryStatus"));
+    QVERIFY2(degraded.contains(QStringLiteral("经验库降级")), qPrintable(degraded));
+    QVERIFY2(degraded.contains(QStringLiteral("关键词检索降级为模糊匹配")), qPrintable(degraded));
+    QCOMPARE(status->property("tone").toString(), QStringLiteral("warn"));
+
+    // 关闭：tone 归 off，不再谈库健康与检索；notice 追加
+    QVariantMap disabled;
+    disabled.insert(QStringLiteral("enabled"), false);
+    disabled.insert(QStringLiteral("store"),
+                    QVariantMap{ { QStringLiteral("status"), QStringLiteral("healthy") },
+                                 { QStringLiteral("fts"), true } });
+    disabled.insert(QStringLiteral("experience"),
+                    QVariantMap{ { QStringLiteral("candidate"), 0 } });
+    disabled.insert(QStringLiteral("notice"), QStringLiteral("影子期：只采集不注入"));
+    m_chart->setMemorySummary(disabled);
+    QTest::qWait(20);
+
+    const QString off = labelText(panel, QStringLiteral("memoryStatus"));
+    QVERIFY2(off.contains(QStringLiteral("记忆已关闭")), qPrintable(off));
+    QCOMPARE(status->property("tone").toString(), QStringLiteral("off"));
+    QVERIFY(!off.contains(QStringLiteral("全文检索可用")));
+    QVERIFY2(off.contains(QStringLiteral("影子期：只采集不注入")), qPrintable(off));
+}
+
+// 记忆页开关与筛选：后两个开关随主开关置灰；点开关发 PATCH；筛选空值键不下发；搜索去抖 300ms
+void TestChartWidget::memoryPanelSwitchesAndFilters()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("memory"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("memoryPanel"));
+    QVERIFY(panel);
+    QWidget *switches = widgetByClass(panel, QStringLiteral("memorySwitches"));
+    QVERIFY(switches);
+    const QList<QCheckBox *> boxes = switches->findChildren<QCheckBox *>();
+    QCOMPARE(boxes.size(), 3);
+
+    QVariantMap summary;
+    summary.insert(QStringLiteral("enabled"), true);
+    summary.insert(QStringLiteral("config"),
+                   QVariantMap{ { QStringLiteral("experience_extract"), true },
+                                { QStringLiteral("experience_inject"), false } });
+    summary.insert(QStringLiteral("store"),
+                   QVariantMap{ { QStringLiteral("status"), QStringLiteral("healthy") },
+                                { QStringLiteral("fts"), true } });
+    m_chart->setMemorySummary(summary);
+    QTest::qWait(20);
+
+    for (QCheckBox *box : boxes)
+        QVERIFY(box->isEnabled());
+    QVERIFY(boxes.at(0)->isChecked());
+    QVERIFY(boxes.at(1)->isChecked());
+    QVERIFY(!boxes.at(2)->isChecked());
+
+    // 主开关关掉：后两个跟它一起置灰（勾选值不动，只切可用性）
+    summary.insert(QStringLiteral("enabled"), false);
+    m_chart->setMemorySummary(summary);
+    QTest::qWait(20);
+    QVERIFY(boxes.at(0)->isEnabled());
+    QVERIFY(!boxes.at(0)->isChecked());
+    QVERIFY(!boxes.at(1)->isEnabled());
+    QVERIFY(!boxes.at(2)->isEnabled());
+
+    // 点开关 = 下发 configPatch（键就是 enabled / extract / inject）
+    QSignalSpy patch(m_chart.data(), &gs::ChartWidget::memoryConfigPatchRequested);
+    boxes.at(0)->click();
+    QCOMPARE(patch.count(), 1);
+    const QVariantMap updates = patch.at(0).at(0).toMap();
+    QCOMPARE(updates.size(), 1);
+    QVERIFY(updates.contains(QStringLiteral("enabled")));
+    QCOMPARE(updates.value(QStringLiteral("enabled")).toBool(), true);
+
+    // 筛选行：状态 / 类型 / 作用域 / 关键词 + 刷新
+    QComboBox *statusFilter = nullptr;
+    for (QComboBox *combo : panel->findChildren<QComboBox *>()) {
+        if (combo->count() > 0 && combo->itemText(0) == QStringLiteral("待审核"))
+            statusFilter = combo;
+    }
+    QVERIFY(statusFilter);
+    QLineEdit *search = nullptr;
+    for (QLineEdit *edit : panel->findChildren<QLineEdit *>()) {
+        if (edit->placeholderText() == QStringLiteral("关键词"))
+            search = edit;
+    }
+    QVERIFY(search);
+
+    QSignalSpy list(m_chart.data(), &gs::ChartWidget::memoryListRequested);
+    statusFilter->setCurrentIndex(4); // 全部：value 是空串
+    QTest::qWait(20);
+    QCOMPARE(list.count(), 1);
+    QCOMPARE(list.at(0).at(0).toInt(), 1); // 改筛选一律回第一页
+    const QVariantMap emptyFilters = list.at(0).at(1).toMap();
+    QVERIFY(!emptyFilters.contains(QStringLiteral("status")));
+    QVERIFY(!emptyFilters.contains(QStringLiteral("kind")));
+    QVERIFY(!emptyFilters.contains(QStringLiteral("scope")));
+    QVERIFY(!emptyFilters.contains(QStringLiteral("q")));
+    QCOMPARE(emptyFilters.value(QStringLiteral("page_size")).toInt(), 20);
+
+    statusFilter->setCurrentIndex(0); // 待审核
+    QTest::qWait(20);
+    QCOMPARE(list.count(), 2);
+    QCOMPARE(list.at(1).at(1).toMap().value(QStringLiteral("status")).toString(),
+             QStringLiteral("candidate"));
+
+    // 搜索去抖 300ms：键入当下不发请求，等过去才发一次，且 q 带正确值
+    const int before = list.count();
+    search->setText(QStringLiteral("跳闸"));
+    QCOMPARE(list.count(), before);
+    QTest::qWait(120);
+    QCOMPARE(list.count(), before); // 还在去抖窗口里
+    QTest::qWait(300);
+    QCOMPARE(list.count(), before + 1);
+    QCOMPARE(list.at(before).at(1).toMap().value(QStringLiteral("q")).toString(),
+             QStringLiteral("跳闸"));
+}
+
+// 记忆页批量条与卡片动作：候选存在才出批量条；本页全选 → 「已选 N 条」；
+// 详情 / 通过 / 拒绝各自的信号；items < total 才有加载更多，点了要 page=2
+void TestChartWidget::memoryPanelBulkAndCards()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("memory"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("memoryPanel"));
+    QVERIFY(panel);
+
+    const QVariantMap candidate{
+        { QStringLiteral("id"), QStringLiteral("m1") },
+        { QStringLiteral("status"), QStringLiteral("candidate") },
+        { QStringLiteral("title"), QStringLiteral("城南线跳闸先合 lk07 转供") },
+        { QStringLiteral("kind"), QStringLiteral("experience") },
+        { QStringLiteral("scope"), QStringLiteral("global") },
+        { QStringLiteral("confidence"), 0.82 },
+        { QStringLiteral("evidence_count"), 4 },
+        { QStringLiteral("created_at"), QStringLiteral("2026-09-20T09:04:00Z") },
+    };
+    const QVariantMap approved{
+        { QStringLiteral("id"), QStringLiteral("m2") },
+        { QStringLiteral("status"), QStringLiteral("approved") },
+        { QStringLiteral("title"), QStringLiteral("保护定值改按季度复核") },
+        { QStringLiteral("kind"), QStringLiteral("fact") },
+        { QStringLiteral("scope"), QStringLiteral("skill:relay") },
+        { QStringLiteral("confidence"), 0.95 },
+        { QStringLiteral("evidence_count"), 7 },
+        { QStringLiteral("updated_at"), QStringLiteral("2026-09-18T08:00:00Z") },
+    };
+    QVariantMap listing;
+    listing.insert(QStringLiteral("items"), QVariantList{ candidate, approved });
+    listing.insert(QStringLiteral("total"), 45);
+    listing.insert(QStringLiteral("page"), 1);
+    listing.insert(QStringLiteral("page_size"), 20);
+    listing.insert(QStringLiteral("facets"), QVariantMap{});
+    m_chart->setMemoryExperiences(listing);
+    QTest::qWait(30);
+
+    const QList<QWidget *> cards = widgetsByClass(panel, QStringLiteral("memoryCard"));
+    QCOMPARE(cards.size(), 2);
+    QWidget *bulkBar = widgetByClass(panel, QStringLiteral("memoryBulk"));
+    QVERIFY(bulkBar && bulkBar->isVisible()); // 有 candidate 才出现
+    QCOMPARE(labelText(panel, QStringLiteral("memoryBulkCount")), QStringLiteral("已选 0 条"));
+    QVERIFY(labelTexts(cards.first(), QStringLiteral("memoryChip")).contains(
+        QStringLiteral("待审核")));
+
+    // 查看详情
+    QSignalSpy detail(m_chart.data(), &gs::ChartWidget::memoryDetailRequested);
+    QPushButton *detailButton = buttonByText(cards.first(), QStringLiteral("查看详情"));
+    QVERIFY(detailButton);
+    detailButton->click();
+    QCOMPARE(detail.count(), 1);
+    QCOMPARE(detail.at(0).at(0).toString(), QStringLiteral("m1"));
+
+    // 通过 / 拒绝（都要过二次确认框）
+    QSignalSpy action(m_chart.data(), &gs::ChartWidget::memoryActionRequested);
+    QPushButton *approveButton = buttonByText(cards.first(), QStringLiteral("通过"));
+    QVERIFY(approveButton);
+    answerConfirmLater(m_chart.data(), QStringLiteral("通过"));
+    approveButton->click();
+    QCOMPARE(action.count(), 1);
+    QCOMPARE(action.at(0).at(0).toString(), QStringLiteral("m1"));
+    QCOMPARE(action.at(0).at(1).toString(), QStringLiteral("approve"));
+
+    QPushButton *rejectButton = buttonByText(cards.first(), QStringLiteral("拒绝"));
+    QVERIFY(rejectButton);
+    answerConfirmLater(m_chart.data(), QStringLiteral("拒绝"));
+    rejectButton->click();
+    QCOMPARE(action.count(), 2);
+    QCOMPARE(action.at(1).at(0).toString(), QStringLiteral("m1"));
+    QCOMPARE(action.at(1).at(1).toString(), QStringLiteral("reject"));
+
+    // 本页全选：只勾候选项
+    QCheckBox *selectPage = checkBoxByText(panel, QStringLiteral("本页全选"));
+    QVERIFY(selectPage);
+    QVERIFY(selectPage->isEnabled());
+    selectPage->click();
+    QCOMPARE(labelText(panel, QStringLiteral("memoryBulkCount")), QStringLiteral("已选 1 条"));
+
+    // 加载更多：2 < 45 才出现，点击要 page=2；
+    // 选择**不清**（webui 只在回到第 1 页时清，本页全选不能因翻页失效），
+    // 已不在列表里的选中项由 setListing 里的 pruneSelection() 收掉
+    QPushButton *more = buttonByText(panel, QStringLiteral("加载更多"));
+    QVERIFY(more);
+    QVERIFY(more->isVisible());
+    QSignalSpy list(m_chart.data(), &gs::ChartWidget::memoryListRequested);
+    more->click();
+    QCOMPARE(list.count(), 1);
+    QCOMPARE(list.at(0).at(0).toInt(), 2);
+    QCOMPARE(labelText(panel, QStringLiteral("memoryBulkCount")), QStringLiteral("已选 1 条"));
+}
+
+// 参数记忆就地编辑：类型由原值锁定；非法值拦下（invalid=true，不发信号），合法值按原类型发出去
+void TestChartWidget::memoryPanelToolsEditing()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("memory"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("memoryPanel"));
+    QVERIFY(panel);
+
+    QVariantMap payload;
+    payload.insert(QStringLiteral("tools"),
+                   QVariantList{ QVariantMap{
+                       { QStringLiteral("tool"), QStringLiteral("power_flow") },
+                       { QStringLiteral("fields"),
+                         QVariantMap{ { QStringLiteral("topology_known"), true } } },
+                       { QStringLiteral("updated_at"),
+                         QStringLiteral("2026-09-20T09:04:00Z") } } });
+    payload.insert(QStringLiteral("tool_count"), 1);
+    m_chart->setMemoryTools(payload);
+    QTest::qWait(30);
+    QCOMPARE(widgetsByClass(panel, QStringLiteral("memoryTool")).size(), 1);
+
+    QWidget *head = widgetByClass(panel, QStringLiteral("memoryToolHead"));
+    QWidget *body = widgetByClass(panel, QStringLiteral("memoryToolBody"));
+    QVERIFY(head && body);
+    QVERIFY(!body->isVisible()); // 默认折叠
+    clickWidget(head);
+    QTest::qWait(20);
+    QVERIFY(body->isVisible());
+    QVERIFY(labelText(body, QStringLiteral("memoryFieldType")).isEmpty()); // 非编辑态不显示类型
+    QCOMPARE(labelText(body, QStringLiteral("memoryFieldValue")), QStringLiteral("true"));
+
+    QPushButton *edit = buttonByText(body, QStringLiteral("编辑"));
+    QVERIFY(edit);
+    edit->click();
+    QTest::qWait(30); // 编辑会重建整块参数记忆
+
+    QLineEdit *input = nullptr;
+    for (QLineEdit *candidate : panel->findChildren<QLineEdit *>()) {
+        if (hasClass(candidate, QStringLiteral("memoryFieldInput")))
+            input = candidate;
+    }
+    QVERIFY(input);
+    QCOMPARE(input->text(), QStringLiteral("true"));
+    QWidget *fieldRow = input->parentWidget();
+    QVERIFY(fieldRow);
+    QCOMPARE(labelText(fieldRow, QStringLiteral("memoryFieldType")), QStringLiteral("布尔"));
+    QPushButton *save = buttonByText(fieldRow, QStringLiteral("保存"));
+    QVERIFY(save);
+
+    QSignalSpy saveSpy(m_chart.data(), &gs::ChartWidget::memoryFieldSaveRequested);
+
+    // 原值是 bool：填 abc 不合法 → 不发信号、留在编辑态并标红
+    input->setText(QStringLiteral("abc"));
+    save->click();
+    QCOMPARE(saveSpy.count(), 0);
+    QVERIFY(input->property("invalid").toBool());
+
+    // 合法值：按原类型（bool）发出去
+    input->setText(QStringLiteral("false"));
+    save->click();
+    QCOMPARE(saveSpy.count(), 1);
+    QCOMPARE(saveSpy.at(0).at(0).toString(), QStringLiteral("power_flow"));
+    QCOMPARE(saveSpy.at(0).at(1).toString(), QStringLiteral("topology_known"));
+    QVERIFY(saveSpy.at(0).at(2).type() == QVariant::Bool);
+    QCOMPARE(saveSpy.at(0).at(2).toBool(), false);
+    QVERIFY(!input->property("invalid").toBool());
+}
+
+// 知识库归档树与资料清单：全部资料 / 库根 / 各文件夹行；切目录发 folderChanged；
+// 资料行的删除 / 重建分别发 kbDocumentDeleteRequested / kbDocumentReindexRequested
+void TestChartWidget::kbPanelTreeAndDocs()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("kb"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("kbPanel"));
+    QVERIFY(panel);
+
+    m_chart->setKbLibraries(QVariantList{
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("lib1") },
+                     { QStringLiteral("name"), QStringLiteral("调度手册") },
+                     { QStringLiteral("documents"), 2 },
+                     { QStringLiteral("chunks"), 40 } } });
+    QTest::qWait(20);
+
+    QVariantMap tree;
+    tree.insert(QStringLiteral("documents"), 2);
+    tree.insert(QStringLiteral("children"),
+                QVariantList{ QVariantMap{
+                    { QStringLiteral("id"), QStringLiteral("f1") },
+                    { QStringLiteral("name"), QStringLiteral("一次设备") },
+                    { QStringLiteral("total"), 2 },
+                    { QStringLiteral("depth"), 0 },
+                    { QStringLiteral("children"), QVariantList{} } } });
+    const QVariantList folders{ QVariantMap{
+        { QStringLiteral("id"), QStringLiteral("f1") },
+        { QStringLiteral("name"), QStringLiteral("一次设备") },
+        { QStringLiteral("parent_id"), QString() },
+        { QStringLiteral("depth"), 0 } } };
+    m_chart->setKbFolders(folders, tree);
+    QTest::qWait(30);
+
+    const QList<QWidget *> rows = widgetsByClass(panel, QStringLiteral("kbTreeRow"));
+    QCOMPARE(rows.size(), 3);
+    QCOMPARE(fullLabelTexts(rows.at(0), QStringLiteral("kbTreeName")).value(0),
+             QStringLiteral("全部资料"));
+    QCOMPARE(fullLabelTexts(rows.at(1), QStringLiteral("kbTreeName")).value(0),
+             QStringLiteral("库根"));
+    QCOMPARE(fullLabelTexts(rows.at(2), QStringLiteral("kbTreeName")).value(0),
+             QStringLiteral("一次设备"));
+    QVERIFY(rows.at(0)->property("active").toBool()); // 默认落在「全部资料」
+
+    QSignalSpy folderSpy(m_chart.data(), &gs::ChartWidget::kbFolderChanged);
+    clickWidget(rows.at(2));
+    QTest::qWait(20);
+    QCOMPARE(folderSpy.count(), 1);
+    QCOMPARE(folderSpy.at(0).at(0).toString(), QStringLiteral("lib1"));
+    QCOMPARE(folderSpy.at(0).at(1).toString(), QStringLiteral("f1"));
+    QVERIFY(rows.at(2)->property("active").toBool());
+
+    // 资料清单
+    const QVariantMap doc{
+        { QStringLiteral("doc_id"), QStringLiteral("d1") },
+        { QStringLiteral("name"), QStringLiteral("变压器运行规程.pdf") },
+        { QStringLiteral("status"), QStringLiteral("ok") },
+        { QStringLiteral("pages"), 12 },
+        { QStringLiteral("chunks"), 30 },
+        { QStringLiteral("params"), 5 },
+        { QStringLiteral("size"), 1048576 },
+        { QStringLiteral("indexed_at"), QStringLiteral("2026-09-01") },
+    };
+    m_chart->setKbDocuments(QVariantList{ doc }, 1);
+    QTest::qWait(30);
+
+    const QList<QWidget *> docRows = widgetsByClass(panel, QStringLiteral("kbDoc"));
+    QCOMPARE(docRows.size(), 1);
+    QCOMPARE(fullLabelTexts(docRows.first(), QStringLiteral("kbDocName")).value(0),
+             QStringLiteral("变压器运行规程.pdf"));
+
+    QSignalSpy reindex(m_chart.data(), &gs::ChartWidget::kbDocumentReindexRequested);
+    QPushButton *rebuild = buttonByText(docRows.first(), QStringLiteral("重建"));
+    QVERIFY(rebuild);
+    rebuild->click();
+    QCOMPARE(reindex.count(), 1);
+    QCOMPARE(reindex.at(0).at(0).toString(), QStringLiteral("d1"));
+
+    QSignalSpy removed(m_chart.data(), &gs::ChartWidget::kbDocumentDeleteRequested);
+    QPushButton *remove = buttonByText(docRows.first(), QStringLiteral("删除"));
+    QVERIFY(remove);
+    answerConfirmLater(m_chart.data(), QStringLiteral("移除"));
+    remove->click();
+    QCOMPARE(removed.count(), 1);
+    QCOMPARE(removed.at(0).at(0).toString(), QStringLiteral("d1"));
+}
+
+// 知识库检索试跑：回车发 kbSearchRequested；回填后「参数命中」「文本命中」两块都渲染
+void TestChartWidget::kbPanelSearch()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("kb"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("kbPanel"));
+    QVERIFY(panel);
+    m_chart->setKbLibraries(QVariantList{
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("lib1") },
+                     { QStringLiteral("name"), QStringLiteral("调度手册") },
+                     { QStringLiteral("documents"), 2 },
+                     { QStringLiteral("chunks"), 40 } } });
+    QTest::qWait(20);
+
+    QLineEdit *query = m_chart->findChild<QLineEdit *>(QStringLiteral("kbQuery"));
+    QVERIFY(query);
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::kbSearchRequested);
+    query->setText(QStringLiteral("首层高度"));
+    QTest::keyClick(query, Qt::Key_Return);
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("lib1"));
+    QCOMPARE(spy.at(0).at(1).toString(), QStringLiteral("首层高度"));
+
+    const QVariantMap paramHit{
+        { QStringLiteral("name"), QStringLiteral("首层高度") },
+        { QStringLiteral("domain"), QStringLiteral("mesh") },
+        { QStringLiteral("description"), QStringLiteral("边界层首层厚度") },
+        { QStringLiteral("default"), 0.02 },
+        { QStringLiteral("doc"), QStringLiteral("CFD 手册") },
+        { QStringLiteral("heading_path"), QStringLiteral("边界层设置") },
+        { QStringLiteral("page"), 12 },
+    };
+    const QVariantMap textHit{
+        { QStringLiteral("score"), 0.87 },
+        { QStringLiteral("doc"), QStringLiteral("CFD 手册") },
+        { QStringLiteral("snippet"), QStringLiteral("首层高度一般取第一层网格高度的 1.2 倍") },
+        { QStringLiteral("heading_path"),
+          QStringLiteral("边界层 / 网格") },
+        { QStringLiteral("page"), 9 },
+        { QStringLiteral("chunk_id"), QStringLiteral("c9") },
+    };
+    QVariantMap result;
+    result.insert(QStringLiteral("params"), QVariantList{ paramHit });
+    result.insert(QStringLiteral("hits"), QVariantList{ textHit });
+    m_chart->setKbSearchResult(result);
+    QTest::qWait(30);
+
+    QCOMPARE(labelTexts(panel, QStringLiteral("kbResultHead")),
+             QStringList({ QStringLiteral("参数命中"), QStringLiteral("文本命中") }));
+    QCOMPARE(widgetsByClass(panel, QStringLiteral("kbResultCard")).size(), 2);
+    QVERIFY(labelTexts(panel, QStringLiteral("kbResultTitle")).contains(
+        QStringLiteral("首层高度")));
+    QVERIFY(labelTexts(panel, QStringLiteral("kbResultBody"))
+                .join(QStringLiteral("|"))
+                .contains(QStringLiteral("边界层首层厚度")));
+}
+
+// 审批卡的 JSON 参数表格编辑：点「表格」开 #jsonEditor，改单元格后「应用到参数」把新 JSON 写回输入框
+void TestChartWidget::jsonTableEditor()
+{
+    QString inner = QStringLiteral("[{\"name\":\"nose\",\"domain\":[{\"angle\":10}]}]");
+    inner.replace(QLatin1Char('"'), QLatin1String("\\\""));
+    const QString content =
+        QStringLiteral("```json\n{\"tool_params\":{\"tool\":\"cfd_mesh\",\"params\":["
+                       "{\"name\":\"nose\",\"value\":\"%1\",\"description\":\"网格参数\"}]}}\n```")
+            .arg(inner);
+    m_chart->appendAssistantMessage(content);
+    QTest::qWait(30);
+
+    QWidget *card = choiceCard();
+    QVERIFY(card && card->isVisible());
+    QWidget *tableButton = widgetByClass(card, QStringLiteral("paramJsonBtn"));
+    QVERIFY(tableButton);
+    QWidget *holder = tableButton->parentWidget();
+    QVERIFY(holder);
+    QLineEdit *input = holder->findChild<QLineEdit *>();
+    QVERIFY(input);
+    QVERIFY2(input->text().contains(QStringLiteral("nose")), qPrintable(input->text()));
+
+    // 表格编辑器是模态 exec()：在 0 延时的嵌套事件循环里改单元格并点「应用到参数」
+    bool editorSeen = false;
+    int editorRows = 0;
+    QString firstColumnHeader;
+    QTimer::singleShot(0, m_chart.data(), [&] {
+        auto *editor = m_chart->findChild<QDialog *>(QStringLiteral("jsonEditor"));
+        if (!editor)
+            return;
+        editorSeen = true;
+        auto *table = editor->findChild<QTableWidget *>(QStringLiteral("jsonEditorTable"));
+        if (!table || table->columnCount() < 2)
+            return;
+        editorRows = table->rowCount();
+        QTableWidgetItem *header = table->horizontalHeaderItem(1);
+        firstColumnHeader = header ? header->text() : QString();
+        if (QTableWidgetItem *cell = table->item(0, 1))
+            cell->setText(QStringLiteral("20"));
+        for (QPushButton *button : editor->findChildren<QPushButton *>()) {
+            if (button->text() == QStringLiteral("应用到参数")) {
+                button->click();
+                return;
+            }
+        }
+    });
+    qobject_cast<QPushButton *>(tableButton)->click();
+    QTest::qWait(30);
+
+    QVERIFY2(editorSeen, "点「表格」应打开 #jsonEditor 对话框");
+    QCOMPARE(editorRows, 1);
+    QCOMPARE(firstColumnHeader, QStringLiteral("angle"));
+
+    // 写回的是新 JSON（单元格里的 10 改成 20），而输入框里的原文必须已经换掉
+    QVERIFY2(input->text().contains(QStringLiteral("\"angle\": 20")), qPrintable(input->text()));
+    QVERIFY(!input->text().contains(QStringLiteral("\"angle\": 10")));
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(input->text().toUtf8(), &error);
+    QCOMPARE(error.error, QJsonParseError::NoError);
+    QVERIFY(doc.isArray());
+    QVERIFY(input->text().contains(QStringLiteral("nose")));
+}
+
+// 结束类选项：label 命中收尾措辞只发 endTurnRequested、不开新一轮；
+// 含「继续」的措辞一票否决，仍按普通选择走 optionChosen
+void TestChartWidget::endTurnOptionChosen()
+{
+    const auto showOptions = [this](const QString &label, const QString &value) {
+        const QString content =
+            QStringLiteral("```json\n{\"question\":\"这一轮还要继续吗？\",\"options\":["
+                           "{\"label\":\"%1\",\"value\":\"%2\"}]}\n```")
+                .arg(label, value);
+        m_chart->appendAssistantMessage(content);
+        QTest::qWait(30);
+    };
+
+    // value 故意给一个不在结束白名单里的值：证明是 label 命中的
+    showOptions(QStringLiteral("本轮到此结束"), QStringLiteral("keep-going"));
+    QWidget *card = choiceCard();
+    QVERIFY(card && card->isVisible());
+
+    QSignalSpy endSpy(m_chart.data(), &gs::ChartWidget::endTurnRequested);
+    QSignalSpy optionSpy(m_chart.data(), &gs::ChartWidget::optionChosen);
+    clickWidget(choiceItemByText(card, QStringLiteral("本轮到此结束")));
+    QCOMPARE(endSpy.count(), 1);
+    QCOMPARE(endSpy.at(0).at(0).toString(), QStringLiteral("本轮到此结束"));
+    QCOMPARE(optionSpy.count(), 0); // 不开新一轮
+    waitOverlayClosed();
+    QVERIFY(!card->isVisible());
+
+    // 「继续」一票否决：这不是收尾，还是普通选择
+    showOptions(QStringLiteral("停止当前步骤，继续下一个"), QStringLiteral("next-step"));
+    QVERIFY(card->isVisible());
+    clickWidget(choiceItemByText(card, QStringLiteral("停止当前步骤，继续下一个")));
+    QCOMPARE(endSpy.count(), 1);
+    QCOMPARE(optionSpy.count(), 1);
+    QCOMPARE(optionSpy.at(0).at(0).toString(), QStringLiteral("next-step"));
+    QCOMPARE(optionSpy.at(0).at(1).toString(), QStringLiteral("停止当前步骤，继续下一个"));
+}
+
+// 重连重放：setHistory 末尾未作答的询问会弹浮层；同一批 messages 带 resume=true 时不许弹
+void TestChartWidget::historyResumeSuppressesAsk()
+{
+    QVariantMap askFunction;
+    askFunction.insert(QStringLiteral("name"), QStringLiteral("ask_user_question"));
+    askFunction.insert(
+        QStringLiteral("arguments"),
+        QStringLiteral("{\"question\":\"这轮按哪个方案收尾？\",\"options\":["
+                       "{\"label\":\"按方案 A 收尾\",\"value\":\"a\"}]}"));
+    QVariantMap askCall;
+    askCall.insert(QStringLiteral("id"), QStringLiteral("call_ask"));
+    askCall.insert(QStringLiteral("function"), askFunction);
+
+    QVariantMap user;
+    user.insert(QStringLiteral("role"), QStringLiteral("user"));
+    user.insert(QStringLiteral("content"), QStringLiteral("按方案 A 处理"));
+
+    QVariantMap assistant;
+    assistant.insert(QStringLiteral("role"), QStringLiteral("assistant"));
+    assistant.insert(QStringLiteral("content"), QStringLiteral("改完了，确认一下是否收尾。"));
+    assistant.insert(QStringLiteral("tool_calls"), QVariant(QVariantList{ askCall }));
+
+    const QVariantList history{ user, assistant };
+    QSignalSpy openSpy(m_chart.data(), &gs::ChartWidget::choiceOpenChanged);
+
+    m_chart->setHistory(history);
+    QTest::qWait(30);
+    QWidget *card = choiceCard();
+    QVERIFY(card && card->isVisible());
+    QVERIFY(choiceItemByText(card, QStringLiteral("按方案 A 收尾")));
+    QVERIFY(!openSpy.isEmpty());
+    QCOMPARE(openSpy.last().at(0).toBool(), true);
+
+    // 重连：末尾询问已经被本轮 user 消息回答过，不能再当待答弹出来
+    m_chart->setHistory(history, true);
+    waitOverlayClosed();
+    QVERIFY(!card->isVisible());
+    QCOMPARE(openSpy.last().at(0).toBool(), false);
+}
+
+// 顶栏品牌图标：从 QLabel 换成 QPushButton 后点击仍发 launchAppRequested
+void TestChartWidget::brandMarkLaunchesApp()
+{
+    auto *mark = qobject_cast<QPushButton *>(
+        m_chart->findChild<QWidget *>(QStringLiteral("brandMark")));
+    QVERIFY2(mark, "brandMark 应该是可点的 QPushButton");
+    QVERIFY(mark->isVisible());
+    QCOMPARE(mark->toolTip(), QStringLiteral("打开 GridStar"));
+
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::launchAppRequested);
+    clickWidget(mark);
+    QCOMPARE(spy.count(), 1);
+}
+
+// 模型页：状态行的「更新模型信息」发 modelMetadataRefreshRequested；
+// 新增模型后 webui 会拉它的上限（modelLimitsResolveRequested）
+void TestChartWidget::modelMetadataSignals()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->setSettingsDraft(settingsDraftFixture(), 1);
+    m_chart->openSettings(QStringLiteral("models"));
+    QTest::qWait(50);
+
+    QWidget *dialog = m_chart->findChild<QWidget *>(QStringLiteral("settingsDialog"));
+    QVERIFY(dialog);
+    QCOMPARE(widgetsByClass(dialog, QStringLiteral("settingsModel")).size(), 1);
+
+    QPushButton *refresh = buttonByText(dialog, QStringLiteral("更新模型信息"));
+    QVERIFY(refresh);
+    QSignalSpy refreshSpy(m_chart.data(), &gs::ChartWidget::modelMetadataRefreshRequested);
+    refresh->click();
+    QCOMPARE(refreshSpy.count(), 1);
+
+    QLineEdit *manual = nullptr;
+    for (QLineEdit *edit : dialog->findChildren<QLineEdit *>()) {
+        if (edit->placeholderText() == QStringLiteral("手动输入模型 ID"))
+            manual = edit;
+    }
+    QVERIFY(manual);
+    QPushButton *add = buttonByText(manual->parentWidget(), QStringLiteral("添加"));
+    QVERIFY(add);
+
+    QSignalSpy resolveSpy(m_chart.data(), &gs::ChartWidget::modelLimitsResolveRequested);
+    manual->setText(QStringLiteral("gs-mini-8k"));
+    add->click();
+    QTest::qWait(30);
+
+    // 模型真的加进去了（行式表单多出第二张卡）
+    QCOMPARE(widgetsByClass(dialog, QStringLiteral("settingsModel")).size(), 2);
+    QVERIFY(labelTexts(dialog, QStringLiteral("settingsModelId"))
+                .contains(QStringLiteral("gs-mini-8k")));
+
+    // 新增模型后 webui 会立刻拉它的上限（app.js fillModelLimits → resolve）
+    QCOMPARE(resolveSpy.count(), 1);
+    QCOMPARE(resolveSpy.at(0).at(0).toString(), QStringLiteral("gridstar"));
+    QCOMPARE(resolveSpy.at(0).at(1).toString(), QStringLiteral("gs-mini-8k"));
+}
+
+// 设置中心被打开要告知宿主（含 Tab 名）：以前用户点控件自带的设置按钮那一路宿主无感
+void TestChartWidget::settingsOpenedNotified()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->closeSettings();
+    QTest::qWait(20);
+
+    QSignalSpy opened(m_chart.data(), &gs::ChartWidget::settingsOpened);
+    m_chart->openSettings(QStringLiteral("kb"));
+    QTest::qWait(30);
+    QCOMPARE(opened.count(), 1);
+    QCOMPARE(opened.at(0).at(0).toString(), QStringLiteral("kb"));
+
+    // 不指定 Tab 时报告当前停留的那个
+    m_chart->openSettings(QStringLiteral("memory"));
+    QTest::qWait(30);
+    m_chart->openSettings(QString());
+    QTest::qWait(30);
+    QCOMPARE(opened.count(), 3);
+    QCOMPARE(opened.at(2).at(0).toString(), QStringLiteral("memory"));
+}
+
+// 目录导入要带上当前选中的归档目录（旧信号无权传递，老宿主会一律落库根）
+void TestChartWidget::kbDirImportCarriesFolder()
+{
+    m_chart->setConfigLoaded(true);
+    m_chart->openSettings(QStringLiteral("kb"));
+    QTest::qWait(50);
+
+    QWidget *panel = m_chart->findChild<QWidget *>(QStringLiteral("kbPanel"));
+    QVERIFY(panel);
+
+    m_chart->setKbLibraries(QVariantList{
+        QVariantMap{ { QStringLiteral("id"), QStringLiteral("lib1") },
+                     { QStringLiteral("name"), QStringLiteral("调度手册") },
+                     { QStringLiteral("documents"), 2 },
+                     { QStringLiteral("chunks"), 40 } } });
+    QTest::qWait(20);
+
+    QVariantMap tree;
+    tree.insert(QStringLiteral("documents"), 0);
+    tree.insert(QStringLiteral("children"),
+                QVariantList{ QVariantMap{
+                    { QStringLiteral("id"), QStringLiteral("f1") },
+                    { QStringLiteral("name"), QStringLiteral("一次设备") },
+                    { QStringLiteral("total"), 0 },
+                    { QStringLiteral("depth"), 0 },
+                    { QStringLiteral("children"), QVariantList{} } } });
+    const QVariantList folders{ QVariantMap{
+        { QStringLiteral("id"), QStringLiteral("f1") },
+        { QStringLiteral("name"), QStringLiteral("一次设备") },
+        { QStringLiteral("parent_id"), QString() },
+        { QStringLiteral("depth"), 0 } } };
+    m_chart->setKbFolders(folders, tree);
+    QTest::qWait(30);
+
+    const QList<QWidget *> rows = widgetsByClass(panel, QStringLiteral("kbTreeRow"));
+    QVERIFY(rows.size() >= 3);
+    clickWidget(rows.at(2)); // 切到「一次设备」
+    QTest::qWait(20);
+
+    QLineEdit *dirInput = panel->findChild<QLineEdit *>(QStringLiteral("kbDirInput"));
+    QVERIFY(dirInput);
+    QPushButton *importBtn = buttonByText(panel, QStringLiteral("导入目录"));
+    QVERIFY(importBtn);
+
+    QSignalSpy spy(m_chart.data(), &gs::ChartWidget::kbDirImportToFolderRequested);
+    dirInput->setText(QStringLiteral("D:\\资料\\一次设备"));
+    importBtn->click();
+    QTest::qWait(30);
+
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toString(), QStringLiteral("lib1"));
+    QCOMPARE(spy.at(0).at(1).toString(), QStringLiteral("D:\\资料\\一次设备"));
+    QCOMPARE(spy.at(0).at(2).toString(), QStringLiteral("f1"));
 }
 
 int main(int argc, char *argv[])

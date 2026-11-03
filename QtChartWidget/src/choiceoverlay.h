@@ -40,6 +40,9 @@ public:
     QString approvalCallId() const { return m_approvalCallId; }
     void setApprovalResolved(const QString &callId, bool approved);
     void reEnableApproval(const QString &callId);
+    // 退回「未提交」：卡片锁死后宿主没收下这次选择（例如上一轮还在收尾）时用，
+    // 让用户能重新选一次而不是对着锁死的卡干瞪眼（webui 5948605）
+    void resetSubmitted();
 
     // 折叠/展开（点标题行）
     void toggleCollapsed();
@@ -82,7 +85,9 @@ private:
     void rebuild();
     // 正文（问题/参数/选项）在可滚动区里：按当前宽度把它的自然高度定下来，
     // 卡片放不下时出滚动条，而不是把内容压扁裁掉
-    void syncBodyHeight();
+    void syncBodyHeight(int knownWidth = -1);
+    // 根布局的内边距（高度预算要用）
+    QMargins margins() const;
     void paintSelection(int index);
     void submit();
     void activate(int index);
