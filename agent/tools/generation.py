@@ -62,7 +62,7 @@ def GenerateSurMeshBySpitAssemblyGroupProperty(ids: str, targetSize: float, minS
     """根据分部件分组的属性生成表面网格.
 
     Args:
-        ids: 选择的超面 ID,例如"5,6,7".
+        ids: 选择的超面 ID,例如"5,6,7".默认值为"0"
         targetSize: 全局目标尺寸.
         minSize: 全局最小尺寸.
         adaptAngle: 曲率自适应角度.
