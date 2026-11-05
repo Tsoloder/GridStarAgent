@@ -16,6 +16,12 @@ import pytest
 import memory_store
 import tool_memory
 from config import MemoryConfig
+from experience_extractor import (
+    ExperienceExtractor,
+    ExtractionQueue,
+    load_state,
+    save_state,
+)
 from experience_memory import MemoryStore
 from memory_store import MemoryFault, MemoryService
 
@@ -78,15 +84,37 @@ class FakeLedger:
         self.plan = plan or {}
 
 
+class FakeQueue:
+    """只记录投递、由测试决定成败的队列替身。
+
+    真的 ``ExtractionQueue`` 没 ``start`` 时一律拒收，那样观察不到水位推进；
+    这里把“收不收”变成一个显式开关。
+    """
+
+    def __init__(self, *, accept=True):
+        self.accept = accept
+        self.submissions = []
+        self.stats = {}
+
+    def submit(self, session_id, ledger, *, trigger="", focus="", skills=(), watermark=0):
+        self.submissions.append({
+            "session_id": session_id,
+            "trigger": trigger,
+            "watermark": watermark,
+            "calls": len(list((ledger or {}).get("calls") or [])),
+        })
+        return self.accept
+
+
 # --------------------------------------------------------------- 摘要与状态
 
 
-def test_summary_reports_shadow_stage_and_counts(service, store):
-    """影子期必须在返回值里说清楚，否则界面会以为开关已经生效。"""
+def test_summary_reports_live_stage_and_counts(service, store):
+    """注入期必须在返回值里说清楚：只有审核通过的记录会进请求。"""
     _candidate(store)
     summary = service.summary()
-    assert summary["stage"] == "shadow"
-    assert "不会自动注入" in summary["notice"]
+    assert summary["stage"] == "live"
+    assert "候选区的记录不会被注入" in summary["notice"]
     assert summary["enabled"] is True
     assert summary["experience"]["candidate"] == 1
     assert summary["store"]["status"] == "healthy"
@@ -529,3 +557,286 @@ def test_audit_tail_is_exposed_without_payloads(service, store):
     assert entries
     assert {"ts", "item_kind", "item_id", "action", "reason"} <= set(entries[0])
     assert "质量检查" not in json.dumps(entries, ensure_ascii=False)
+
+
+# --------------------------------------------------- 轮次水位与参数记忆开关
+
+
+def _service_with_state_root(tmp_path, store, queue):
+    """把带断点目录的提炼器接进门面，好观察水位落到哪个文件。"""
+
+    def root(session_id):
+        path = tmp_path / "sessions" / session_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    extractor = ExperienceExtractor(store, state_root=root)
+    service = MemoryService(store, extractor=extractor, queue=queue)
+    _, reader, writer = _config_io()
+    service.bind_config(reader, writer)
+    return service, root
+
+
+def test_schedule_after_turn_advances_the_watermark_once(tmp_path, store, tool_dir):
+    queue = FakeQueue()
+    service, root = _service_with_state_root(tmp_path, store, queue)
+    save_state("s1", {"last_watermark": 0}, root=root)
+    ledger = {"calls": [{"tool": "DealWatertight"}], "plan": {}}
+
+    assert service.schedule_after_turn("s1", ledger, turn_count=10) is True
+    assert int(load_state("s1", root=root)["last_watermark"]) == 10
+    # 水位不落盘的后果：11 轮之后每一轮都会再提炼一次，job_key 里带
+    # watermark=turn_count，幂等层根本拦不住。
+    assert service.schedule_after_turn("s1", ledger, turn_count=11) is False
+    assert len(queue.submissions) == 1
+    assert queue.submissions[0]["watermark"] == 10
+
+
+def test_dropped_job_does_not_advance_the_watermark(tmp_path, store, tool_dir):
+    """队列满被丢掉的 job 必须下一轮还能重试，不能先记水位。"""
+    queue = FakeQueue(accept=False)
+    service, root = _service_with_state_root(tmp_path, store, queue)
+    save_state("s1", {"last_watermark": 0}, root=root)
+
+    assert service.schedule_after_turn(
+        "s1", {"calls": [{"tool": "DealWatertight"}], "plan": {}}, turn_count=10
+    ) is False
+    assert int(load_state("s1", root=root)["last_watermark"]) == 0
+
+
+def test_master_switch_silences_parameter_memory(tool_dir):
+    """总开关必须盖住唯一真正进提示词的那部分记忆。"""
+    schema = {"type": "object", "properties": {"tol": {"type": "number", "default": 0.5}}}
+    tool_memory.configure(True)
+    try:
+        tool_memory.remember("DealWatertight", {"tol": 0.1})
+        assert "tol" in tool_memory.merge("DealWatertight", {}, schema)
+        assert "DealWatertight" in tool_memory.catalog()
+
+        tool_memory.configure(False)
+        assert tool_memory.enabled() is False
+        assert tool_memory.catalog() == ""
+        # schema 默认值照旧应用，只是记忆层不再参与
+        assert tool_memory.merge("DealWatertight", {}, schema) == {"tol": 0.5}
+        assert tool_memory.remember("DealWatertight", {"tol": 0.2}) == {}
+        # 旧数据保持可读可改，否则设置页关掉之后就清理不了
+        assert tool_memory.get("DealWatertight") == {"tol": 0.1}
+        assert tool_memory.catalog_all()["field_count"] == 1
+        assert tool_memory.set_field("DealWatertight", "tol", 0.3)["ok"] is True
+    finally:
+        tool_memory.configure(True)
+    assert "DealWatertight" in tool_memory.catalog()
+
+
+def test_patch_config_drives_the_parameter_memory_switch(service):
+    try:
+        assert tool_memory.enabled() is True
+        service.patch_config({"enabled": False})
+        assert tool_memory.enabled() is False
+        service.patch_config({"enabled": True})
+        assert tool_memory.enabled() is True
+    finally:
+        tool_memory.configure(True)
+
+
+def test_refresh_config_follows_a_replaced_config(store, tool_dir):
+    """``POST /config`` 整体换掉配置对象，门面必须重新读一遍。"""
+    state, reader, writer = _config_io()
+    service = MemoryService(store)
+    service.bind_config(reader, writer)
+    try:
+        assert tool_memory.enabled() is True
+        # 绕过 patch_config，直接换掉配置对象：这正是 update_config 的做法
+        state["memory"] = dataclasses.replace(state["memory"], enabled=False)
+
+        config = service.refresh_config()
+
+        assert config.enabled is False
+        assert service.config.enabled is False
+        assert tool_memory.enabled() is False
+        assert service.extractor.extract_experience is False
+    finally:
+        tool_memory.configure(True)
+
+
+# --------------------------------------------------------------- 注入与直授
+
+
+def test_prompt_block_injects_only_approved(service, store):
+    """候选与已停用的一律不进块；只有真正进了文本的才计一次曝光。"""
+    approved = _candidate(store, title="质量检查超标时先做局部加密处理")
+    store.transition(approved, "approve")
+    candidate = _candidate(
+        store,
+        title="导出前先确认导出目录存在",
+        trigger_cues=["准备导出网格"],
+        strategy_steps=["先确认目录"],
+    )
+    deprecated = _candidate(
+        store,
+        title="旧版的全量重划做法",
+        trigger_cues=["网格质量差"],
+        strategy_steps=["全量重划"],
+    )
+    store.transition(deprecated, "approve")
+    store.transition(deprecated, "deprecate")
+
+    block = service.build_prompt_block(query="质量检查", task_type="mesh_quality")
+
+    assert "<experience_memory>" in block
+    assert "质量检查超标时先做局部加密处理" in block
+    assert "导出前先确认导出目录存在" not in block
+    assert "旧版的全量重划做法" not in block
+    assert store.get(approved)["exposure_count"] == 1
+    assert store.get(candidate)["exposure_count"] == 0
+    assert store.get(deprecated)["exposure_count"] == 0
+
+
+def test_prompt_block_respects_the_char_budget(service, store):
+    for index in range(3):
+        item_id = _candidate(
+            store, title="第%d条经验：质量检查超标后的局部处理顺序说明" % index
+        )
+        store.transition(item_id, "approve")
+
+    block = service.build_prompt_block(
+        query="质量检查", task_type="mesh_quality", budget_chars=420
+    )
+
+    assert block
+    assert len(block) <= 420
+    # 超预算按整条丢，绝不能留下半个标签
+    assert block.count("<item ") == block.count("</item>")
+
+
+def test_prompt_block_is_silent_when_switched_off(service, store):
+    item_id = _candidate(store)
+    store.transition(item_id, "approve")
+
+    service.patch_config({"enabled": False})
+    try:
+        assert service.build_prompt_block(query="质量检查", task_type="mesh_quality") == ""
+    finally:
+        service.patch_config({"enabled": True})
+
+    service.patch_config({"experience_inject": False, "fact_inject": False})
+    try:
+        assert service.build_prompt_block(query="质量检查", task_type="mesh_quality") == ""
+    finally:
+        service.patch_config({"experience_inject": True, "fact_inject": True})
+
+
+def test_prompt_block_carries_facts_in_their_own_block(service, store):
+    fact_id = store.add_item({
+        "kind": "fact",
+        "scope": "global",
+        "task_type": "environment",
+        "fact_text": "导出目录习惯放在工程根目录下的 exports",
+        "fact_type": "user_preference",
+        "source_kind": "user_correction",
+    })["id"]
+    store.transition(fact_id, "approve")
+
+    block = service.build_prompt_block(query="导出目录")
+
+    assert "<memory_facts>" in block
+    assert "<experience_memory>" not in block
+    assert 'type="user_preference"' in block
+    assert "exports" in block
+
+
+def test_create_experience_lands_approved_and_recallable(service, store):
+    record = {
+        "title": "水密检查失败时先看自由边计数",
+        "scope": "global",
+        "task_type": "watertight_repair",
+        "trigger_cues": ["水密工具报错"],
+        "strategy_steps": ["先查自由边", "修复后复审"],
+    }
+    created = service.create_experience(record)
+
+    assert created["status"] == "approved"
+    assert created["source_kind"] == "manual_curated"
+    hits = store.recall(
+        query="水密检查", scopes=["global"], task_type="watertight_repair"
+    )
+    assert [hit["item"]["id"] for hit in hits] == [created["id"]]
+
+    # 同一条再提一次：指纹已存在，返回已有记录并标明 duplicate
+    again = service.create_experience(dict(record))
+    assert again["duplicate"] is True
+    assert again["id"] == created["id"]
+
+
+def test_create_experience_rejects_illegal_input(service):
+    with pytest.raises(MemoryFault) as scope_error:
+        service.create_experience({"title": "非法作用域", "scope": "team:x"})
+    assert scope_error.value.code == "invalid_request"
+
+    with pytest.raises(MemoryFault) as status_error:
+        service.create_experience({"title": "非法状态", "status": "deprecated"})
+    assert status_error.value.code == "invalid_request"
+
+    with pytest.raises(MemoryFault) as title_error:
+        service.create_experience({"scope": "global"})
+    assert title_error.value.code == "invalid_request"
+
+
+# ------------------------------------------------------------ 运行时引用计数
+
+
+def test_bind_runtime_guard_forwards_to_the_queue(service):
+    def acquire(runtime):
+        return None
+
+    async def release(runtime):
+        return None
+
+    service.bind_runtime_guard(acquire, release)
+
+    assert service.queue._acquire is acquire
+    assert service.queue._release is release
+
+
+def test_bind_runtime_guard_tolerates_a_queue_stand_in(store, tool_dir):
+    """测试里的队列替身没有这个钩子，门面不能因此报错。"""
+    service = MemoryService(store, queue=FakeQueue())
+    service.bind_runtime_guard(lambda runtime: None, lambda runtime: None)
+
+
+def test_queue_guards_the_runtime_on_both_paths():
+    """成功与异常两条路径都必须 acquire 一次、release 一次。"""
+
+    class _ScriptedExtractor:
+        def __init__(self, outcome):
+            self.runtime = object()
+            self.outcome = outcome
+
+        async def extract_session(self, session_id, ledger, **kwargs):
+            if isinstance(self.outcome, BaseException):
+                raise self.outcome
+            return dict(self.outcome)
+
+    async def scenario(outcome):
+        calls = []
+
+        def acquire(runtime):
+            calls.append(("acquire", runtime))
+
+        async def release(runtime):
+            calls.append(("release", runtime))
+
+        extractor = _ScriptedExtractor(outcome)
+        queue = ExtractionQueue(extractor)
+        queue.bind_runtime_guard(acquire, release)
+        queue.start()
+        queue.submit("sess-g1", {"calls": []})
+        await asyncio.wait_for(queue._queue.join(), timeout=5)
+        await queue.stop()
+        return calls, extractor.runtime
+
+    calls, runtime = asyncio.run(scenario({"status": "completed", "attempts": 1}))
+    assert calls == [("acquire", runtime), ("release", runtime)]
+
+    failing_calls, failing_runtime = asyncio.run(scenario(RuntimeError("boom")))
+    assert failing_calls == [("acquire", failing_runtime), ("release", failing_runtime)]

@@ -341,6 +341,15 @@ class MemoryStore:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA synchronous=NORMAL")
+            # 只做前向保护：库比当前代码新时拒绝打开，否则新版的列会在旧代码里
+            # 变成「插入失败」，再被包成一句笼统的「经验库暂时不可读」。
+            version_row = conn.execute("PRAGMA user_version").fetchone()
+            current = int(version_row[0]) if version_row is not None else 0
+            if current > SCHEMA_VERSION:
+                conn.close()
+                self._writable = False
+                self._last_error = "SchemaMismatch"
+                raise StoreUnavailable("memory schema is newer than this app")
             conn.executescript(_SCHEMA)
             try:
                 conn.executescript(_FTS_SCHEMA)
@@ -348,7 +357,8 @@ class MemoryStore:
             except sqlite3.Error:
                 # 少数 Python 发行版编不到 FTS5，退化为 LIKE 扫描，功能不消失。
                 self._fts = False
-            conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
+            if current < SCHEMA_VERSION:
+                conn.execute("PRAGMA user_version=%d" % SCHEMA_VERSION)
             conn.commit()
             self._conn = conn
             self._writable = True
@@ -600,21 +610,30 @@ class MemoryStore:
             raise RecordNotFound(item_id)
         return _row_to_item(row)
 
-    def _search_ids(self, query: str, pool: int) -> list[str]:
-        """按关键词取候选 id。FTS5 不可用或中文空召回时退回 LIKE。"""
+    def _search_ids(self, query: str, pool: int) -> tuple[list[str], dict[str, float]]:
+        """按关键词取候选 id，连带 bm25 排名一起返回。
+
+        排名必须跟着查询一起出来：事后再拿命中行的文本反推查询，等于把结果
+        当成了输入，单条命中时 lexical 恒为满分。FTS5 不可用、查询为空或
+        退回 LIKE 时排名为空字典，由调用方把 lexical 当 1.0。
+        """
         fts_query = build_fts_query(query)
         conn = self._connect()
         if self._fts and fts_query:
             try:
                 rows = conn.execute(
-                    "SELECT m.id AS id FROM memory_item_fts f"
+                    "SELECT m.id AS id, bm25(memory_item_fts) AS rank"
+                    " FROM memory_item_fts f"
                     " JOIN memory_item m ON m.rowid = f.rowid"
                     " WHERE memory_item_fts MATCH ?"
                     " ORDER BY bm25(memory_item_fts) LIMIT ?",
                     (fts_query, pool),
                 ).fetchall()
                 if rows:
-                    return [row["id"] for row in rows]
+                    return (
+                        [row["id"] for row in rows],
+                        {row["id"]: float(row["rank"]) for row in rows},
+                    )
             except sqlite3.Error:
                 self._fts = False
         like = "%%%s%%" % query.replace("%", "").replace("_", "")
@@ -623,7 +642,7 @@ class MemoryStore:
             " ORDER BY updated_at DESC LIMIT ?",
             (like, like, pool),
         ).fetchall()
-        return [row["id"] for row in rows]
+        return [row["id"] for row in rows], {}
 
     def list_items(
         self,
@@ -656,7 +675,7 @@ class MemoryStore:
         ids: Optional[list[str]] = None
         text = (q or "").strip()
         if text:
-            ids = self._search_ids(text, 500)
+            ids, _ = self._search_ids(text, 500)
             if not ids:
                 return {
                     "items": [], "total": 0, "page": page, "page_size": page_size,
@@ -953,7 +972,7 @@ class MemoryStore:
         if not scope_set:
             return []
         exclude = set(exclude_ids)
-        ids = self._search_ids(text, RECALL_POOL)
+        ids, ranks = self._search_ids(text, RECALL_POOL)
         if not ids:
             return []
         placeholders = ",".join("?" for _ in ids)
@@ -983,13 +1002,13 @@ class MemoryStore:
             scored.append({"item": item, "overlap": overlap})
         if not scored:
             return []
-        raw = self._raw_ranks(ids)
-        best = min(raw.values()) if raw else 0.0
-        worst = max(raw.values()) if raw else 0.0
+        # bm25 越小越相关，方向与分数相反，归一化后要翻回来。
+        best = min(ranks.values()) if ranks else 0.0
+        worst = max(ranks.values()) if ranks else 0.0
         span = (worst - best) or 1.0
         for entry in scored:
             item = entry["item"]
-            rank = raw.get(item["id"])
+            rank = ranks.get(item["id"])
             lexical = 1.0 if rank is None else 1.0 - (rank - best) / span
             recency = 1.0 / (1.0 + days_since(item["updated_at"]) / 30.0)
             entry["score"] = round(
@@ -1006,29 +1025,31 @@ class MemoryStore:
         scored.sort(key=lambda entry: entry["score"], reverse=True)
         return scored[: max(1, limit)]
 
-    def _raw_ranks(self, ids: Sequence[str]) -> dict[str, float]:
-        fts_query = None
-        if self._fts:
-            with self._lock:
-                row = self._execute(
-                    "SELECT title, search_text FROM memory_item WHERE id = ?", (ids[0],)
-                ).fetchone()
-            if row is not None:
-                fts_query = build_fts_query(row["search_text"][:200])
-        if not self._fts or not fts_query:
-            return {}
+    def recall_facts(
+        self, *, query: str, scopes: Sequence[str], limit: int = 2
+    ) -> list[dict[str, Any]]:
+        """按关键词取已审核的工程事实。没有关键词就返回空。"""
+        text = (query or "").strip()
+        if not text:
+            return []
+        scope_set = {normalize_scope(scope) for scope in scopes}
+        if not scope_set:
+            return []
+        ids, _ = self._search_ids(text, RECALL_POOL)
+        if not ids:
+            return []
         placeholders = ",".join("?" for _ in ids)
         with self._lock:
-            try:
-                rows = self._execute(
-                    "SELECT m.id AS id, bm25(memory_item_fts) AS rank FROM memory_item_fts f"
-                    " JOIN memory_item m ON m.rowid = f.rowid"
-                    " WHERE memory_item_fts MATCH ? AND m.id IN (%s)" % placeholders,
-                    [fts_query] + list(ids),
-                ).fetchall()
-            except StoreUnavailable:
-                return {}
-        return {row["id"]: float(row["rank"]) for row in rows}
+            rows = self._execute(
+                "SELECT * FROM memory_item WHERE kind = ? AND status = ? AND id IN (%s)"
+                % placeholders,
+                [KIND_FACT, STATUS_APPROVED] + ids,
+            ).fetchall()
+        facts = [
+            _row_to_item(row) for row in rows if row["scope"] in scope_set
+        ]
+        facts.sort(key=lambda item: str(item["updated_at"]), reverse=True)
+        return facts[: max(1, int(limit))]
 
     # ------------------------------------------------------------- 治理
 
@@ -1126,8 +1147,6 @@ class MemoryStore:
                 if not (DUPLICATE_HINT_THRESHOLD <= score < MERGE_THRESHOLD):
                     continue
                 for row in (members[i], members[j]):
-                    if "possible_duplicate" in _decode_json(row["payload"], {}):
-                        continue
                     current = conn.execute(
                         "SELECT flags FROM memory_item WHERE id = ?", (row["id"],)
                     ).fetchone()

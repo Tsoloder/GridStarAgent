@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
@@ -77,6 +78,9 @@ MAX_LEDGER_CALLS = 40
 MAX_FOCUS_CHARS = 600
 MAX_PLAN_TITLE_CHARS = 120
 QUEUE_MAXSIZE = 32
+
+#: 重投前的等待。失败往往来自网络或上游限流，立即重试只是把同一个错误再打一遍。
+RETRY_DELAY_SECONDS = 5.0
 KEEP_JOBS_IN_STATE = 20
 
 _EXPERIENCE_TEXT_FIELDS = (
@@ -153,6 +157,23 @@ def save_state(
     except OSError as exc:
         # 断点写不进去不该让提炼失败，最坏情况是重复提炼一次。
         logger.warning("experience state write failed: %s", type(exc).__name__)
+
+
+def mark_watermark(
+    session_id: str, watermark: int, *, root: Optional[Callable[[str], Path]] = None
+) -> None:
+    """把轮次水位写回断点文件。运行期唯一会推进它的入口。"""
+    try:
+        value = int(watermark)
+    except (TypeError, ValueError):
+        return
+    if value <= 0:
+        return
+    state = load_state(session_id, root=root)
+    if int(state.get("last_watermark") or 0) >= value:
+        return
+    state["last_watermark"] = value
+    save_state(session_id, state, root=root)
 
 
 def _prune_jobs(state: dict) -> None:
@@ -816,10 +837,25 @@ class ExtractionQueue:
         self._extractor = extractor
         self._queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
         self._task: Optional[asyncio.Task] = None
+        self._acquire: Optional[Callable[[Any], Any]] = None
+        self._release: Optional[Callable[[Any], Any]] = None
         self._stats = {
             "queued": 0, "completed": 0, "failed": 0, "dropped": 0,
-            "running": False, "last_result": None, "last_error": None,
+            "retried": 0, "running": False, "last_result": None,
+            "last_error": None,
         }
+
+    def bind_runtime_guard(
+        self,
+        acquire: Optional[Callable[[Any], Any]],
+        release: Optional[Callable[[Any], Any]],
+    ) -> None:
+        """接上运行时的引用计数。job 跑的时候必须占一份，否则它会被中途关掉。
+
+        ``release`` 可能是 async，调用处统一用 ``inspect.isawaitable`` 判。
+        """
+        self._acquire = acquire
+        self._release = release
 
     def start(self) -> None:
         if self._task is not None and not self._task.done():
@@ -866,11 +902,19 @@ class ExtractionQueue:
 
     async def _worker(self) -> None:
         while True:
-            session_id, ledger, trigger, focus, skills, watermark = (
-                await self._queue.get()
-            )
+            job = await self._queue.get()
+            session_id, ledger, trigger, focus, skills, watermark = job
             self._stats["running"] = True
+            runtime = None
+            retry = False
             try:
+                # 提炼器手里那份运行时要计进引用计数：保存模型设置时
+                # ``_retire_runtime`` 会先看计数，计数非 0 就只标记待回收，
+                # 不会把这个 job 正在用的 client 当场关掉。
+                if self._acquire is not None:
+                    runtime = getattr(self._extractor, "runtime", None)
+                    if runtime is not None:
+                        self._acquire(runtime)
                 result = await self._extractor.extract_session(
                     session_id, ledger, trigger=trigger, focus=focus,
                     skills=skills, watermark=watermark,
@@ -882,6 +926,9 @@ class ExtractionQueue:
                 else:
                     self._stats["failed"] += 1
                     self._stats["last_error"] = result.get("reason")
+                    # 次数上限由提炼器自己写进断点：它到顶时记 failed_terminal，
+                    # 这里再判一次 attempts，两处一致就停，不会无限循环。
+                    retry = int(result.get("attempts") or 0) < MAX_ATTEMPTS
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
@@ -890,4 +937,36 @@ class ExtractionQueue:
                 logger.warning("experience job failed: %s", type(exc).__name__)
             finally:
                 self._stats["running"] = False
+                await self._release_guard(runtime)
+                # 先重投再 task_done：让 unfinished 计数把重投那条也算进去，
+                # 否则外部等 join() 的调用方会在重投之前就看到队列已空。
+                if retry:
+                    self._requeue(job)
                 self._queue.task_done()
+            if retry:
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+
+    async def _release_guard(self, runtime: Any) -> None:
+        """放掉引用。释放失败不能盖掉 job 本身的结果，更不能让 worker 退出。"""
+        release = self._release
+        if release is None or runtime is None:
+            return
+        try:
+            outcome = release(runtime)
+            if inspect.isawaitable(outcome):
+                await outcome
+        except asyncio.CancelledError:
+            # 关停途中也要把引用放掉，否则那份运行时会永远留在引用表里
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("runtime release failed: %s", type(exc).__name__)
+
+    def _requeue(self, job: tuple) -> bool:
+        """重投同一份 payload。不计 queued，不算新任务；队列满就放弃。"""
+        try:
+            self._queue.put_nowait(job)
+        except asyncio.QueueFull:
+            self._stats["dropped"] += 1
+            return False
+        self._stats["retried"] += 1
+        return True

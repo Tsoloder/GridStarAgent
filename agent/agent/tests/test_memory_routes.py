@@ -66,9 +66,10 @@ def test_summary_is_503_when_service_is_absent(monkeypatch):
     assert response.json()["code"] == "store_unavailable"
 
 
-def test_summary_reports_shadow_stage(client):
+def test_summary_reports_live_stage(client):
     payload = client.get("/memory/summary").json()
-    assert payload["stage"] == "shadow"
+    assert payload["stage"] == "live"
+    assert "候选区的记录不会被注入" in payload["notice"]
     assert payload["enabled"] is True
     assert payload["store"]["path_hint"] == "用户数据目录"
 
@@ -197,6 +198,30 @@ def test_delete_returns_204_then_404(client, service):
     assert response.status_code == 204
     assert response.content == b""
     assert client.delete("/memory/experiences/%s" % item_id).status_code == 404
+
+
+def test_create_route_writes_an_approved_experience(client, service):
+    response = client.post("/memory/experiences", json={
+        "title": "人工录入：水密检查失败先看自由边计数",
+        "scope": "global",
+        "task_type": "watertight_repair",
+        "trigger_cues": ["水密工具报错"],
+        "strategy_steps": ["先查自由边", "修复后复审"],
+    })
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "approved"
+    assert payload["source_kind"] == "manual_curated"
+    # 人工直授不绕过审核：落库即 approved，而是替人把审核那一步做了
+    assert service.store.get(payload["id"])["status"] == "approved"
+
+
+def test_create_route_rejects_missing_title(client):
+    response = client.post("/memory/experiences", json={"scope": "global"})
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "invalid_request"
 
 
 def test_bulk_route_validates_and_reports_partial_success(client, service):

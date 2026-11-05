@@ -1846,3 +1846,230 @@ async def test_done_event_carries_context_usage(tmp_path, monkeypatch):
     assistant = [m for m in messages if m.get("role") == "assistant"][-1]
     assert assistant["usage"]["context_used"] > 0
 
+
+@pytest.mark.asyncio
+async def test_memory_block_lands_in_the_system_prompt(tmp_path, monkeypatch, mock_mcp):
+    """注入块由调用方拼好传进来，agent_loop 只负责把它追加到系统提示末尾。"""
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    import agent_loop
+
+    block = (
+        "<experience_memory>\n"
+        '<item type="experience" task_type="mesh_quality" confidence="0.52">\n'
+        "测试片段：质量检查超标时先做局部加密\n</item>\n</experience_memory>"
+    )
+
+    runtime = _ScriptedRuntime([[_text(_REPLY), _usage(), _done()]])
+    events = [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), "生成面网格", "base", _make_config(),
+        _grouped_mcp(mock_mcp), MockContextManager(), MockSkillRegistry(),
+        model_runtime=runtime, memory_block=block,
+    )]
+
+    assert events[-1]["type"] == "done"
+    assert block in runtime.system_prompts[0]
+    # 没传就不该出现任何空块
+    quiet = _ScriptedRuntime([[_text(_REPLY), _usage(), _done()]])
+    [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), "生成面网格", "base", _make_config(),
+        _grouped_mcp(mock_mcp), MockContextManager(), MockSkillRegistry(),
+        model_runtime=quiet,
+    )]
+    assert "<experience_memory>" not in quiet.system_prompts[0]
+
+
+# -------------------------------------------------------------- remember_memory
+
+
+def _remember_script(kind_args):
+    return [
+        [_tool("c1", "remember_memory", kind_args), _usage(), _done()],
+        [_text(_REPLY), _usage(), _done()],
+    ]
+
+
+async def _run_remember(mock_mcp, tmp_path, monkeypatch, writer, args):
+    import session as session_mod
+
+    monkeypatch.setattr(session_mod, "SESSIONS_DIR", tmp_path)
+    import agent_loop
+
+    runtime = _ScriptedRuntime(_remember_script(args))
+    events = [event async for event in agent_loop.run_agent_loop(
+        _make_session(None), "你要记住：导入数模一律用默认参数", "base",
+        _make_config(), _grouped_mcp(mock_mcp), MockContextManager(),
+        MockSkillRegistry(), model_runtime=runtime, remember_memory=writer,
+    )]
+    return runtime, events
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_writes_through_the_writer(tmp_path, monkeypatch, mock_mcp):
+    captured = []
+
+    def writer(payload):
+        captured.append(payload)
+        return {"ok": True, "status": "created", "id": "fact_abc"}
+
+    runtime, events = await _run_remember(
+        mock_mcp, tmp_path, monkeypatch, writer,
+        {"kind": "fact", "text": "导入数模一律使用默认参数"},
+    )
+
+    # source_kind / status 由 create_experience 决定，工具层不碰
+    assert captured == [{
+        "kind": "fact", "scope": "global",
+        "fact_text": "导入数模一律使用默认参数",
+        "fact_type": "user_preference",
+    }]
+    result = next(event for event in events if event["type"] == "tool_result")
+    assert "已写入长期记忆" in result["result"]
+    assert "fact_abc" in result["result"]
+    # 工具结果必须回到下一轮的 messages，否则模型没法如实回报
+    assert any(
+        "已写入长期记忆" in str(message)
+        for message in runtime.messages[-1]
+    )
+    assert events[-1]["type"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_is_exposed_to_the_model(tmp_path, monkeypatch, mock_mcp):
+    def writer(payload):
+        return {"ok": True, "status": "created", "id": "fact_abc"}
+
+    runtime, _ = await _run_remember(
+        mock_mcp, tmp_path, monkeypatch, writer,
+        {"kind": "fact", "text": "导入数模一律使用默认参数"},
+    )
+
+    assert "remember_memory" in runtime.exposed_tools[0]
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_reports_a_disabled_store(tmp_path, monkeypatch, mock_mcp):
+    def writer(payload):
+        return {"ok": False, "status": "disabled"}
+
+    _, events = await _run_remember(
+        mock_mcp, tmp_path, monkeypatch, writer,
+        {"kind": "fact", "text": "导入数模一律使用默认参数"},
+    )
+
+    result = next(event for event in events if event["type"] == "tool_result")
+    assert "没有写入" in result["result"]
+    assert "已记住" not in result["result"]
+
+
+@pytest.mark.asyncio
+async def test_remember_tool_rejects_a_bad_kind_without_writing(tmp_path, monkeypatch, mock_mcp):
+    captured = []
+
+    def writer(payload):
+        captured.append(payload)
+        return {"ok": True, "status": "created", "id": "fact_abc"}
+
+    _, events = await _run_remember(
+        mock_mcp, tmp_path, monkeypatch, writer,
+        {"kind": "note", "text": "随便记一条"},
+    )
+
+    result = next(event for event in events if event["type"] == "tool_result")
+    assert "kind 只能是" in result["result"]
+    assert captured == []
+    # 参数错误不抛异常，主循环照常走到 done
+    assert events[-1]["type"] == "done"
+
+
+def test_remember_handler_failure_copies():
+    """每条失败文案都要能让模型如实回报，不能留模糊空间。"""
+    import agent_loop
+
+    def echo(payload):
+        return {"ok": True, "status": "duplicate", "id": "fact_dup"}
+
+    duplicate = agent_loop._handle_remember_call(
+        {"kind": "fact", "text": "同一条"}, echo
+    )
+    assert "已经在长期记忆里" in duplicate and "fact_dup" in duplicate
+
+    missing_text = agent_loop._handle_remember_call({"kind": "fact", "text": " "}, echo)
+    assert "text 不能为空" in missing_text
+
+    unavailable = agent_loop._handle_remember_call({"kind": "fact", "text": "x"}, None)
+    assert "长期记忆不可用" in unavailable and "没有写入" in unavailable
+
+    def broken(payload):
+        raise RuntimeError("boom")
+
+    failed = agent_loop._handle_remember_call({"kind": "fact", "text": "x"}, broken)
+    assert "写入失败" in failed and "RuntimeError" in failed
+
+    rejected = agent_loop._handle_remember_call(
+        {"kind": "fact", "text": "x"},
+        lambda payload: {"ok": False, "status": "rejected", "detail": "scope 不合法"},
+    )
+    assert "scope 不合法" in rejected
+
+    # kind=experience 时三个列表字段都截到上限，并清掉空值
+    seen = {}
+    agent_loop._handle_remember_call(
+        {
+            "kind": "experience",
+            "text": "水密失败先查自由边",
+            "when": ["a", "", "b", "c", "d"],
+            "steps": ["先查", " ", "再修"],
+            "tools": ["DealWatertight"],
+            "task_type": "watertight_repair",
+        },
+        lambda payload: seen.update(payload) or {"ok": True, "status": "created", "id": "exp_1"},
+    )
+    assert seen["trigger_cues"] == ["a", "b", "c"]
+    assert seen["strategy_steps"] == ["先查", "再修"]
+    assert seen["tool_sequence"] == ["DealWatertight"]
+    assert "source_kind" not in seen and "status" not in seen
+
+
+def test_remember_tool_caps_writes_per_session(monkeypatch):
+    """模型没有审批门禁，单会话写入必须封顶，否则 approved 池会被灌满。"""
+    import agent_loop
+
+    agent_loop._remember_writes.clear()
+    calls = []
+
+    def writer(payload):
+        calls.append(payload)
+        return {"ok": True, "status": "created", "id": "mem_%d" % len(calls)}
+
+    for index in range(agent_loop.REMEMBER_MAX_PER_SESSION):
+        text = agent_loop._handle_remember_call(
+            {"kind": "fact", "text": "约定 %d" % index}, writer, session_id="s-cap"
+        )
+        assert "已写入长期记忆" in text
+    blocked = agent_loop._handle_remember_call(
+        {"kind": "fact", "text": "约定溢出"}, writer, session_id="s-cap"
+    )
+    assert "上限" in blocked and "没有写入" in blocked
+    assert len(calls) == agent_loop.REMEMBER_MAX_PER_SESSION
+    # 另一条会话不受影响
+    assert "已写入" in agent_loop._handle_remember_call(
+        {"kind": "fact", "text": "另一条会话"}, writer, session_id="s-other"
+    )
+    agent_loop._remember_writes.clear()
+
+
+def test_remember_tool_forces_global_scope():
+    """模型拿不到可信技能 id，填错的 skill scope 会让记忆永远召不回来。"""
+    import agent_loop
+
+    seen = {}
+
+    agent_loop._handle_remember_call(
+        {"kind": "fact", "text": "导入数模用默认参数", "scope": "skill:不存在的技能"},
+        lambda payload: seen.update(payload) or {"ok": True, "status": "created", "id": "f_1"},
+        session_id="s-scope",
+    )
+    assert seen["scope"] == "global"
+    agent_loop._remember_writes.clear()

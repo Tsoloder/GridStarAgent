@@ -128,6 +128,31 @@ def test_facts_stay_out_of_experience_recall(store):
     ) == []
 
 
+def test_recall_facts_returns_only_approved_in_scope(store):
+    approved = _add(store, fact())
+    store.transition(approved, "approve")
+    # 候选不进：与上一条措辞错开，避免指纹去重把两条合成一条
+    _add(store, fact(fact_text="导出网格习惯放在工程根目录下的结果文件夹"))
+    elsewhere = _add(store, fact(
+        scope="skill:cfd-meshing-workflow",
+        fact_text="导出目录在技能里另有约定",
+    ))
+    store.transition(elsewhere, "approve")
+
+    hits = store.recall_facts(query="导出目录", scopes=["global"])
+
+    assert [hit["id"] for hit in hits] == [approved]
+    assert store.recall_facts(query="导出目录", scopes=["skill:cfd-meshing-workflow"])
+
+
+def test_recall_facts_needs_a_query_and_a_scope(store):
+    item_id = _add(store, fact())
+    store.transition(item_id, "approve")
+
+    assert store.recall_facts(query="   ", scopes=["global"]) == []
+    assert store.recall_facts(query="导出目录", scopes=[]) == []
+
+
 def test_recall_requires_metadata_overlap(store):
     item_id = _add(store, experience())
     store.transition(item_id, "approve")
@@ -184,6 +209,74 @@ def test_stale_skill_version_blocks_injection(store):
         task_type="mesh_quality",
         skill_hashes={"cfd-meshing-workflow": "aaaa1111"},
     )
+
+
+def test_search_ids_carries_bm25_ranks_alongside_ids(store):
+    """排名必须跟查询一起出来。
+
+    旧实现用 hit[0] 那行的 search_text 当查询，等于拿结果反推输入：单条命中时
+    lexical 恒为 1.0，多条命中时排序全部取决于命中行自身的措辞。
+    """
+    if not store.fts_available:
+        pytest.skip("当前环境没有可用 FTS5")
+    hit = _add(store, experience())
+    _add(store, experience(
+        title="导出阶段的目录约定",
+        trigger_cues=["准备导出网格"],
+        preconditions=["网格已通过质量检查"],
+        strategy_steps=["先确认导出目录存在"],
+        tool_sequence=["ExportMesh"],
+        failure_patterns=["目录不存在时导出直接失败"],
+    ))
+
+    ids, ranks = store._search_ids("质量检查 局部加密", 20)
+
+    assert isinstance(ids, list) and isinstance(ranks, dict)
+    assert hit in ids
+    assert set(ranks) <= set(ids)
+    assert ranks
+    assert all(isinstance(value, float) for value in ranks.values())
+
+
+def test_recall_lexical_comes_from_the_query(store):
+    if not store.fts_available:
+        pytest.skip("当前环境没有可用 FTS5")
+    strong = _add(store, experience())
+    weak = _add(store, experience(
+        title="质量检查之后的收尾动作",
+        trigger_cues=["质量检查完毕"],
+        preconditions=["已有网格"],
+        strategy_steps=["归档结果"],
+        tool_sequence=["ArchiveMesh"],
+        failure_patterns=[],
+    ))
+    for item_id in (strong, weak):
+        store.transition(item_id, "approve")
+
+    hits = store.recall(
+        query="质量检查 局部加密 超标", scopes=["global"], task_type="mesh_quality"
+    )
+
+    assert len(hits) == 2
+    lexical = [hit["parts"]["lexical"] for hit in hits]
+    assert all(0.0 <= value <= 1.0 for value in lexical)
+    # min-max 归一化之后，bm25 最好的那条就是满分，另一条必须真的掉下来
+    assert max(lexical) == 1.0
+    assert min(lexical) < 1.0
+    assert hits[0]["item"]["id"] == strong
+
+
+def test_recall_without_fts_treats_every_hit_as_equally_lexical(store):
+    item_id = _add(store, experience())
+    store.transition(item_id, "approve")
+    store._fts = False  # 强制降级：LIKE 路径拿不到排名
+
+    hits = store.recall(
+        query="质量检查", scopes=["global"], task_type="mesh_quality"
+    )
+
+    assert hits
+    assert all(hit["parts"]["lexical"] == 1.0 for hit in hits)
 
 
 # --------------------------------------------------------------------------- #
@@ -690,3 +783,26 @@ def test_database_has_expected_schema(store, tmp_path):
         conn.close()
 
     assert {"memory_item", "memory_audit", "memory_counter"} <= tables
+
+
+def test_newer_schema_is_refused_instead_of_written(tmp_path):
+    """库比代码新时停手：硬写会得到一句笼统的“经验库暂时不可读”。"""
+    path = tmp_path / "future.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("PRAGMA user_version=%d" % (em.SCHEMA_VERSION + 1))
+        conn.execute("CREATE TABLE future_only (id TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    store = MemoryStore(path)
+    try:
+        health = store.health()
+        assert health["status"] == "unavailable"
+        assert health["writable"] is False
+        assert health["last_error"] == "SchemaMismatch"
+        with pytest.raises(em.StoreUnavailable):
+            store.list_items()
+    finally:
+        store.close()

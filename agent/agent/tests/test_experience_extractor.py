@@ -733,10 +733,13 @@ def test_queue_drops_when_full_without_blocking(store, state_root):
     assert stats["dropped"] == 1
 
 
-def test_queue_survives_a_failing_job(store, state_root):
+def test_queue_survives_a_failing_job(store, state_root, monkeypatch):
+    # 失败会重投，重投前那 5 秒在测试里没有意义
+    monkeypatch.setattr(ex, "RETRY_DELAY_SECONDS", 0)
+
     async def scenario():
         extractor, _ = _extractor(
-            store, [RuntimeError("boom"), _good_output()], state_root
+            store, [RuntimeError("boom"), _good_output(), _good_output()], state_root
         )
         queue = ex.ExtractionQueue(extractor)
         queue.start()
@@ -751,7 +754,9 @@ def test_queue_survives_a_failing_job(store, state_root):
     stats = asyncio.run(scenario())
 
     assert stats["failed"] == 1
-    assert stats["completed"] == 1
+    # 失败那条被重投后跑成，第二次提交再跑成：两次 completed
+    assert stats["completed"] == 2
+    assert stats["retried"] == 1      # 第一次失败被重投，重投那次跑成了
     assert stats["last_error"] == "RuntimeError"
 
 
@@ -761,3 +766,85 @@ def test_submit_without_start_is_refused(store, state_root):
 
     assert queue.submit("sess-q5", LEDGER, trigger=ex.TRIGGER_MANUAL) is False
     assert queue.stats["queued"] == 0
+
+
+class ScriptedExtractor:
+    """按顺序吐出 ``extract_session`` 返回值，脚本用尽就一直返回 completed。"""
+
+    def __init__(self, results, runtime=None):
+        self.results = list(results)
+        self.runtime = runtime
+        self.calls = 0
+
+    async def extract_session(self, session_id, ledger, **kwargs):
+        self.calls += 1
+        item = self.results.pop(0) if self.results else {
+            "status": "completed", "attempts": 1,
+        }
+        if isinstance(item, BaseException):
+            raise item
+        return dict(item)
+
+
+def test_queue_retries_a_retryable_failure(monkeypatch):
+    """fail_retryable 现在真的会重试：同一个 payload 重投，直到达成或到上限。"""
+    monkeypatch.setattr(ex, "RETRY_DELAY_SECONDS", 0)
+    extractor = ScriptedExtractor([
+        {"status": "failed", "attempts": 1},
+        {"status": "failed", "attempts": 2},
+        {"status": "completed", "attempts": 3},
+    ])
+
+    async def scenario():
+        queue = ex.ExtractionQueue(extractor)
+        queue.start()
+        queue.submit("sess-r1", {"calls": []}, trigger=ex.TRIGGER_MANUAL)
+        await asyncio.wait_for(queue._queue.join(), timeout=5)
+        stats = queue.stats
+        await queue.stop()
+        return stats
+
+    stats = asyncio.run(scenario())
+
+    assert extractor.calls == 3
+    assert stats["retried"] == 2
+    assert stats["completed"] == 1
+    assert stats["failed"] == 2
+
+
+def test_queue_stops_retrying_at_the_attempt_cap(monkeypatch):
+    monkeypatch.setattr(ex, "RETRY_DELAY_SECONDS", 0)
+    extractor = ScriptedExtractor([
+        {"status": "failed", "attempts": ex.MAX_ATTEMPTS},
+    ])
+
+    async def scenario():
+        queue = ex.ExtractionQueue(extractor)
+        queue.start()
+        queue.submit("sess-r2", {"calls": []}, trigger=ex.TRIGGER_MANUAL)
+        await asyncio.wait_for(queue._queue.join(), timeout=5)
+        stats = queue.stats
+        await queue.stop()
+        return stats
+
+    stats = asyncio.run(scenario())
+
+    assert extractor.calls == 1
+    assert stats["retried"] == 0
+    assert stats["failed"] == 1
+
+
+def test_queue_drops_the_retry_when_the_queue_is_full():
+    """重投不能阻塞 worker：满就直接放弃，记一笔 dropped。"""
+
+    async def scenario():
+        queue = ex.ExtractionQueue(ScriptedExtractor([]), maxsize=1)
+        queue._queue.put_nowait(("sess-hold", {}, ex.TRIGGER_MANUAL, "", (), 0))
+        accepted = queue._requeue(("sess-r3", {}, ex.TRIGGER_MANUAL, "", (), 0))
+        return accepted, queue.stats
+
+    accepted, stats = asyncio.run(scenario())
+
+    assert accepted is False
+    assert stats["dropped"] == 1
+    assert stats["retried"] == 0

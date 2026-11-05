@@ -311,6 +311,27 @@ def _memory_config_writer(updates) -> MemoryConfig:
     return current_config.memory
 
 
+def _remember_memory_writer(payload):
+    """remember_memory 的落盘口：把模型写的那条交给人工直授通道。
+
+    与 `_memory_config_writer` 一样是个模块级闭包，只做错误翻译：
+    内置工具拿到的是文案，不是异常。
+    """
+    if _memory is None:
+        return {"ok": False, "status": "unavailable"}
+    if not _memory.enabled:
+        return {"ok": False, "status": "disabled"}
+    try:
+        item = _memory.create_experience(payload)
+    except MemoryFault as exc:
+        return {"ok": False, "status": "rejected", "detail": exc.message[:80]}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("remember_memory failed: %s", type(exc).__name__)
+        return {"ok": False, "status": "error", "detail": type(exc).__name__}
+    return {"ok": True, "status": "duplicate" if item.get("duplicate") else "created",
+            "id": item.get("id")}
+
+
 def _sync_memory_runtime() -> None:
     """把默认模型挂到提炼器上。
 
@@ -345,6 +366,8 @@ async def lifespan(app: FastAPI):
     # 记忆子系统：库坏了不能挡住 Agent 主流程，所以构造与启动都不进 try 的失败分支。
     _memory = MemoryService()
     _memory.bind_config(_memory_config_reader, _memory_config_writer)
+    # 提炼可能正在用当前运行时跑；接上引用计数，保存模型设置时才不会把它关掉。
+    _memory.bind_runtime_guard(_acquire_runtime, _release_runtime)
     _sync_memory_runtime()
     try:
         _memory.start()
@@ -926,6 +949,11 @@ async def update_config(body: dict):
         current_config = candidate
         _model_catalog = candidate_catalog
         _model_runtime = candidate_runtime
+        # 运行时被整体替换后，提炼器手里那份会随旧运行时一起关闭。不重新挂上，
+        # 之后每次提炼都在死客户端上失败，而失败是被吞进 job 状态的。
+        _sync_memory_runtime()
+        if _memory is not None:
+            _memory.refresh_config()
         await _retire_runtime(previous_runtime)
         return {
             "ok": True,
@@ -1042,6 +1070,11 @@ async def memory_experience_delete(item_id: str):
             {"error": "该记录不存在，可能已被删除", "code": "not_found"}, status_code=404
         )
     return Response(status_code=204)
+
+
+@app.post("/memory/experiences")
+async def memory_experience_create(body: dict = None):
+    return _memory_call(MemoryService.create_experience, body or {})
 
 
 @app.post("/memory/experiences/bulk")
@@ -2156,6 +2189,28 @@ async def _run_background_loop(
     bg.started_at = datetime.now().isoformat()
     ledger = TaskLedger(session_id)
 
+    # 记忆注入块在调模型前算好：这里的失败一律不能影响本轮对话，
+    # 所以整体包在 try 里，开关门禁在 build_prompt_block 内部。
+    memory_block = ""
+    if _memory is not None:
+        try:
+            _skill_names = [
+                str(item.get("id") or item.get("name") or "").strip()
+                if isinstance(item, dict) else str(item).strip()
+                for item in (selected_skills or [])
+            ]
+            memory_block = _memory.build_prompt_block(
+                query=message,
+                tool_names=[
+                    str(call.get("tool") or "")
+                    for call in (ledger.calls or [])
+                    if isinstance(call, dict)
+                ],
+                skills=[name for name in _skill_names if name],
+            )
+        except Exception as exc:  # noqa: BLE001 - 记忆是旁路
+            logger.warning("memory prompt block failed: %s", type(exc).__name__)
+
     # 记住本会话的知识库选择：刷新页面或重连后不需要再选一次。
     # 已作废的轮次一律不落盘（与下方持久化策略一致）。
     if not bg.invalidated and getattr(session, "kb_library", None) != kb_library:
@@ -2221,6 +2276,8 @@ async def _run_background_loop(
             model_override=model_id if model_id else None,
             model_runtime=model_runtime if model_runtime is not None else _model_runtime,
             ledger=ledger,
+            memory_block=memory_block,
+            remember_memory=_remember_memory_writer,
         ):
             # 工具调用与返回值日志
             if event["type"] == "tool_call":

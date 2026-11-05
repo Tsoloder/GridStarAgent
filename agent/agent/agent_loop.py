@@ -10,7 +10,7 @@ import secrets
 import time as _time
 from datetime import datetime
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any, AsyncIterator, Mapping
 
 from config import ApiConfig
 from context import ContextManager, MAX_TURNS
@@ -450,11 +450,154 @@ def _list_directory(path_string: str, pattern: str = "", recursive: bool = False
         return "ListDirectoryFiles 失败：%s" % exc
 
 
+REMEMBER_TOOL_NAME = "remember_memory"
+
+REMEMBER_TOOL = RuntimeTool(
+    name=REMEMBER_TOOL_NAME,
+    description=(
+        "把一条跨会话有效的约定写进长期记忆。只在两种情况下调用："
+        "① 用户明确要求记住（「你要记住」「以后都这样」「下次别再问」）；"
+        "② 用户反复纠正同一件事。"
+        "不要用它记录只对本次任务有效的要求、当前工程的参数值、文件名、路径、"
+        "对象 ID、坐标或任何具体数据——这些不是长期记忆。"
+        "kind=fact 用来记稳定的偏好、环境约束、工程长期特征；"
+        "kind=experience 用来记一类任务的做法或固定顺序，并且要给出 when（何时适用）"
+        "与 steps（步骤）。"
+        "写入的是全局记忆（跨技能、跨会话），没有技能级限制。"
+        "同一个会话里最多写 5 条：用户一次给了很多条时，先把最关键的写进来，"
+        "其余让用户到设置页手动添加。"
+        "调用之后必须按工具返回值如实说明：返回成功才可以说「已记住」；"
+        "返回未写入时，必须告诉用户没有记下来。"
+    ),
+    inputSchema={
+        "type": "object",
+        "properties": {
+            "kind": {"type": "string", "enum": ["fact", "experience"],
+                     "description": "fact=稳定事实/偏好/约定；experience=一类任务的做法"},
+            "text": {"type": "string",
+                     "description": "一句话结论，不超过 60 字，不要带文件名、ID、坐标、具体数值"},
+            "fact_type": {"type": "string", "enum": ["user_preference", "environment", "project_trait"],
+                          "description": "kind=fact 时使用，默认 user_preference"},
+            "when": {"type": "array", "items": {"type": "string"},
+                     "description": "kind=experience：什么时候该想起这条，1-3 条"},
+            "steps": {"type": "array", "items": {"type": "string"},
+                      "description": "kind=experience：做法步骤，1-5 条祈使句"},
+            "tools": {"type": "array", "items": {"type": "string"},
+                      "description": "kind=experience：这条做法涉及的 GridStar 工具名，可为空"},
+            "task_type": {"type": "string",
+                          "description": "可选，snake_case 英文任务类型，如 watertight_repair"},
+        },
+        "required": ["kind", "text"],
+    },
+)
+
+#: 工具写入的条数上限（单个会话）。模型没有审批门禁，一次会话里连写十几条
+#: 会把 approved 池灌满，而 approved 的记录不会进合并治理，只能人工删。
+REMEMBER_MAX_PER_SESSION = 5
+_remember_writes: dict[str, int] = {}
+
+
+def _prune_remember_writes() -> None:
+    """会话量大了就丢老账：计数只服务限流，丢一条最多多放行几条。"""
+    if len(_remember_writes) <= 200:
+        return
+    for key in list(_remember_writes)[: len(_remember_writes) - 200]:
+        _remember_writes.pop(key, None)
+
+
+def _clean_text_list(raw: Any, limit: int) -> list[str]:
+    """把模型给的值清成去空的字符串列表，并截到上限。"""
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return []
+    values: list[str] = []
+    for item in raw:
+        text = str(item or "").strip()
+        if text:
+            values.append(text)
+        if len(values) >= limit:
+            break
+    return values
+
+
+def _handle_remember_call(args: Any, writer: Any, *, session_id: str = "") -> str:
+    """把 remember_memory 的参数变成一条长期记忆。
+
+    返回的是给模型看的结果文本，所以失败文案必须清楚到能让它如实告诉用户；
+    参数错误一律返回提示让它自己改，不抛异常、不走审批。
+
+    scope 由这里写死成 ``global``：模型拿不到可信的技能 id，填错一个不存在的
+    技能名不会报错，却会让这条记忆永远被 scope 过滤挡在召回之外。
+    """
+    try:
+        if not isinstance(args, Mapping):
+            return "参数不合法：remember_memory 需要对象形式的参数，请重新调用。"
+        kind = str(args.get("kind") or "").strip()
+        if kind not in ("fact", "experience"):
+            return "kind 只能是 fact 或 experience，请重新调用。"
+        text = str(args.get("text") or "").strip()
+        if not text:
+            return "text 不能为空，请把要记的那句话放进 text。"
+
+        used = _remember_writes.get(session_id, 0) if session_id else 0
+        if session_id and used >= REMEMBER_MAX_PER_SESSION:
+            return (
+                "本次会话已经写入 %d 条记忆，到上限了，这条没有写入。"
+                "请告诉用户其余内容可以在设置页手动添加。" % REMEMBER_MAX_PER_SESSION
+            )
+
+        payload: dict[str, Any] = {"kind": kind, "scope": "global"}
+        if kind == "fact":
+            payload["fact_text"] = text
+            payload["fact_type"] = (
+                str(args.get("fact_type") or "user_preference").strip()
+                or "user_preference"
+            )
+        else:
+            payload["title"] = text
+            payload["task_type"] = str(args.get("task_type") or "").strip()
+            payload["trigger_cues"] = _clean_text_list(args.get("when"), 3)
+            payload["strategy_steps"] = _clean_text_list(args.get("steps"), 5)
+            payload["tool_sequence"] = _clean_text_list(args.get("tools"), 8)
+
+        if writer is None:
+            return "长期记忆不可用，本次没有写入。请如实告诉用户「这条没能记下来」。"
+        outcome = writer(payload)
+        if not isinstance(outcome, Mapping):
+            return "长期记忆不可用，本次没有写入。请如实告诉用户「这条没能记下来」。"
+
+        status = str(outcome.get("status") or "")
+        if outcome.get("ok"):
+            item_id = str(outcome.get("id") or "")
+            if status == "duplicate":
+                return "这条已经在长期记忆里了（id=%s），无需重复写入。" % item_id
+            if session_id:
+                _remember_writes[session_id] = used + 1
+                _prune_remember_writes()
+            return (
+                "已写入长期记忆（id=%s，kind=%s）。以后在相关任务里会作为参考出现，"
+                "不需要再问用户同一件事。" % (item_id, kind)
+            )
+        if status == "disabled":
+            return (
+                "长期记忆已关闭，本次没有写入。"
+                "请如实告诉用户：记忆已关闭，这条没能记下来。"
+            )
+        detail = str(outcome.get("detail") or status or "未知原因").strip()[:80]
+        return "写入失败（%s），本次没有写入。请如实告诉用户没有记下来。" % detail
+    except Exception as exc:  # noqa: BLE001 - 写记忆失败不该打断主循环
+        logger.warning("remember_memory handler failed: %s", type(exc).__name__)
+        return "写入失败（%s），本次没有写入。请如实告诉用户没有记下来。" % (
+            type(exc).__name__
+        )
+
+
 # 计划/技能管理类内置工具：不触发"必须先建计划"拦截，不计入操作类串行限制
 _NON_EXEC_TOOLS = {"read_skill", "read_skill_resource", "create_skill",
                    UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME, ASK_USER_TOOL_NAME,
                    EXPORT_SESSION_TOOL_NAME, SET_CATEGORY_TOOL_NAME,
-                   LIST_DIRECTORY_TOOL_NAME} | kb_tools.KB_TOOL_NAMES
+                   LIST_DIRECTORY_TOOL_NAME, REMEMBER_TOOL_NAME} | kb_tools.KB_TOOL_NAMES
 
 
 def _filter_exposed_tools(all_tools, group_index, exposed_group_ids,
@@ -813,6 +956,8 @@ async def run_agent_loop(
     model_override: str = None,
     model_runtime=None,
     ledger=None,
+    memory_block: str = "",
+    remember_memory=None,
 ) -> AsyncIterator[dict]:
     selected_skills = selected_skills or []
     interaction_mode = "auto" if interaction_mode == "auto" else "manual"
@@ -1013,6 +1158,17 @@ async def run_agent_loop(
             "不能用它们推断当前工程是什么（模型类型、部件划分、工况都必须来自"
             "当前工程的真实数据和截图）。不要用它们「认出」这次在做什么。"
         )
+    # 写记忆的规矩：内容固定（不随会话变化），保护 system 前缀缓存
+    system_parts.append(
+        "<memory_write>\n"
+        "用户明确要求记住某条约定、或反复纠正同一件事时，调用 remember_memory 写入长期记忆。\n"
+        "- 只写跨会话有效的内容：稳定偏好、环境约束、一类任务的做法与顺序。\n"
+        "- 不写：只对本次任务有效的要求、当前工程的参数值、文件名、路径、对象 ID、坐标。\n"
+        "- 用户说「你要记住」但内容里带着具体数值（例如某个尺寸、某个角度）时，把数值剥掉，\n"
+        "  只记\"以后这类操作按默认参数\"这种层级；具体数值让参数记忆去管。\n"
+        "- 只有工具返回成功之后才能说「已记住」。返回未写入时，必须明确告诉用户没有记下来。\n"
+        "</memory_write>"
+    )
     # 工具发现机制说明：内容固定（不随已启用分组变化），避免破坏 system 前缀缓存
     if hasattr(mcp, "tool_groups") and mcp.tool_groups():
         system_parts.append(
@@ -1073,6 +1229,10 @@ async def run_agent_loop(
     _reasoning_contract = reasoning_output_contract(config, call_model_id)
     if _reasoning_contract:
         system_parts.append(_reasoning_contract)
+    # 记忆块每轮都随用户问题变，放在系统提示最末尾：前面固定段落的缓存前缀
+    # 不受它影响，改动只波及它自己后面的内容（这里已经是最后一段）。
+    if memory_block:
+        system_parts.append(memory_block)
     system_prompt = "\n\n".join(system_parts)
     # 轨迹：turn 以用户消息序号计（本次消息为第 N 条 user）
     _traj_turn = sum(1 for m in session.messages if m.get("role") == "user")
@@ -1307,7 +1467,7 @@ async def run_agent_loop(
             )
             runtime_tools = skill_registry.internal_tools() + [
                 UPDATE_PLAN_TOOL, ASK_USER_TOOL, EXPORT_SESSION_TOOL,
-                SET_CATEGORY_TOOL, LIST_DIRECTORY_TOOL,
+                SET_CATEGORY_TOOL, LIST_DIRECTORY_TOOL, REMEMBER_TOOL,
             ] + kb_tools.tools()
             if group_filter_active:
                 runtime_tools = runtime_tools + [ENABLE_TOOL_GROUP_TOOL]
@@ -1620,7 +1780,7 @@ async def run_agent_loop(
                 internal_tool = tc["name"] in ({"read_skill", "read_skill_resource",
                                                UPDATE_PLAN_TOOL_NAME, ENABLE_TOOL_GROUP_NAME,
                                                ASK_USER_TOOL_NAME, EXPORT_SESSION_TOOL_NAME,
-                                               LIST_DIRECTORY_TOOL_NAME}
+                                               LIST_DIRECTORY_TOOL_NAME, REMEMBER_TOOL_NAME}
                                               | kb_tools.KB_TOOL_NAMES)
                 # 工具执行日志
                 logger.info("[tool start] name=%s args=%s",
@@ -1820,6 +1980,12 @@ async def run_agent_loop(
                             _dir_args.get("path", ""),
                             _dir_args.get("pattern", ""),
                             bool(_dir_args.get("recursive", False)),
+                        )
+                    elif tc["name"] == REMEMBER_TOOL_NAME:
+                        # 内置写入长期记忆：不走 MCP、不走审批，走 MemoryService.create_experience
+                        result = _handle_remember_call(
+                            tc.get("args") or {}, remember_memory,
+                            session_id=str(getattr(session, "id", "") or ""),
                         )
                     elif kb_tools.is_kb_tool(tc["name"]):
                         # 内置知识库检索：只读本地索引，不走 MCP、不走审批

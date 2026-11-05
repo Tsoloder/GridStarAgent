@@ -10,6 +10,22 @@ from paths import DATA_DIR
 from session import atomic_write
 
 MEMORY_PATH = DATA_DIR / "tool_parameter_memory.json"
+
+#: 模块级总开关。参数记忆是唯一真正会进系统提示的记忆（``catalog`` 与 ``merge``），
+#: 所以 MemoryConfig.enabled 必须同时把它按下去；只关提炼等于没关。
+_ENABLED = True
+
+
+def configure(enabled: bool) -> None:
+    """设置模块级总开关。只影响注入与写入，读取与清理接口不受影响。"""
+    global _ENABLED
+    _ENABLED = bool(enabled)
+
+
+def enabled() -> bool:
+    return _ENABLED
+
+
 _TRANSIENT = re.compile(
     r"(path|file|filename|dirname|ids?$|id$|coord|point|endpoint|startpoint|outids|"
     r"api[_-]?key|token|password|passwd|secret|credential)", re.I
@@ -115,7 +131,7 @@ def _filter_params(params: Mapping[str, object], schema: Optional[Mapping[str, o
 
 def remember(tool: str, params: Mapping[str, object], schema: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
     tool = str(tool or "").strip()
-    if not tool:
+    if not tool or not _ENABLED:
         return {}
     data = _load()
     entry = data.get(tool, {}) if isinstance(data.get(tool), dict) else {}
@@ -166,7 +182,7 @@ def merge(tool: str, args: Mapping[str, object], schema: Optional[Mapping[str, o
         if authoritative and key not in properties:
             continue
         result[key] = _coerce(value, properties.get(key, {}))
-    for name, value in get(tool, schema).items():
+    for name, value in (get(tool, schema) if _ENABLED else {}).items():
         result.setdefault(name, value)
     for name, property_schema in properties.items():
         if isinstance(property_schema, Mapping) and "default" in property_schema:
@@ -175,6 +191,8 @@ def merge(tool: str, args: Mapping[str, object], schema: Optional[Mapping[str, o
 
 
 def catalog(schemas: Optional[Mapping[str, Mapping[str, object]]] = None) -> str:
+    if not _ENABLED:
+        return ""
     data = _load()
     schemas = schemas or {}
     lines = []
