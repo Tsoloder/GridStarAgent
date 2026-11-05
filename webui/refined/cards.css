@@ -232,12 +232,19 @@
   transition: border-color var(--dur) var(--ease);
 }
 
-/* ---------- 10b. 询问卡外沿与底部对齐 ---------- */
+/* ---------- 10b. 询问卡与输入框严格同宽 ---------- */
+/* 居中和定宽交给 .composer > * 的 max-width + auto margin，这里只负责把浮层
+   收进 composer 的水平内边距里。早先这行写的是
+   padding: 0 max(14px, calc((100% - var(--content-max)) / 2))，
+   百分比 padding 取的是包含块（composer）宽度而不是浮层自身宽度：
+   浮层已经被 max-width 限到 content-max 并居中，再按包含块算一次两侧内缩，
+   窗口越宽内缩越大，卡片越窄——1920 宽时只剩 744，2560 时约 80，再宽直接塌成竖条，
+   选项文字在窄条里疯狂换行，看着就是「越拉越变形」。 */
 .choice-overlay {
-  left: 0;
-  right: 0;
+  left: 16px;
+  right: 16px;
   bottom: 14px;
-  padding: 0 max(14px, calc((100% - var(--content-max)) / 2));
+  padding: 0;
 }
 
 .choice-hint {

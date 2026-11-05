@@ -12,7 +12,12 @@
   background: radial-gradient(120% 80% at 50% -10%, var(--bg-grad-a) 0, var(--bg) 46%, var(--inset) 100%);
 }
 
+/* backdrop-filter 会让 .topbar 自成层叠上下文，里层 .theme-listbox 的 z-index:26 被困死在这个
+   上下文里，而 .topbar 本身是普通流元素，后面的 .messages 一出现就把它连同下拉一起盖住。
+   给外壳一个 z-index，下拉才能正常压住消息气泡（仍低于 modal 100 / drop-overlay 40）。 */
 .topbar {
+  position: relative;
+  z-index: 20;
   height: 50px;
   flex: 0 0 50px;
   padding: 0 14px;

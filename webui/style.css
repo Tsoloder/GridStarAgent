@@ -316,7 +316,7 @@
 .theme-option .sw{width:14px;height:14px;border-radius:50%;border:1px solid var(--line-strong)}
 .sw-dark{background:linear-gradient(135deg,#18242e 0 50%,#50badf 50% 100%)}
 .sw-silver{background:linear-gradient(135deg,#f1f3f5 0 50%,#0e7ca6 50% 100%)}
-.sw-blue{background:linear-gradient(135deg,#dce7f3 0 50%,#1b84a8 50% 100%)}
+.sw-blue{background:linear-gradient(135deg,#10171e 0 50%,#50badf 50% 100%)}
 @media(max-width:359px){.theme-trigger .theme-name{display:none}}
 
 /* --- 视觉细化：三档圆角体系 + 毛玻璃浮层 --- */

@@ -97,7 +97,8 @@
   --code-text: #a8d4e6;
 }
 
-/* 浅色两套沿用结构，只把底色与边界重算，保持同一套层级逻辑 */
+/* 银白沿用旧版浅色调色板；蔚蓝恢复 refined 层引入之前的那套蓝黑默认配色
+   （style.css 里 :root 的老值），深色仍是上面的中性冷黑，三套互不重叠 */
 :root[data-theme="silver"] {
   color-scheme: light;
   --bg: #f6f7f9;
@@ -146,50 +147,65 @@
 }
 
 :root[data-theme="blue"] {
-  color-scheme: light;
-  --bg: #eef3f8;
-  --surface: #fbfdff;
-  --surface-2: #eaf1f7;
-  --surface-3: #dfe9f2;
-  --line: rgba(18, 46, 74, .08);
-  --line-strong: rgba(18, 46, 74, .15);
-  --text: #2d4058;
-  --muted: #5c7189;
-  --muted-2: #7f92a6;
-  --text-bright: #0d2136;
-  --cyan: #22789b;
-  --cyan-mid: #3590b3;
-  --cyan-dark: #14607d;
-  --cyan-glow: rgba(34, 120, 155, .18);
-  --accent-tint: rgba(34, 120, 155, .08);
-  --bg-grad-a: #f4f9fd;
-  --band-1: #f8fbfe;
-  --band-2: #eef4fa;
-  --band-3: #e7eff7;
-  --panel: #fbfdff;
-  --inset: #fdfeff;
-  --bubble: #fbfdff;
-  --bubble-user: #e3eefa;
-  --scroll-thumb: #b9c8d8;
-  --scroll-thumb-hover: #9fb2c6;
-  --scrim: rgba(20, 40, 62, .38);
-  --scrim-2: rgba(238, 243, 248, .93);
-  --glass-bg: rgba(244, 249, 253, .76);
-  --glass-bg-2: rgba(251, 253, 255, .86);
-  --card-grad-1: rgba(252, 254, 255, .95);
-  --card-grad-2: rgba(230, 240, 249, .9);
-  --card-user-grad-1: rgba(219, 234, 248, .95);
-  --card-user-grad-2: rgba(203, 224, 242, .9);
-  --card-shadow: 0 8px 24px rgba(20, 40, 62, .12);
-  --assistant-line: rgba(18, 46, 74, .08);
-  --assistant-tint: rgba(18, 46, 74, .02);
-  --assistant-text: #5c7189;
-  --body-text: #2b3a4c;
-  --card-solid: #ffffff;
-  --card-solid-2: #ffffff;
-  --input-bg: #ffffff;
-  --glass-solid: rgba(251, 253, 255, .97);
-  --code-text: #1a6b8a;
+  color-scheme: dark;
+  --bg: #10171e;
+  --surface: #17222c;
+  --surface-2: #1b2934;
+  --surface-3: #223541;
+  --line: #314653;
+  --line-strong: #456171;
+  --text: #d7e2e8;
+  --muted: #8499a6;
+  --muted-2: #78909d;
+  --text-bright: #eaf6fa;
+  --cyan: #50badf;
+  --cyan-mid: #238fb9;
+  --cyan-dark: #126c91;
+  --cyan-glow: rgba(80, 186, 223, .4);
+  --accent-tint: #173b4b;
+  --green: #50ce91;
+  --orange: #e7a84d;
+  --red: #e36c6c;
+  --bg-grad-a: #15212a;
+  --band-1: #18242e;
+  --band-2: #151f28;
+  --band-3: #121c24;
+  --panel: #121d24;
+  --inset: #0f181f;
+  --bubble: #1a2933;
+  --bubble-user: #233744;
+  --scroll-thumb: #405866;
+  --scroll-thumb-hover: #4d6a7a;
+  --scroll-track: #101a20;
+  --scrim: rgba(7, 16, 23, .86);
+  --scrim-2: rgba(16, 23, 30, .86);
+  --glass-bg: rgba(24, 36, 46, .74);
+  --glass-bg-2: rgba(18, 29, 36, .82);
+  --card-grad-1: rgba(38, 62, 78, .62);
+  --card-grad-2: rgba(20, 34, 45, .78);
+  --card-user-grad-1: rgba(46, 92, 116, .6);
+  --card-user-grad-2: rgba(24, 48, 63, .78);
+  --card-shadow: 0 8px 24px rgba(0, 0, 0, .4);
+  --assistant-line: #7a4a63;
+  --assistant-tint: #33202c;
+  --assistant-text: #e8a6c8;
+  --ok-line: #2f604b;
+  --ok-tint: #14281f;
+  --ok-text: #8fd0af;
+  --err-line: #89484b;
+  --err-tint: #3a2528;
+  --err-strong: #7d353a;
+  --err-text: #ffb5b5;
+  --warn-line: #7a5a2e;
+  --warn-tint: #332b20;
+  --warn-text: #eac887;
+  --warn-glow: rgba(231, 168, 77, .4);
+  --body-text: #d7e2e8;
+  --card-solid: #121d24;
+  --card-solid-2: #16232c;
+  --input-bg: rgba(18, 29, 36, .94);
+  --glass-solid: rgba(20, 31, 39, .94);
+  --code-text: #8fd8f0;
 }
 
 /* ---------- 2. 字体：全站微软雅黑，保证内网与客户机观感一致 ---------- */
