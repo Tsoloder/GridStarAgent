@@ -70,6 +70,8 @@ KB_SEARCH_TOOL = RuntimeTool(
         "凡涉及软件操作步骤、功能含义、参数取值与默认值的问题，先调用本工具，"
         "不要凭记忆回答。命中后必须用 kb_read 取原文再作答；"
         "检索结果为空就明确告诉用户「知识库未收录」，不要用自身知识冒充手册内容。"
+        "命中行会标注［案例］，表示该节是具体算例流程而非功能说明；"
+        "回答功能性问题时优先用非案例节。"
     ),
     inputSchema={
         "type": "object",
@@ -149,7 +151,43 @@ def _fmt_param(row: dict[str, Any]) -> str:
     if value:
         lines.append("    " + " / ".join(value))
     lines.append("    " + (row.get("description") or "")[:200])
+    # 去重合并后同一个参数只剩一条，次要出处会消失。把第 2、3 个出处带一行出来：
+    # 模型引用页码时既要能落到主记录，也要知道别的章节还讲过同一参数（改版靠它）。
+    for extra in _fmt_param_extra_sources(row):
+        lines.append(extra)
     return "\n".join(lines)
+
+
+def _fmt_param_extra_sources(row: dict[str, Any]) -> list[str]:
+    """参数行的「另见」补充行。
+
+    合并/日志两类新字段都可能还没落到索引层（那边在并行改），所以一律 ``.get()``
+    加降级：字段缺了就是少一行信息，绝不让展示层把检索打断。
+    """
+    try:
+        source_count = int(row.get("source_count") or 0)
+    except (TypeError, ValueError):
+        return []
+    if source_count <= 1:
+        return []
+    items = row.get("sources")
+    if not isinstance(items, list):
+        return []
+    rendered: list[str] = []
+    # 主记录是 sources[0]，另见从第 2 条起，最多列 2 条，避免参数卡片被出处撑爆
+    for item in items[1:3]:
+        if not isinstance(item, dict):
+            continue
+        doc = str(item.get("doc") or "").strip()
+        heading = str(item.get("heading_path") or "").replace(" / ", " > ").strip()
+        page = item.get("page")
+        page_text = "P%s" % ("?" if page in (None, "") else page)
+        body = " ".join(part for part in (doc, heading) if part)
+        if body:
+            rendered.append("%s %s" % (body, page_text))
+    if not rendered:
+        return []
+    return ["   另见：" + "；".join(rendered)]
 
 
 def _fmt_hit(index: int, total: int, hit: dict[str, Any]) -> str:
@@ -158,12 +196,48 @@ def _fmt_hit(index: int, total: int, hit: dict[str, Any]) -> str:
     origin = "%s · %s · P%s" % (hit["doc"], heading, hit["page"])
     if library:
         origin = "［%s］%s" % (library, origin)
+    # 案例章不是「这个功能怎么用」，是「某个型号的算例流程」。标出来，模型才能
+    # 自己决定要不要用它回答功能性问题（排序不给案例降权，类型信息交给模型）。
+    if (hit.get("chapter_kind") or "") == "case":
+        origin = "［案例］" + origin
+    # 覆盖词数取代原来的 score：score 是批内归一化的相对分，绝对值读不出"中了几成词"，
+    # 每批第一名恒为 1.0 正是工单要消灭的观感。字段缺失时整段略去。
+    matched = hit.get("matched_terms")
+    denom = hit.get("total_terms")
+    metric = ""
+    if isinstance(matched, int) and isinstance(denom, int) and denom > 0:
+        metric = "  覆盖 %d/%d 词" % (matched, denom)
     lines = [
-        "[命中 %d/%d] chunk_id=%s  score=%.2f  %s"
-        % (index, total, hit["chunk_id"], hit["score"], origin),
+        "[命中 %d/%d] chunk_id=%s%s  %s"
+        % (index, total, hit["chunk_id"], metric, origin),
         "    " + (hit.get("snippet") or "").replace("\n", " "),
     ]
+    if hit.get("stale"):
+        lines.append(
+            "    ⚠ 这份文档的源文件已变更（或已不存在），库内是上次索引的快照："
+            "回答时要提示用户核对版本，不要当成最新内容"
+        )
     return "\n".join(lines)
+
+
+def _log_query(query: str, hits: list[dict[str, Any]], scope: Optional[str]) -> None:
+    """把这次检索记进 kb_query_log。
+
+    日志是旁路设施：写失败顶多少一条统计，不该让用户看到检索结果变成报错，
+    所以这里整段吞异常（工单允许的、也是唯一允许的吞异常点）。字段缺失同理——
+    索引层还没落地时这里静默跳过即可。
+    """
+    try:
+        kb_index.log_query(
+            query,
+            cleaned=kb_index.clean_query(query),
+            hits=len(hits),
+            top=hits[0] if hits else None,
+            library_id=scope or "",
+            source="tool",
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def search_tool(args: dict[str, Any]) -> str:
@@ -189,6 +263,10 @@ def search_tool(args: dict[str, Any]) -> str:
     except Exception as exc:  # noqa: BLE001 - 知识库故障不该打断主任务
         return "知识库检索失败（%s: %s）。当前无法依据知识库回答，请如实告知用户。" % (
             type(exc).__name__, exc)
+
+    # 日志在检索成功后立刻写：零命中的那次同样要落库（它是 query_report 里
+    # 「empty」唯一的来源），所以不能等走到最后一条 return 再记。
+    _log_query(query, hits, scope)
 
     blocks: list[str] = []
     if include_params:
@@ -258,6 +336,9 @@ def read_tool(args: dict[str, Any]) -> str:
             lines.append("")
             lines.append("【%s chunk_id=%s】%s" % (label, item["chunk_id"], item["text"]))
     lines.append("")
+    if payload.get("stale"):
+        lines.append("⚠ 源文件已变更（或已不存在），以下内容是上次索引的快照，引用前请核对版本。")
+        lines.append("")
     lines.append("引用时请带上《文档名》章节与页码。")
     return "\n".join(lines)
 

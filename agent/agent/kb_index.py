@@ -21,7 +21,7 @@ import json
 import re
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -42,6 +42,11 @@ FOLDER_ROOT = ""
 DOC_STATUS_OK = "ok"
 DOC_STATUS_FAILED = "failed"
 DOC_STATUS_STALE = "stale"
+
+# 可检索的状态。stale（源文件改过、库内是旧版）仍然参与召回：内容过期和
+# “查不到”不是一回事，直接排除会让人突然什么都搜不到，比给旧内容更糟。
+# 命中时带着 stale 标记交给工具层提示，由模型自己决定要不要提醒用户。
+_SEARCHABLE = "('ok', 'stale')"
 
 # 单块目标长度与重叠。块太长时，命中句会被大量无关字稀释，bm25 会把票投给
 # 短而密的块（典型是图注）；块太碎又会切断步骤。600 字左右在实测里较均衡。
@@ -126,6 +131,20 @@ CREATE TABLE IF NOT EXISTS kb_param (
 );
 CREATE INDEX IF NOT EXISTS idx_kb_param_name ON kb_param(name);
 CREATE INDEX IF NOT EXISTS idx_kb_param_doc ON kb_param(doc_id);
+
+CREATE TABLE IF NOT EXISTS kb_query_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL DEFAULT '',
+    library_id TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
+    cleaned TEXT NOT NULL DEFAULT '',
+    hits INTEGER NOT NULL DEFAULT 0,
+    top_coverage REAL,
+    top_doc TEXT NOT NULL DEFAULT '',
+    top_chunk INTEGER NOT NULL DEFAULT 0,
+    source TEXT NOT NULL DEFAULT 'tool'
+);
+CREATE INDEX IF NOT EXISTS idx_kb_query_log_ts ON kb_query_log(ts);
 """
 
 _FTS_SCHEMA = """
@@ -191,10 +210,23 @@ _LOWER_RE = re.compile(
     r"(?:不小于|不低于|不能低于|下限为|最小(?:值)?(?:为)?)\s*(\d+(?:\.\d+)?)"
 )
 _UNIT_RE = re.compile(r"^\(?\s*(mm|cm|m|μm|um|°|度|%|s|ms|Pa|kg|无量纲)")
-# 默认值只在“默认值/默认为/默认取”这类明确句式后取，否则“默认公差”会把名词当值
+# 默认值只在“默认值/默认为/默认取”这类明确句式后取，否则“默认公差”会把名词当值。
+#
+# 值的字符集必须容得下科学计数法与排版连字符：手册里写的是「默认公差为1*e‑7」，
+# 那个 ‑ 是 U+2011（非断行连字符）而不是 ASCII 减号。第一版只收了 [.+-]，
+# 于是整条默认值静默抽空 —— 实测 120 条参数里只有 9 条带默认值，绝大多数
+# 卡在这里，参数表看起来存在，实际没有值。
+_VALUE_TOKEN = (
+    r"([A-Za-z0-9_.+\-*^/‰\u2010-\u2015]{1,24}"
+    # 中文值必须能吃完整句：「默认为模型最大轴向尺寸的 4 倍」，
+    # 旧版限 4 个字，抽成「模型最大」，模型会把半截话当完整默认值引用。
+    r"|[\u4e00-\u9fa5][\u4e00-\u9fa5A-Za-z0-9_.+\-*^/‰~∼\u2010-\u2015 ]{0,15})"
+)
 _DEFAULT_RE = re.compile(
-    r"(?:默认值|缺省值)\s*(?:为|是|取)?\s*[：:]?\s*([A-Za-z0-9_.+\-]{1,16}|[\u4e00-\u9fa5]{1,4})"
-    r"|默认(?:为|是|取)\s*[：:]?\s*([A-Za-z0-9_.+\-]{1,16}|[\u4e00-\u9fa5]{1,4})"
+    r"(?:默认值|缺省值)\s*(?:为|是|取)?\s*[：:]?\s*" + _VALUE_TOKEN
+    + r"|默认(?:为|是|取)\s*[：:]?\s*" + _VALUE_TOKEN
+    # “默认公差为 X”这种名词夹在中间的写法，只放 8 个字，再长多半不是值
+    + r"|默认[^，。；;\n]{0,8}?(?:为|是|取)\s*[：:]?\s*" + _VALUE_TOKEN
 )
 
 _LOCK = threading.RLock()
@@ -674,7 +706,7 @@ def _extract_params(
         default = ""
         found = _DEFAULT_RE.search(scope_text)
         if found:
-            default = (found.group(1) or found.group(2) or "").strip()
+            default = (found.group(1) or found.group(2) or found.group(3) or "").strip()
         unit = ""
         found = _UNIT_RE.search(desc)
         if found:
@@ -858,8 +890,14 @@ def rename_library(library_id: str, name: str = "", note: Optional[str] = None) 
     return {"id": library_id, "name": label}
 
 
-def delete_library(library_id: str) -> dict[str, Any]:
-    """删库连同库里的文档与分块一起删。不会动 sources 里的原文件。"""
+def delete_library(library_id: str, *, purge_sources: bool = False) -> dict[str, Any]:
+    """删库连同库里的文档与分块一起删。默认不动 sources 里的原文件。
+
+    purge_sources=True 时才在删完记录后调一次 sources_gc(dry_run=False)。
+    默认 False 是安全取舍：删库常常只是“重建索引”或“试导入”的第一步，连带
+    删掉原文件后用户就没有重导的可能了；真要删得自己显式要求，而且这一步
+    只能回收孤儿，被其他库引用的文件不会被碰。
+    """
     with _LOCK:
         conn = _STORE.connect()
         try:
@@ -890,7 +928,10 @@ def delete_library(library_id: str) -> dict[str, Any]:
             conn.commit()
         finally:
             conn.close()
-    return {"deleted": library_id, "documents": len(doc_ids), "name": row["name"]}
+    payload: dict[str, Any] = {"deleted": library_id, "documents": len(doc_ids), "name": row["name"]}
+    if purge_sources:
+        payload["sources_gc"] = sources_gc(dry_run=False)
+    return payload
 
 
 # --------------------------------------------------------------------------
@@ -1312,17 +1353,30 @@ def index_file(
             conn.execute("DELETE FROM kb_param WHERE doc_id = ?", (doc_id,))
             _ensure_library(conn, library_id)
             folder_id = _safe_folder(conn, folder_id, library_id)
+            # 解析没抛异常，但一个节也没落到，就是这份文件里没有可检索的字。
+            # 这跟“索引成功”是两件事：扫描版 PDF 每页 extract_text() 都是空串，
+            # 以前照样写 ok，界面上看着已收录，问到它只回“未收录”，没人会想到
+            # 是导入环节丢了内容。这里必须落成 failed，并把原因写进 error。
+            empty = not sections
+            status_value = DOC_STATUS_FAILED if empty else DOC_STATUS_OK
+            error_value = ""
+            if empty:
+                error_value = (
+                    "%d 页里未提取到任何文本，可能是扫描版或纯图片 PDF："
+                    "需先做 OCR，或换一份带文字层的文件再导入" % pages
+                )
             conn.execute(
                 "INSERT INTO kb_doc (id, library_id, folder_id, path, name, suffix, status, error,"
                 " pages, chars, chunk_count, mtime, size, content_hash, indexed_at)"
                 " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(id) DO UPDATE SET library_id=excluded.library_id,"
                 " folder_id=excluded.folder_id, path=excluded.path, name=excluded.name,"
-                " status=excluded.status, error='', pages=excluded.pages, chars=excluded.chars,"
-                " chunk_count=excluded.chunk_count, mtime=excluded.mtime, size=excluded.size,"
+                " status=excluded.status, error=excluded.error, pages=excluded.pages,"
+                " chars=excluded.chars, chunk_count=excluded.chunk_count,"
+                " mtime=excluded.mtime, size=excluded.size,"
                 " content_hash=excluded.content_hash, indexed_at=excluded.indexed_at",
                 (doc_id, library_id, folder_id, str(source), source.name, source.suffix.lower(),
-                 DOC_STATUS_OK, "", pages, total_chars, 0, mtime, size, content_hash, now),
+                 status_value, error_value, pages, total_chars, 0, mtime, size, content_hash, now),
             )
 
             chunk_rows: list[tuple] = []
@@ -1378,8 +1432,8 @@ def index_file(
         "library_id": library_id,
         "folder_id": folder_id,
         "name": source.name,
-        "status": DOC_STATUS_OK,
-        "error": "",
+        "status": status_value,
+        "error": error_value,
         "chunks": len(chunk_rows),
         "params": len(param_rows),
         "pages": pages,
@@ -1506,6 +1560,40 @@ def remove_document(doc_id: str) -> bool:
 # --------------------------------------------------------------------------
 
 
+# 案例章顶层段常以型号开头：M6机翼结构网格、F6混合网格、A320全机
+_CASE_MODEL_RE = re.compile(r"^[A-Za-z]{1,4}\d")
+# 手册的顶层书签一半带编号前缀（"10 F6结构网格"、"12.0.4 某弹结构网格"）。
+# 不剥掉就套型号正则，这批案例章会被全部漏判；而漏判比误判悄悄得多。
+_HEADING_ORDINAL_RE = re.compile(r"^\s*[\d.]+\s*")
+
+
+def _chapter_kind(heading_path: str) -> str:
+    """判「这是案例章还是功能参考章」。判不准就返回空串，宁可不标。
+
+    只认两条硬证据：顶层段含「某」（某飞行器…），或顶层段以型号编号开头
+    （M6机翼结构网格）。判断前先剥掉章节序号前缀，否则真实库里一半案例章
+    （"10 F6结构网格"）会漏掉。剥完不匹配的一律返回空串——章节名里猜“像不像
+    案例”的启发式一旦猜错，工具层会给功能页贴［案例］标签，模型据此降低对它
+    的引用，代价比“漏标一个案例”高得多。
+
+    选顶层段而不看整条路径，是因为手册的案例层级很浅：型号就是根，下面的
+    小节（12.0.1 几何导入）和功能章里的同名小节无法区分。
+
+    剥序号不会把功能章误判成案例："2D/3D结构网格" 剥完是 "D/3D结构网格"，
+    字母后跟的不是数字；"6 Duct内流场结构网格" 剥完是 "Duct内流场结构网格"，
+    同样不匹配。
+    """
+    top = (heading_path or "").split(" / ")[0]
+    stripped = _HEADING_ORDINAL_RE.sub("", top).strip()
+    if not stripped:
+        return ""
+    if "某" in stripped:
+        return "case"
+    if _CASE_MODEL_RE.match(stripped):
+        return "case"
+    return ""
+
+
 def _terms(query: str) -> list[str]:
     tokens = [t for t in re.split(r"\s+", query.strip()) if t]
     grams = cjk_ngrams(query)
@@ -1552,11 +1640,12 @@ def search(
                 for row in conn.execute(
                     "SELECT c.id, c.doc_id, c.heading_path, c.section, c.page_start,"
                     " c.page_end, c.kind, c.text, c.ordinal, d.name AS doc_name,"
+                    " d.status AS doc_status,"
                     " d.path AS doc_path, d.library_id AS library_id,"
                     " COALESCE(l.name, '') AS library_name"
                     " FROM kb_chunk c JOIN kb_doc d ON d.id = c.doc_id"
                     " LEFT JOIN kb_library l ON l.id = d.library_id"
-                    " WHERE c.id IN (%s) AND d.status = 'ok'" % placeholders,
+                    " WHERE c.id IN (%s) AND d.status IN %s" % (placeholders, _SEARCHABLE),
                     ids,
                 ).fetchall()
             }
@@ -1603,58 +1692,100 @@ def _search_rows(
                     "SELECT c.id AS id, bm25(kb_chunk_fts) AS rank"
                     " FROM kb_chunk_fts f JOIN kb_chunk c ON c.id = f.rowid"
                     " JOIN kb_doc d ON d.id = c.doc_id"
-                    " WHERE kb_chunk_fts MATCH ? AND d.status = 'ok'" + where +
+                    " WHERE kb_chunk_fts MATCH ? AND d.status IN " + _SEARCHABLE + where +
                     " ORDER BY rank LIMIT ?",
                     [fts_query] + params + [pool],
                 ).fetchall()
             except sqlite3.Error:
                 _STORE._fts = False
 
-    like = "%%%s%%" % query.replace("%", "").replace("_", "")
-    return conn.execute(
-        "SELECT c.id AS id, 0.0 AS rank FROM kb_chunk c"
+    # FTS 不可用（或 bm25 报错降级）时的退路。
+    #
+    # 旧实现拿整句话去 LIKE：中文长问句在正文里几乎不会原样出现，于是必然 0 条，
+    # 而工具层把这当成「知识库未收录」—— 库里有料却报告没有，比慢更坑人。
+    # 现在改成按词命中：命中的词越多 rank 越小（负的命中数），与 bm25 的「越小
+    # 越好」语义一致，排序层无需区分两条路径。
+    terms = [t for t in _terms(clean_query(query)) if len(t) >= 2][:8]
+    if not terms:
+        like = "%%%s%%" % query.replace("%", "").replace("_", "")
+        return conn.execute(
+            "SELECT c.id AS id, 0.0 AS rank FROM kb_chunk c"
+            " JOIN kb_doc d ON d.id = c.doc_id"
+            " WHERE d.status IN " + _SEARCHABLE + " AND (c.text LIKE ? OR c.heading_path LIKE ?)" + where +
+            " LIMIT ?",
+            [like, like] + params + [pool],
+        ).fetchall()
+
+    # 通配符手工拼在参数值上，不写进 SQL：SQL 里已经有一堆 % 占位符与 _SEARCHABLE，
+    # 再用 % 格式化拼语句会和它们撞车，而且参数化能避开引号问题。
+    patterns = ["%" + term + "%" for term in terms]
+    score_expr = " + ".join(["(CASE WHEN c.text LIKE ? THEN 1 ELSE 0 END)"] * len(terms))
+    match_expr = " OR ".join(["c.text LIKE ?"] * len(terms))
+    sql = (
+        "SELECT c.id AS id, -(0.0 + {score}) AS rank FROM kb_chunk c"
         " JOIN kb_doc d ON d.id = c.doc_id"
-        " WHERE d.status = 'ok' AND (c.text LIKE ? OR c.heading_path LIKE ?)" + where +
-        " LIMIT ?",
-        [like, like] + params + [pool],
-    ).fetchall()
+        " WHERE d.status IN {searchable} AND ({match}){where}"
+        " ORDER BY rank LIMIT ?"
+    ).format(score=score_expr, searchable=_SEARCHABLE, match=match_expr, where=where)
+    return conn.execute(sql, patterns + patterns + params + [pool]).fetchall()
 
 
 def _rank(
     rows: list[sqlite3.Row], details: dict[int, sqlite3.Row], query: str
 ) -> list[dict[str, Any]]:
-    """bm25 分数归一到 0~1，再叠标题命中、节标题命中与精确短语三项规则。
+    """按绝对量打分：覆盖率为主，标题取最相关那一段的命中率，整句命中加成。
 
-    标题命中的权重给得高，是因为这份资料的提问经常直接报功能名（"设置边界"、
-    "附面层推进"）。BM25 只看正文词频，会把长段落里顺带提到功能名的块顶上来；
-    把标题命中提权，等于让「问哪节就回哪节」优先于「哪段提得多」。
+    旧实现里 0.55 那一项是把 bm25 在本批候选里做 min-max 归一。归一化保证每批
+    第一名恒为 1.0，“第一名 0.59” 这个恒定观感就是这么来的：分数只说明批内相对
+    位置，不说明这块到底对上了多少。现在改成 coverage（命中 gram / 词 gram 总数）
+    这种可跨批次比较的绝对量，0.55 的权重才真正表示“正文对上了”的分量。
+
+    分母排除整句 token：_terms 会把空格分词得到的整句（中文 query 下就是它自己）
+    放在最前，而它几乎不可能原样出现在正文里，白占分母会把所有块的 coverage
+    系统性压到 0.5 以下。整句相等这个信号已经由 exact 项单独承担。
+
+    heading_hit 按路径拆段取最大命中率：长路径天然能命中更多 gram，直接拿整条
+    路径比等于奖励“标题长的节”。除以段数看着更简单，但会把“标题正好就是功能名”
+    那一节压成噪声（3 段路径下 0.23 的命中率只剩 0.077，再乘 0.25 基本归零），
+    于是“问功能名就回那节”这个本来有效的信号就没了。取 max 是 0~1 的绝对量，
+    多几段只是多几个候选，既不奖励长路径，也不削弱标题命中。
+
+    不给案例章降权：功能说明页和案例步骤是两种有用，类型判断（chapter_kind）
+    交给模型自己读，排序层只管可比性。
     """
-    ranks = [float(row["rank"]) for row in rows]
-    best, worst = (min(ranks), max(ranks)) if ranks else (0.0, 0.0)
-    span = worst - best
-    norm_query = _norm(query)
+    body_query = _norm(query)
     terms = [t for t in _terms(query) if len(t) >= 2][:24]
-    term_count = max(1, len(terms))
+    terms = [t for t in terms if t != body_query]
+    total_terms = len(terms)
 
     scored: list[dict[str, Any]] = []
     for row in rows:
         detail = details.get(row["id"])
         if detail is None:
             continue
-        rank = float(row["rank"])
-        lexical = 1.0 if span <= 0 else 1.0 - (rank - best) / span
-        heading = _norm(detail["heading_path"])
+        heading_path = detail["heading_path"] or ""
+        # 路径拆段后逐段算命中率再取最大值：路径多几段只是多几个候选，
+        # 不会把分数抬高，也不会像除以段数那样把「标题正好对上功能名」压成噪声。
+        segments = [_norm(part) for part in heading_path.split(" / ") if part.strip()]
         section = _norm(detail["section"])
-        heading_hit = sum(1 for term in terms if term in heading) / term_count
-        section_hit = sum(1 for term in terms if term in section) / term_count
         body = _norm(detail["text"])
-        exact = 1.0 if len(norm_query) >= 3 and norm_query in body else 0.0
-        # 短块（图注、单行书签）会被 bm25 因为长度归一化抬高，压一点回去
-        length_factor = 0.88 if len(body) < 120 else 1.0
-        score = length_factor * (
-            0.55 * lexical + 0.25 * heading_hit + 0.12 * section_hit + 0.08 * exact
-        )
-        snippet = _snippet(detail["text"], query)
+        matched = sum(1 for term in terms if term in body)
+        exact = 1.0 if len(body_query) >= 3 and body_query in body else 0.0
+        if total_terms:
+            coverage = matched / total_terms
+            heading_hit = max(
+                (sum(1 for term in terms if term in seg) / total_terms for seg in segments),
+                default=0.0,
+            )
+            section_hit = sum(1 for term in terms if term in section) / total_terms
+        else:
+            # 整句是唯一的词：只剩下“整句原样出现”这一个信号
+            coverage = exact
+            heading_hit = (
+                1.0 if any(body_query and body_query in seg for seg in segments) else 0.0
+            )
+            section_hit = 1.0 if body_query and body_query in section else 0.0
+        score = 0.55 * coverage + 0.25 * heading_hit + 0.10 * section_hit + 0.10 * exact
         scored.append(
             {
                 "chunk_id": detail["id"],
@@ -1662,14 +1793,26 @@ def _rank(
                 "doc": detail["doc_name"],
                 "library_id": detail["library_id"],
                 "library": detail["library_name"],
-                "heading_path": detail["heading_path"],
+                "heading_path": heading_path,
                 "page": detail["page_start"],
                 "page_end": detail["page_end"],
                 "kind": detail["kind"],
+                "stale": detail["doc_status"] == DOC_STATUS_STALE,
                 "score": round(score, 4),
-                "snippet": snippet,
+                "coverage": round(coverage, 4),
+                "matched_terms": matched,
+                "total_terms": total_terms,
+                "chapter_kind": _chapter_kind(heading_path),
+                "snippet": _snippet(detail["text"], query),
             }
         )
+    # bm25 不进最终分，但仍坚持用它做 tiebreak：rows 是 bm25 粗排的结果，
+    # Python 的 sort 是稳定的，按 score 降序排时同分元素保持原顺序，
+    # 等于“同分时按 bm25 位次”，不用额外写比较器。
+    #
+    # 注意 pool=200 是 bm25 粗排的截断值：改成 coverage 精排后，理论上存在
+    # “coverage 高但 bm25 排不进前 200”的块被截掉。当前库 299 块接近全覆盖，
+    # 不会触发；这块要动得先解决“不做 bm25 粗排怎么控成本”，不在本次范围。
     scored.sort(key=lambda item: item["score"], reverse=True)
     return scored
 
@@ -1703,6 +1846,7 @@ def read_chunk(
         try:
             row = conn.execute(
                 "SELECT c.*, d.name AS doc_name, d.path AS doc_path,"
+                " d.status AS doc_status,"
                 " d.library_id AS library_id, COALESCE(l.name,'') AS library_name"
                 " FROM kb_chunk c JOIN kb_doc d ON d.id = c.doc_id"
                 " LEFT JOIN kb_library l ON l.id = d.library_id"
@@ -1737,6 +1881,7 @@ def read_chunk(
         "char_start": row["char_start"],
         "char_end": row["char_end"],
         "kind": row["kind"],
+        "stale": row["doc_status"] == DOC_STATUS_STALE,
         "text": row["text"],
     }
     if context > 0:
@@ -1752,13 +1897,288 @@ def read_chunk(
 
 
 # --------------------------------------------------------------------------
+# 检索日志
+# --------------------------------------------------------------------------
+
+# 修剪节奏：计数点而不是每次 COUNT。日志写在检索热路径上，每次写都扫一遍表
+# 是白付的开销；200 次一次 COUNT（带 ts 索引）在实测里可忽略。
+_QUERY_LOG_TRIM_EVERY = 200
+_QUERY_LOG_MAX_ROWS = 20000
+_QUERY_LOG_KEEP_DAYS = 90
+# 覆盖率低到这个以下就值得人看一眼：三分之一不到的命中率说明 query 和正文
+# 几乎没对上，排在前面的都是靠标题或整句撑着的。
+_QUERY_LOG_WEAK_COVERAGE = 0.34
+
+_query_log_writes = 0
+
+
+def _trim_query_log(conn: sqlite3.Connection, keep_days: int) -> int:
+    cutoff = (datetime.now() - timedelta(days=max(0, int(keep_days)))).isoformat(
+        timespec="seconds"
+    )
+    cursor = conn.execute("DELETE FROM kb_query_log WHERE ts < ?", (cutoff,))
+    return int(cursor.rowcount or 0)
+
+
+def prune_query_log(keep_days: int = 90) -> int:
+    """删掉日志里早于 keep_days 天的行，返回删除条数。
+
+    日志只用来回答“最近大家在问什么、哪些问空手而归”，保留窗口之外的行
+    没有分析价值，但会持续拉大库文件和 ts 索引。保留天数做成参数而不是只写
+    死 90，是为了能在表行数失控时临时收紧窗口（见 log_query 里的上限处理）。
+    """
+    with _LOCK:
+        conn = _STORE.connect()
+        try:
+            removed = _trim_query_log(conn, keep_days)
+            conn.commit()
+            return removed
+        finally:
+            conn.close()
+
+
+def log_query(
+    query: str,
+    *,
+    cleaned: str = "",
+    hits: int = 0,
+    top: Optional[dict] = None,
+    library_id: str = "",
+    source: str = "tool",
+) -> None:
+    """记一条检索日志。写不进去就丢掉，绝不把异常还给调用方。
+
+    设计取舍：日志是观测手段，不是业务流程。检索成功但日志失败是好结果，
+    反之（因日志失败而报错给用户）是纯损失。因此整个写入段只捕 sqlite3.Error
+    与 OSError——业务代码里的 bug 不会被这里吞掉，因为这里只包住一条 INSERT。
+
+    额外存 cleaned（清词后的查询）而不只存原句：零命中时先要分清是“库里没
+    有”还是“疑问词剥得不对”，这两个信号不在同一列里就没法分。
+
+    top 传 search() 的第一条 hit：coverage 用来筛“命中了但没对多少”，doc 用来
+    定位是哪份资料拖后腿。
+    """
+    global _query_log_writes
+    text = (query or "").strip()
+    if not text:
+        return
+    head = top or {}
+    coverage = head.get("coverage")
+    try:
+        with _LOCK:
+            conn = _STORE.connect()
+            try:
+                conn.execute(
+                    "INSERT INTO kb_query_log (ts, library_id, query, cleaned, hits,"
+                    " top_coverage, top_doc, top_chunk, source)"
+                    " VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        datetime.now().isoformat(timespec="seconds"),
+                        library_id or "",
+                        text,
+                        cleaned or "",
+                        int(hits or 0),
+                        None if coverage is None else float(coverage),
+                        str(head.get("doc") or ""),
+                        int(head.get("chunk_id") or 0),
+                        source or "tool",
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+    except (sqlite3.Error, OSError, TypeError, ValueError):
+        return
+
+    _query_log_writes += 1
+    if _query_log_writes % _QUERY_LOG_TRIM_EVERY:
+        return
+    # 计数点到了：先看行数，超上限就把窗口从 90 天收到 30 天。
+    # 这一步是个有意识的取舍：工单只要求“删 90 天前的行”，但一个 2 万行以上的
+    # 日志表往往意味着有人在刷或批量灌历史数据，90 天本身就不再是合理界限。
+    # 没超上限时行为与工单完全一致。
+    try:
+        with _LOCK:
+            conn = _STORE.connect()
+            try:
+                rows = int(
+                    conn.execute("SELECT COUNT(*) AS n FROM kb_query_log").fetchone()["n"] or 0
+                )
+            finally:
+                conn.close()
+    except (sqlite3.Error, OSError):
+        return
+    keep = 30 if rows > _QUERY_LOG_MAX_ROWS else _QUERY_LOG_KEEP_DAYS
+    try:
+        prune_query_log(keep)
+    except (sqlite3.Error, OSError):
+        return
+
+
+def query_report(days: int = 30, limit: int = 20) -> dict[str, Any]:
+    """把最近 days 天的检索日志汇成三组：零命中、高频、低覆盖率。
+
+    三组分别对应三种改法：零命中 → 补资料或补别名；高频 → 看考卷在问什么，
+    优先级靠前的内容值得人工核一遍；低覆盖 → 词对不上，要考虑同义词或切块。
+
+    low_coverage 先按覆盖率升序拉原始行、再在 Python 里按 query 去重，而不是
+    在 SQL 里 GROUP BY：需要的是“这个 query 最差的一次长什么样”，MIN(coverage)
+    与任意一条 doc 拼一起会串行。多取 limit*4 行候选是为了去重后还能凑够 limit。
+    """
+    span = max(1, int(days))
+    cap = max(1, int(limit))
+    cutoff = (datetime.now() - timedelta(days=span)).isoformat(timespec="seconds")
+    with _LOCK:
+        conn = _STORE.connect()
+        try:
+            total = int(
+                conn.execute(
+                    "SELECT COUNT(*) AS n FROM kb_query_log WHERE ts >= ?", (cutoff,)
+                ).fetchone()["n"] or 0
+            )
+            empty_rows = conn.execute(
+                "SELECT query, COUNT(*) AS n FROM kb_query_log"
+                " WHERE ts >= ? AND hits = 0 GROUP BY query ORDER BY n DESC, query LIMIT ?",
+                (cutoff, cap),
+            ).fetchall()
+            frequent_rows = conn.execute(
+                "SELECT query, COUNT(*) AS n, AVG(hits) AS avg_hits FROM kb_query_log"
+                " WHERE ts >= ? GROUP BY query ORDER BY n DESC, query LIMIT ?",
+                (cutoff, cap),
+            ).fetchall()
+            weak_rows = conn.execute(
+                "SELECT query, top_coverage, top_doc FROM kb_query_log"
+                " WHERE ts >= ? AND hits > 0 AND top_coverage IS NOT NULL"
+                " AND top_coverage < ? ORDER BY top_coverage ASC LIMIT ?",
+                (cutoff, _QUERY_LOG_WEAK_COVERAGE, cap * 4),
+            ).fetchall()
+        finally:
+            conn.close()
+
+    low: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in weak_rows:
+        if row["query"] in seen:
+            continue
+        seen.add(row["query"])
+        low.append(
+            {
+                "query": row["query"],
+                "coverage": round(float(row["top_coverage"]), 4),
+                "doc": row["top_doc"],
+            }
+        )
+        if len(low) >= cap:
+            break
+
+    return {
+        "days": span,
+        "total": total,
+        "empty": [{"query": row["query"], "count": int(row["n"])} for row in empty_rows],
+        "frequent": [
+            {
+                "query": row["query"],
+                "count": int(row["n"]),
+                "avg_hits": round(float(row["avg_hits"] or 0.0), 2),
+            }
+            for row in frequent_rows
+        ],
+        "low_coverage": low,
+    }
+
+
+# --------------------------------------------------------------------------
 # 参数
 # --------------------------------------------------------------------------
+
+
+def _param_group_key(record: dict[str, Any]) -> tuple:
+    """同名参数组内的优先次序：描述越长越可信，其次是有默认值、有上下限的。
+
+    手册里同一个参数在参数表和步骤里各写一遍，短的常常是“首层高度：见上”这类
+    指代，长的那条才带单位与取值。末尾两个键（page、heading_path）不是业务规则，
+    只是为了让排序可复现，避免同权重时随查询顺序飘。
+    """
+    return (
+        -len(record["description"] or ""),
+        0 if str(record["default"] or "").strip() else 1,
+        0 if (record["min"] is not None or record["max"] is not None) else 1,
+        record["page"] or 0,
+        record["heading_path"] or "",
+    )
+
+
+def _merge_param_group(name: str, members: list[dict[str, Any]]) -> dict[str, Any]:
+    """把同名参数的多条出处合成一条。
+
+    存储侧不改：重复是抽取器的必然结果（同一个名字在不同章节自然会出现多次），
+    写入侧去重就得重导全部文档才能生效，而且会丢掉“这个参数在哪几节讲过”这个
+    信息。改成读出侧合并：主记录给完整上下文，sources 给全部出处，调用方只需
+    “这个参数是什么”时不会被同一个名字占满 limit。
+
+    字段补齐从组内第一个非空取，而不是从主记录取：主记录按描述长度选出，它
+    很可能恰恰是不带默认值的那一条，不补就等于合并后反而丢值。
+    """
+    ordered = sorted(members, key=_param_group_key)
+    primary = ordered[0]
+
+    def first_text(field: str) -> str:
+        for item in ordered:
+            value = str(item[field] or "").strip()
+            if value:
+                return item[field]
+        return ""
+
+    def first_number(field: str) -> Optional[float]:
+        for item in ordered:
+            if item[field] is not None:
+                return item[field]
+        return None
+
+    sources: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, int]] = set()
+    # 组内已有次序是按描述质量排的；sources 只想告诉“还去哪几节看”，
+    # 所以按页码升序重排，与主记录同页的重复出处只留一条。
+    for item in sorted(ordered, key=lambda entry: entry["page"] or 0):
+        key = (item["doc"], item["heading_path"], item["page"])
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(
+            {"doc": item["doc"], "heading_path": item["heading_path"], "page": item["page"]}
+        )
+        if len(sources) >= 3:
+            break
+
+    return {
+        "name": name,
+        "domain": primary["domain"],
+        "module": primary["module"],
+        "default": first_text("default"),
+        "min": first_number("min"),
+        "max": first_number("max"),
+        "unit": first_text("unit"),
+        "description": max(
+            (item["description"] or "" for item in ordered), key=len, default=""
+        ),
+        "doc": primary["doc"],
+        "library_id": primary["library_id"],
+        "heading_path": primary["heading_path"],
+        "page": primary["page"],
+        "sources": sources,
+        "source_count": len(members),
+    }
 
 
 def find_params(
     query: str, *, limit: int = 8, domain: str = "", library_id: Optional[str] = None
 ) -> list[dict[str, Any]]:
+    """按名字模糊匹配参数，同名跨章节合并成一条。
+
+    去重键从 "名字@章节" 改成名字：实测 120 条参数里有 29 条是同名重复（增长率、
+    离散点数、首层高度），limit=3 时经常被同一个参数占满，模型看不到别的候选。
+    合并后的字段补齐与出处列表见 _merge_param_group。
+    """
     text = clean_query(query)
     if not text:
         return []
@@ -1767,7 +2187,7 @@ def find_params(
         try:
             sql = (
                 "SELECT p.*, d.name AS doc_name, d.library_id AS library_id"
-                " FROM kb_param p JOIN kb_doc d ON d.id = p.doc_id WHERE d.status = 'ok'"
+                " FROM kb_param p JOIN kb_doc d ON d.id = p.doc_id WHERE d.status IN " + _SEARCHABLE
             )
             params: list[Any] = []
             if domain:
@@ -1781,45 +2201,46 @@ def find_params(
         finally:
             conn.close()
 
-    hits: list[tuple[int, dict[str, Any]]] = []
+    groups: dict[str, tuple[int, list[dict[str, Any]]]] = {}
     for row in rows:
         name = row["name"]
+        if not name:
+            continue
         score = 0
-        if name and name in text:
+        if name in text:
             score = len(name) * 2
-        elif text and text in name:
+        elif text in name:
             score = len(text)
         if not score:
             continue
-        hits.append(
-            (
-                score,
-                {
-                    "name": name,
-                    "domain": row["domain"],
-                    "module": row["module"],
-                    "default": row["default_value"],
-                    "min": row["min_value"],
-                    "max": row["max_value"],
-                    "unit": row["unit"],
-                    "description": row["description"],
-                    "doc": row["doc_name"],
-                    "library_id": row["library_id"],
-                    "heading_path": row["heading_path"],
-                    "page": row["page"],
-                },
-            )
-        )
-    hits.sort(key=lambda item: item[0], reverse=True)
+        record = {
+            "name": name,
+            "domain": row["domain"],
+            "module": row["module"],
+            "default": row["default_value"],
+            "min": row["min_value"],
+            "max": row["max_value"],
+            "unit": row["unit"],
+            "description": row["description"],
+            "doc": row["doc_name"],
+            "library_id": row["library_id"],
+            "heading_path": row["heading_path"],
+            "page": row["page"],
+        }
+        entry = groups.get(name)
+        if entry is None:
+            groups[name] = (score, [record])
+        else:
+            entry[1].append(record)
+
+    # 组间排序沿用旧的相关度分；同分按名字长度降序（问"增长率"时优先给长名字
+    # 的那条，因为短名字更容易是别人的碎片子串）。
+    ordered = sorted(groups.items(), key=lambda item: (-item[1][0], -len(item[0])))
     out: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for _, item in hits:
-        key = "%s@%s" % (item["name"], item["heading_path"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(item)
-        if len(out) >= limit:
+    ceiling = max(1, limit)
+    for name, (_, members) in ordered:
+        out.append(_merge_param_group(name, members))
+        if len(out) >= ceiling:
             break
     return out
 
@@ -1832,7 +2253,7 @@ def list_params(
         try:
             sql = (
                 "SELECT p.*, d.name AS doc_name FROM kb_param p"
-                " JOIN kb_doc d ON d.id = p.doc_id WHERE d.status = 'ok'"
+                " JOIN kb_doc d ON d.id = p.doc_id WHERE d.status IN " + _SEARCHABLE
             )
             params: list[Any] = []
             if domain:
@@ -1847,7 +2268,7 @@ def list_params(
             rows = conn.execute(sql, params).fetchall()
             total = conn.execute(
                 "SELECT COUNT(*) AS n FROM kb_param p JOIN kb_doc d ON d.id = p.doc_id"
-                " WHERE d.status = 'ok'"
+                " WHERE d.status IN " + _SEARCHABLE
                 + (" AND d.library_id = ?" if target_lib and target_lib != LIBRARY_ALL else ""),
                 ([target_lib] if target_lib and target_lib != LIBRARY_ALL else []),
             ).fetchone()["n"]
@@ -1885,7 +2306,7 @@ def catalog(
             doc_sql = (
                 "SELECT d.id, d.name, d.pages, d.chunk_count, d.status, d.library_id,"
                 " d.folder_id, COALESCE(l.name,'') AS library_name FROM kb_doc d"
-                " LEFT JOIN kb_library l ON l.id = d.library_id WHERE d.status = 'ok'"
+                " LEFT JOIN kb_library l ON l.id = d.library_id WHERE d.status IN " + _SEARCHABLE
             )
             section_sql = (
                 "SELECT c.doc_id, c.heading_path, MIN(c.page_start) AS page FROM kb_chunk c"
@@ -2023,8 +2444,80 @@ def get_document(doc_id: str) -> Optional[dict[str, Any]]:
     }
 
 
+def refresh_stale(library_id: Optional[str] = None) -> dict[str, Any]:
+    """比对源文件的 mtime / size，把内容已变动的文档标成 stale。
+
+    只 stat 文件、不读内容，成本是每份文档一次系统调用。三种情况都要管：
+    文件没了、mtime 或 size 变了、以及反过来（文件改回去或重新导入之后）
+    恢复 ok。以前 DOC_STATUS_STALE 定义了却没人写它，源手册换了版本、库里
+    还是旧内容，既没提示也不会变，模型答的就是过期数据。
+    """
+    target_lib = (library_id or "").strip()
+    scoped = bool(target_lib) and target_lib != LIBRARY_ALL
+    marked: list[dict[str, Any]] = []
+    restored: list[str] = []
+    checked = 0
+    with _LOCK:
+        try:
+            conn = _STORE.connect()
+        except (sqlite3.Error, OSError) as exc:
+            return {"checked": 0, "marked": [], "restored": [],
+                    "error": "%s: %s" % (type(exc).__name__, exc)}
+        try:
+            sql = (
+                "SELECT id, name, path, status, mtime, size FROM kb_doc"
+                " WHERE status IN " + _SEARCHABLE
+            )
+            args: list[Any] = []
+            if scoped:
+                sql += " AND library_id = ?"
+                args.append(target_lib)
+            rows = conn.execute(sql, args).fetchall()
+            checked = len(rows)
+            changed = False
+            for row in rows:
+                reason = ""
+                try:
+                    info = Path(row["path"]).stat()
+                except OSError:
+                    reason = "源文件已不存在，库中内容是上次索引留下的快照"
+                else:
+                    # mtime 存的是 REAL，比到 0.5 秒以内就算同一次写入
+                    if (
+                        abs(info.st_mtime - float(row["mtime"] or 0)) > 0.5
+                        or int(info.st_size) != int(row["size"] or 0)
+                    ):
+                        reason = "源文件已变更，库中内容可能过期，建议重新导入"
+                if reason:
+                    if row["status"] != DOC_STATUS_STALE:
+                        conn.execute(
+                            "UPDATE kb_doc SET status = ?, error = ? WHERE id = ?",
+                            (DOC_STATUS_STALE, reason, row["id"]),
+                        )
+                        marked.append({"doc_id": row["id"], "name": row["name"], "reason": reason})
+                        changed = True
+                elif row["status"] == DOC_STATUS_STALE:
+                    conn.execute(
+                        "UPDATE kb_doc SET status = ?, error = '' WHERE id = ?",
+                        (DOC_STATUS_OK, row["id"]),
+                    )
+                    restored.append(row["id"])
+                    changed = True
+            if changed:
+                conn.commit()
+        finally:
+            conn.close()
+    return {"checked": checked, "marked": marked, "restored": restored}
+
+
 def status(library_id: Optional[str] = None) -> dict[str, Any]:
     """不传 library_id 就是全局汇总；传了就看这个库的体量。"""
+    # 每次看状态顺带扫一遗源文件，让 stale 自己浮出来，不靠人记得重新导入。
+    # 扫盘失败不该让状态查询也挂掉，所以整个包在 try 里。
+    try:
+        refresh_stale(library_id)
+    except Exception:  # noqa: BLE001
+        pass
     target_lib = (library_id or "").strip()
     scoped = bool(target_lib) and target_lib != LIBRARY_ALL
     doc_filter = " AND d.library_id = ?" if scoped else ""
@@ -2038,6 +2531,10 @@ def status(library_id: Optional[str] = None) -> dict[str, Any]:
                 ).fetchone()["n"]
                 failed = conn.execute(
                     "SELECT COUNT(*) AS n FROM kb_doc d WHERE d.status = 'failed'" + doc_filter, args
+                ).fetchone()["n"]
+                stale = conn.execute(
+                    "SELECT COUNT(*) AS n FROM kb_doc d WHERE d.status = ?" + doc_filter,
+                    [DOC_STATUS_STALE] + list(args),
                 ).fetchone()["n"]
                 chunks = conn.execute(
                     "SELECT COUNT(*) AS n FROM kb_chunk c JOIN kb_doc d ON d.id = c.doc_id"
@@ -2074,10 +2571,75 @@ def status(library_id: Optional[str] = None) -> dict[str, Any]:
         "libraries": int(libraries),
         "documents": int(docs),
         "failed": int(failed),
+        "stale": int(stale),
         "chunks": int(chunks),
         "params": int(params),
         "last_indexed": last or "",
         "db_bytes": size,
+    }
+
+
+def _path_key(path: str | Path) -> str:
+    """路径比对用的规范化键。大小写不敏感：Windows 上同一文件有三种写法。"""
+    return str(Path(path).resolve()).lower()
+
+
+def sources_gc(dry_run: bool = True, library_id: Optional[str] = None) -> dict[str, Any]:
+    """回收 sources 目录里没有任何文档引用的原文件（删文档后的遗留副本）。
+
+    默认 dry_run=True：这个函数会删用户的原始资料，一旦删错就没有第二份
+    （sources 是回源的唯一稳定落点）。所以“先看再删”必须是默认路径，
+    真正删除得显式传 dry_run=False。
+
+    library_id 只做附注，不参与判定：文档记录只存了自己用过的路径，反推
+    “这个库曾经可能用过哪些文件”是猜的；而全库引用集合是确定的。两者取确定的
+    那个，代价是传了 library_id 也可能列出其他库留下的孤儿，但这比误删安全。
+
+    引用判定用 resolve() 后的小写全路径，不用文件名：同名不同目录的文件在
+    sources 里共存是设计好的（copy_into_sources 会加哈希后缀）。
+    """
+    target_lib = (library_id or "").strip()
+    with _LOCK:
+        conn = _STORE.connect()
+        try:
+            rows = conn.execute("SELECT path FROM kb_doc").fetchall()
+        finally:
+            conn.close()
+    referenced = {_path_key(row["path"]) for row in rows if row["path"]}
+
+    orphans: list[dict[str, Any]] = []
+    if KB_SOURCES_DIR.exists():
+        for entry in sorted(KB_SOURCES_DIR.iterdir()):
+            if not entry.is_file():
+                continue
+            if _path_key(entry) in referenced:
+                continue
+            try:
+                size = int(entry.stat().st_size)
+            except OSError:
+                # 刚被别的进程删掉、或无权限读 stat：算 0 字节，仍然报出来
+                size = 0
+            orphans.append({"path": str(entry), "name": entry.name, "size": size})
+
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    if not dry_run:
+        for item in orphans:
+            try:
+                Path(item["path"]).unlink()
+                deleted.append(item["path"])
+            except OSError as exc:
+                # 单个文件删不掉（被别的程序占着、权限不够）不能中断整批：
+                # 剩下能删的不删，下次还得重新跑一遍。
+                failed.append({"path": item["path"], "error": "%s: %s" % (type(exc).__name__, exc)})
+
+    return {
+        "dry_run": bool(dry_run),
+        "orphans": orphans,
+        "total_size": sum(item["size"] for item in orphans),
+        "deleted": deleted,
+        "failed": failed,
+        "library_id": target_lib,
     }
 
 

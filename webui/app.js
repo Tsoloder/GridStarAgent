@@ -85,6 +85,8 @@ const el = {
   kbLibSelect: $("#kb-lib-select"), kbLibNew: $("#kb-lib-new"),
   kbLibRename: $("#kb-lib-rename"), kbLibDelete: $("#kb-lib-delete"),
   kbQuery: $("#kb-query"), kbSearchBtn: $("#kb-search-btn"), kbSearchResult: $("#kb-search-result"),
+  kbGc: $("#kb-gc"), kbReportBtn: $("#kb-report-btn"),
+  kbReportDays: $("#kb-report-days"), kbReport: $("#kb-report"),
   kbSelect: $("#kb-select"), kbTrigger: $("#kb-trigger"), kbLabel: $("#kb-label"), kbListbox: $("#kb-listbox"),
 };
 el.phasePanel.addEventListener("click", event => {
@@ -3439,6 +3441,73 @@ function renderKbSearch(data) {
   }
   el.kbSearchResult.innerHTML = parts.join("");
 }
+// --- 检索日志报表：零命中 / 低覆盖 / 高频 ---
+async function kbRunReport() {
+  if (!el.kbReport || !el.kbReportBtn) return;
+  const days = el.kbReportDays ? el.kbReportDays.value : "30";
+  el.kbReportBtn.disabled = true;
+  el.kbReport.innerHTML = '<div class="listbox-empty">统计中…</div>';
+  try {
+    const data = await request(`/kb/query/report?days=${encodeURIComponent(days)}`);
+    renderKbReport(data);
+  } catch (error) {
+    el.kbReport.innerHTML = `<div class="listbox-empty">统计失败：${escapeHtml(error.message)}</div>`;
+  } finally {
+    el.kbReportBtn.disabled = false;
+  }
+}
+function renderKbReport(data) {
+  const empty = data.empty || [], frequent = data.frequent || [], low = data.low_coverage || [];
+  if (!data.total) {
+    el.kbReport.innerHTML = '<div class="listbox-empty">这段时间还没有检索记录。在对话里问几个手册相关的问题，或者用上面的检索试跑几次，再回来看。</div>';
+    return;
+  }
+  const parts = [`<div class="kb-result-head">${escapeHtml(String(data.total))} 次检索 · 最近 ${escapeHtml(String(data.days))} 天</div>`];
+  if (empty.length) {
+    parts.push('<div class="kb-result-head">查不到（可能缺资料，也可能问法不同）</div>');
+    parts.push(empty.map(row => `<div class="kb-result-card"><div class="kb-result-title">${escapeHtml(row.query)}<span class="kb-result-tag">${escapeHtml(String(row.count))} 次</span></div><p>一条都没命中。先确认手册里是不是换了说法，再决定补资料还是补别名。</p></div>`).join(""));
+  }
+  if (low.length) {
+    parts.push('<div class="kb-result-head">命中了但没对上重点</div>');
+    parts.push(low.map(row => `<div class="kb-result-card"><div class="kb-result-title">${escapeHtml(row.query)}<span class="kb-result-tag">覆盖 ${Math.round((row.coverage || 0) * 100)}%</span></div><p>最好的结果也只覆盖了这么点查询词，排序或分词可能要调。</p><span class="kb-result-src">${escapeHtml(row.doc || "")}</span></div>`).join(""));
+  }
+  if (frequent.length) {
+    parts.push('<div class="kb-result-head">问得最多</div>');
+    parts.push(frequent.map(row => `<div class="kb-result-card"><div class="kb-result-title">${escapeHtml(row.query)}<span class="kb-result-tag">${escapeHtml(String(row.count))} 次</span></div><p>平均命中 ${escapeHtml(String(row.avg_hits == null ? 0 : row.avg_hits))} 条。高频问题值得优先补资料或调优。</p></div>`).join(""));
+  }
+  el.kbReport.innerHTML = parts.join("");
+}
+// --- 清理未被引用的源文件：先看清单，确认后才删 ---
+async function kbCleanSources() {
+  if (!el.kbGc) return;
+  el.kbGc.disabled = true;
+  try {
+    const preview = await request("/kb/sources/gc");
+    const orphans = preview.orphans || [];
+    if (!orphans.length) {
+      showToast("sources 目录里没有可清理的文件");
+      return;
+    }
+    const size = formatSize(preview.total_size || 0);
+    const names = orphans.slice(0, 6).map(item => item.name).join("、");
+    const more = orphans.length > 6 ? "…" : "";
+    const ok = await showDialog({
+      title: `清理 ${orphans.length} 个源文件（${size}）`,
+      message: `这些文件在 sources 目录里但没有任何文档引用，通常是删掉文档后留下的副本：${names}${more}。删除后无法恢复。`,
+      confirmText: "删除",
+      danger: true,
+    });
+    if (!ok) return;
+    const result = await request("/kb/sources/gc", {method: "POST", body: JSON.stringify({confirm: true})});
+    const deleted = (result.deleted || []).length;
+    const failed = (result.failed || []).length;
+    showToast(`已清理 ${deleted} 个文件${failed ? `，${failed} 个删除失败` : ""}`);
+  } catch (error) {
+    showToast(`清理失败：${error.message}`);
+  } finally {
+    el.kbGc.disabled = false;
+  }
+}
 // --- 知识库的新建 / 重命名 / 删除 / 切换 ---
 async function kbCreateLibrary() {
   const name = await showDialog({
@@ -5065,6 +5134,8 @@ if (el.kbFolderRename) el.kbFolderRename.onclick = kbRenameFolder;
 if (el.kbFolderDelete) el.kbFolderDelete.onclick = kbDeleteFolder;
 if (el.kbTrigger) el.kbTrigger.onclick = () => (kbState.listOpen ? closeKbList() : openKbList());
 if (el.kbSearchBtn) el.kbSearchBtn.onclick = kbRunSearch;
+if (el.kbReportBtn) el.kbReportBtn.onclick = kbRunReport;
+if (el.kbGc) el.kbGc.onclick = kbCleanSources;
 if (el.kbQuery) el.kbQuery.onkeydown = event => { if (event.key === "Enter") { event.preventDefault(); kbRunSearch(); } };
 if (el.kbDocs) {
   el.kbDocs.addEventListener("dragstart", event => {

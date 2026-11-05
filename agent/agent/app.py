@@ -807,6 +807,42 @@ async def kb_optimize():
     return _kb_call(lambda: {"optimized": kb_index.optimize()})
 
 
+@app.get("/kb/sources/gc")
+async def kb_sources_gc_preview(library_id: str = ""):
+    """只报告 sources 里没被任何文档引用的源文件，不动磁盘。
+
+    设置页的「清理源文件」先走这条看一眼清单，确认了才走 POST。删源文件
+    没有第二份可恢复，所以默认路径必须是仅报告。
+    """
+    return _kb_call(kb_index.sources_gc, dry_run=True,
+                    library_id=library_id or None)
+
+
+@app.post("/kb/sources/gc")
+async def kb_sources_gc_purge(body: dict = None):
+    """真删孤儿源文件。必须显式 confirm，防止误触或脚本误调。"""
+    payload = body or {}
+    if payload.get("confirm") is not True:
+        return JSONResponse(
+            {"error": "删除源文件需要显式确认（confirm=true）", "code": "kb_needs_confirm"},
+            status_code=400,
+        )
+    return _kb_call(kb_index.sources_gc, dry_run=False,
+                    library_id=str(payload.get("library_id") or "") or None)
+
+
+@app.get("/kb/query/report")
+async def kb_query_report(days: int = 30, limit: int = 20):
+    """检索日志报表：零命中 / 高频 / 低覆盖率三组。
+
+    零命中不等于资料没有，也可能是问法和手册用词不一样；低覆盖率则是
+    命中了但没对上重点。两种问题得靠这批数据才分得开。
+    """
+    days = max(1, min(3650, int(days or 30)))
+    limit = max(1, min(100, int(limit or 20)))
+    return _kb_call(kb_index.query_report, days=days, limit=limit)
+
+
 @app.get("/config")
 async def get_config():
     if current_config is None:

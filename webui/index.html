@@ -239,6 +239,7 @@
             <input id="kb-file-input" type="file" multiple hidden accept=".pdf,.txt,.md,.docx,.xlsx,.doc,.xls">
             <input id="kb-dir" class="kb-dir-input" type="text" spellcheck="false" placeholder="导入本机目录，如 D:\资料\GridStar手册">
             <button id="kb-import-dir" class="secondary" type="button">导入目录</button>
+            <button id="kb-gc" class="secondary" type="button" title="清理删文档后留在 sources 目录里的源文件副本">清理源文件</button>
           </div>
           <div id="kb-cards" class="kb-cards"></div>
           <div class="kb-body">
@@ -269,6 +270,19 @@
               <button id="kb-search-btn" class="secondary" type="button">检索</button>
             </div>
             <div id="kb-search-result" class="kb-search-result"></div>
+          </section>
+          <section class="kb-section">
+            <div class="kb-head"><span class="eyebrow">检索日志</span><h3>问题分布</h3></div>
+            <p class="kb-hint">每次检索都会记一条。零命中说明资料里可能没有，或者问法和手册用词不一样；覆盖率很低说明命中了但没对上重点。这两类以前分不开。</p>
+            <div class="kb-search-row">
+              <select id="kb-report-days" class="kb-lib-select" aria-label="统计范围">
+                <option value="7">最近 7 天</option>
+                <option value="30" selected>最近 30 天</option>
+                <option value="90">最近 90 天</option>
+              </select>
+              <button id="kb-report-btn" class="secondary" type="button">生成报表</button>
+            </div>
+            <div id="kb-report" class="kb-search-result"></div>
           </section>
         </div>
         <div id="panel-usage" class="settings-panel usage-panel hidden" role="tabpanel" aria-labelledby="tab-usage">
