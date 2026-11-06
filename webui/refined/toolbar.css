@@ -179,3 +179,44 @@ textarea#message-input::placeholder { color: var(--muted-2); }
   background: var(--warn-tint);
   font-size: 11.5px;
 }
+
+/* ============================================================
+   图标悬停：线条被重画一遍
+   · 长度由 app.js 用 getTotalLength() 现量，写进内联 dasharray 与 --draw-len，
+     不依赖 SVG 的 pathLength 归一化，也不用属性选择器。
+   · 只有被 JS 标过 .drawable 的图元才参与；动态图标漏标就是不动，不会出半截虚线。
+   · 不改位置也不改尺寸，只让笔画重新走一遍。
+   · 只对真鼠标设备生效，触摸屏与键盘焦点不参与。
+   ============================================================ */
+@media (hover: hover) and (pointer: fine) {
+  :is(.attach, .settings-button, #new-session, .session-actions button, .theme-trigger, .session-trigger):hover svg .drawable,
+  :is(.voice, .send):hover:not(:disabled) svg .drawable {
+    animation: gsIconDraw .75s ease-out both;
+  }
+
+  /* 多段路径依次起笔：120ms 一档，像一支笔从第一笔写到最后一笔 */
+  :is(.attach, .settings-button, #new-session, .session-actions button, .theme-trigger, .session-trigger):hover svg .drawable:nth-child(2),
+  :is(.voice, .send):hover:not(:disabled) svg .drawable:nth-child(2) {
+    animation-delay: .12s;
+  }
+
+  :is(.attach, .settings-button, #new-session, .session-actions button, .theme-trigger, .session-trigger):hover svg .drawable:nth-child(3),
+  :is(.voice, .send):hover:not(:disabled) svg .drawable:nth-child(3) {
+    animation-delay: .24s;
+  }
+
+  :is(.attach, .settings-button, #new-session, .session-actions button, .theme-trigger, .session-trigger):hover svg .drawable:nth-child(4),
+  :is(.voice, .send):hover:not(:disabled) svg .drawable:nth-child(4) {
+    animation-delay: .36s;
+  }
+}
+
+@keyframes gsIconDraw {
+  from { stroke-dashoffset: var(--draw-len, 0); }
+  to { stroke-dashoffset: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :is(.attach, .settings-button, #new-session, .session-actions button, .theme-trigger, .session-trigger):hover svg .drawable,
+  :is(.voice, .send):hover:not(:disabled) svg .drawable { animation: none; }
+}

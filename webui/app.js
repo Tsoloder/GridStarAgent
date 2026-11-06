@@ -2368,7 +2368,7 @@ function renderSessions() {
     // 状态徽标：进行中/已完成/已停止/异常（已完成常驻，直到该会话再次发消息）
     const status = sessionStatus(session);
     const badge = status ? `<i class="session-badge ${status}">${STATUS_TEXT[status]}</i>` : "";
-    row.innerHTML = `<button class="session-select" type="button"><span class="session-text"><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(String(session.updated_at || session.created_at || "").slice(0,16).replace("T"," "))}</small></span>${badge}</button><div class="session-actions"><button class="rename" type="button" title="重命名">✎</button><button class="clear" type="button" title="清空">⌫</button><button class="danger delete" type="button" title="删除">×</button></div>`;
+    row.innerHTML = `<button class="session-select" type="button"><span class="session-text"><strong>${escapeHtml(session.title || "未命名会话")}</strong><small>${escapeHtml(String(session.updated_at || session.created_at || "").slice(0,16).replace("T"," "))}</small></span>${badge}</button><div class="session-actions"><button class="rename" type="button" title="重命名"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.8 2.2l3 3L6 13H3v-3z"/></svg></button><button class="clear" type="button" title="清空"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 13.5h11"/><path d="M6 13.5l-3-3L9.4 4l3 3z"/></svg></button><button class="danger delete" type="button" title="删除"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 4l8 8"/><path d="M12 4l-8 8"/></svg></button></div>`;
     $(".session-select", row).onclick = () => loadSession(session.id);
     $(".rename", row).onclick = () => renameSession(session);
     $(".clear", row).onclick = () => clearSession(session);
@@ -6034,3 +6034,37 @@ document.addEventListener("click", event => {
   if (!themeListbox.classList.contains("hidden") && !event.target.closest("#theme-switch")) setThemeListOpen(false);
 });
 applyTheme(document.documentElement.dataset.theme || "dark");
+
+/* ---- 图标描边重画：长度用 getTotalLength() 现量，写进内联 dasharray 与 --draw-len。
+   不依赖 SVG 的 pathLength 归一化，也不用属性选择器，量多少就画多少。
+   只有被这里标过 .drawable 的图元才参与，动态图标漏标就是不动，不会出现半截虚线。 ---- */
+const DRAW_SCOPES = ".attach svg, .settings-button svg, .voice svg, .send svg, #new-session svg, .session-actions button svg, .theme-trigger .chevron, .session-trigger .chevron";
+const DRAW_SHAPES = "path, circle, line, rect, polyline, polygon, ellipse";
+function primeDrawIcons(root) {
+  const scope = root || document;
+  const svgs = [];
+  if (scope.matches && scope.matches(DRAW_SCOPES)) svgs.push(scope);
+  scope.querySelectorAll(DRAW_SCOPES).forEach(svg => svgs.push(svg));
+  svgs.forEach(svg => {
+    svg.querySelectorAll(DRAW_SHAPES).forEach(shape => {
+      if (shape.classList.contains("drawable")) return;
+      if (typeof shape.getTotalLength !== "function") return;
+      let len = 0;
+      try { len = shape.getTotalLength(); } catch (error) { return; }
+      if (!len) return;
+      const precise = Math.round(len * 100) / 100;
+      shape.style.strokeDasharray = precise + " " + precise;
+      shape.style.setProperty("--draw-len", String(precise));
+      shape.classList.add("drawable");
+    });
+  });
+}
+// 动态插入的图标（发送/停止切换、会话列表重绘）补齐标记；消息区不参与，省得流式输出时反复扫描
+new MutationObserver(records => {
+  records.forEach(record => record.addedNodes.forEach(node => {
+    if (node.nodeType !== 1) return;
+    if (node.closest && (node.closest("#messages") || node.closest(".markdown"))) return;
+    primeDrawIcons(node);
+  }));
+}).observe(document.body, {childList: true, subtree: true});
+primeDrawIcons(document);

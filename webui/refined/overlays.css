@@ -23,6 +23,8 @@
 
 .session-row { border-bottom: 1px solid rgba(255, 255, 255, .035); }
 .session-row:last-child { border-bottom: 0; }
+/* 会话行操作按钮用 12px 描边图标，与全站图标同一套笔画语言 */
+.session-actions button svg { display: block; width: 12px; height: 12px; }
 
 .session-select { border-radius: var(--radius-sm); transition: background var(--dur) var(--ease); }
 .session-select:hover { background: rgba(255, 255, 255, .04); }
