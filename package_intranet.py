@@ -200,8 +200,11 @@ def download_wheels(wheel_dir: Path, pyver: str, platform: str) -> int:
     # sdist-only 的包：下载源码包并构建成 wheel，已构建过的跳过（重复跑不必再来一次）
     for pkg in SDIST_ONLY:
         prefixes = _name_prefixes(pkg)
-        if any(wheel_dir.glob(f"{p}-*.whl") for p in prefixes):
+        hits = [w.name for p in prefixes for w in wheel_dir.glob(f"{p}-*.whl")]
+        if hits:
+            print(f"   sdist-only: {pkg} 已有 wheel（{', '.join(hits)}），跳过")
             continue
+        print(f"   sdist-only: {pkg} 取源码包并就地构建 wheel")
         got = subprocess.run(
             [sys.executable, "-m", "pip", "download", pkg, "--no-deps",
              "--no-binary=:all:", "-d", str(wheel_dir)],
