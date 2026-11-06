@@ -67,18 +67,18 @@
 }
 .messages::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, .18); }
 
-/* 浅色主题下把"白色叠加"换回黑色叠加，避免发脏 */
-:root[data-theme="silver"] .turn-card.assistant,
-:root[data-theme="blue"] .turn-card.assistant {
+/* 浅色主题下把"白色叠加"换回黑色叠加，避免发脏。
+   只对银白生效：蔚蓝是深色主题（沿用早已定稿的蓝黑配色），
+   卡片底色回到 cards.css 里的 --card-solid / --card-solid-2，
+   不能再被这里的白底压成"白卡配浅字"。 */
+:root[data-theme="silver"] .turn-card.assistant {
   background: #ffffff;
   border-color: rgba(16, 24, 32, .07);
 }
 
-:root[data-theme="silver"] .turn-card,
-:root[data-theme="blue"] .turn-card { background: #fff; }
+:root[data-theme="silver"] .turn-card { background: #fff; }
 
-:root[data-theme="silver"] .controls .model-control:hover,
-:root[data-theme="blue"] .controls .model-control:hover { background: rgba(16, 24, 32, .05); }
+:root[data-theme="silver"] .controls .model-control:hover { background: rgba(16, 24, 32, .05); }
 
 /* ---------- 15. 过程区（思考 / 工具）降到背景层 ---------- */
 .turn-process { padding: 4px 16px 0; }

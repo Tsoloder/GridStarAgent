@@ -97,8 +97,10 @@
   --code-text: #a8d4e6;
 }
 
-/* 银白沿用旧版浅色调色板；蔚蓝恢复 refined 层引入之前的那套蓝黑默认配色
-   （style.css 里 :root 的老值），深色仍是上面的中性冷黑，三套互不重叠 */
+/* 银白沿用旧版浅色调色板。
+   蔚蓝＝refined 层引入之前那套蓝黑深色（style.css 里 :root 的老值，10 月底定稿那版），
+   一色不改地搬过来；style.css 顶部那份 :root[data-theme="blue"] 旧浅色值作废，
+   由本块全量覆盖。谁再调 CSS 加载顺序，必须先删掉那份浅色残留。 */
 :root[data-theme="silver"] {
   color-scheme: light;
   --bg: #f6f7f9;
